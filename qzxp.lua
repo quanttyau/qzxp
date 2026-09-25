@@ -2,9 +2,59 @@
 --          LEAKED EAGLE HUB FOR BASICALLY EVERYTHING
 --          ANGELI FOR AUTOPARRY AND TRIGGERBOT
 
-local function GetSafeUIParent()
-    return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+-- ============================================================
+-- UI PARENT RESOLUTION (CoreGui-preferred, executor-safe)
+--   1. gethui()   — executor's protected UI folder (best, invisible to game)
+--   2. CoreGui    — Roblox CoreGui (write-probed so a locked CoreGui is skipped)
+--   3. PlayerGui  — fallback
+-- ============================================================
+local UI_PARENT, UI_PARENT_KIND
+
+do
+    local _env = (getgenv and getgenv()) or _G or {}
+
+    -- 1) executor hidden UI
+    local ok1, hui = pcall(function()
+        return _env.gethui and _env.gethui()
+    end)
+    if ok1 and hui then
+        UI_PARENT = hui
+        UI_PARENT_KIND = "gethui"
+    end
+
+    -- 2) CoreGui (only if actually writable)
+    if not UI_PARENT then
+        local ok2, cg = pcall(function()
+            return game:GetService("CoreGui")
+        end)
+        if ok2 and cg then
+            local writable = pcall(function()
+                local probe = Instance.new("Folder")
+                probe.Name = "__ui_probe__"
+                probe.Parent = cg
+                probe:Destroy()
+            end)
+            if writable then
+                UI_PARENT = cg
+                UI_PARENT_KIND = "CoreGui"
+            end
+        end
+    end
+
+    -- 3) PlayerGui fallback
+    if not UI_PARENT then
+        UI_PARENT = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+        UI_PARENT_KIND = "PlayerGui"
+    end
 end
+
+local function GetSafeUIParent()
+    return UI_PARENT
+end
+
+-- also expose for reloads / external use
+getgenv().qzxp_UIParent     = UI_PARENT
+getgenv().qzxp_UIParentKind = UI_PARENT_KIND
 
 -- [[ VFX HOOK CLEANUP — prevent duplication on reload ]]
 pcall(function()
@@ -26,10 +76,24 @@ getgenv().qzxp_VFXDisabled = {}
 task.spawn(function()
 
 local function PatchCoreGui(str)
-    return str
-        :gsub('game:GetService("CoreGui")', 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")')
-        :gsub("game:GetService('CoreGui')", "game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui')")
-        :gsub('game.CoreGui', 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")')
+    -- If we already resolved to CoreGui, nothing to patch.
+    if UI_PARENT_KIND == "CoreGui" then
+        return str
+    end
+    -- Otherwise rewrite CoreGui references to whatever we resolved to.
+    local replacement
+    if UI_PARENT_KIND == "gethui" then
+        -- gethui() isn't reachable from a plain string, so bind the
+        -- already-resolved parent via a global the loader can read.
+        replacement = '(getgenv().qzxp_UIParent or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"))'
+    else
+        replacement = 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")'
+    end
+    return (str
+        :gsub('game:GetService%("CoreGui"%)', replacement)
+        :gsub("game:GetService%('CoreGui'%)", replacement)
+        :gsub("game%.CoreGui", replacement)
+    )
 end
 
 local Fluent = loadstring(PatchCoreGui(game:HttpGet("https://raw.githubusercontent.com/discoart/FluentPlus/refs/heads/main/Beta.lua")))()
@@ -1195,7 +1259,7 @@ local function MakeDrag(handle, frame)
 end
 
 local KBShow = false
-local kbGui = Instance.new("ScreenGui"); kbGui.Name = "q_KB"; kbGui.ResetOnSpawn = false; kbGui.IgnoreGuiInset = true; kbGui.DisplayOrder = 100; kbGui.Parent = CoreGui
+local bsGui = Instance.new("ScreenGui"); bsGui.Name = "q_BS"; bsGui.ResetOnSpawn = false; bsGui.IgnoreGuiInset = true; bsGui.DisplayOrder = 100; bsGui.Parent = CoreGui
 local kbF = Instance.new("Frame"); kbF.Size = UDim2.new(0, 220, 0, 200); kbF.Position = UDim2.new(1, -235, 0.5, -100); kbF.BackgroundColor3 = Color3.fromRGB(25, 25, 25); kbF.BackgroundTransparency = 0.15; kbF.Visible = false; kbF.Parent = kbGui
 Instance.new("UICorner", kbF).CornerRadius = UDim.new(0, 6)
 local kbS = Instance.new("UIStroke"); kbS.Color = Color3.fromRGB(60, 60, 60); kbS.Thickness = 1; kbS.Parent = kbF
