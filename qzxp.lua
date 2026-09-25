@@ -928,6 +928,23 @@ local SpamRPS = 100
 local SpamInt = 0.01
 local SpamDetect = true
 
+-- RPS counter (rolling 1-second window)
+local _rpsCount = 0
+local _rpsWindowStart = os.clock()
+local _rpsDisplay = 0
+
+local function _bumpRPS()
+    _rpsCount += 1
+    local now = os.clock()
+    if now - _rpsWindowStart >= 0.2 then
+        _rpsDisplay = _rpsCount
+        _rpsCount = 0
+        _rpsWindowStart = now
+    end
+end
+
+getgenv()._getRPS = function() return _rpsDisplay end
+
 local function spamOk()
     if not SpamDetect then return true end
     if InfDet and InfOn then return false end
@@ -942,35 +959,62 @@ end
 -- was unreachable. This schedules on the render tick and fires
 -- floor(acc / interval) times, so the rate stays exact regardless
 -- of framerate.
-local timeAccumulator = 0
+-- FPS-independent spam loop.
+-- Runs on its own task, paced by os.clock() (wall time), not the render
+-- pipeline. Fires as fast as the Lua scheduler + remote will allow,
+-- regardless of framerate. Also runs N parallel workers so a single
+-- task's yield points don't bottleneck the rate.
+local SPAM_WORKERS = 3
 
-RunService.RenderStepped:Connect(function(dt)
-    if not Spam_On then timeAccumulator = 0 return end
+local function spamWorker()
+    local nextFire = os.clock()
+    while true do
+        if not Spam_On then
+            task.wait(0.05)
+            nextFire = os.clock()
+            continue
+        end
 
-    local char = LocalPlayer.Character
-    if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild('SingularityCape') then
-        timeAccumulator = 0
-        return
-    end
+        local char = LocalPlayer.Character
+        if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild('SingularityCape') then
+            task.wait(0.02)
+            nextFire = os.clock()
+            continue
+        end
 
-    if not spamOk() then timeAccumulator = 0 return end
+        if not spamOk() then
+            task.wait(0.02)
+            nextFire = os.clock()
+            continue
+        end
 
-    local interval = (SpamInt and SpamInt > 0) and SpamInt or 0.01
-    timeAccumulator += dt
-    if timeAccumulator >= interval then
-        local fires = math.floor(timeAccumulator / interval)
-        timeAccumulator -= fires * interval
-        if timeAccumulator > interval * 2 then timeAccumulator = 0 end
-        if fires > 200 then fires = 200 end
-        for _ = 1, fires do
+        local interval = (SpamInt and SpamInt > 0) and SpamInt or 0.01
+        local now = os.clock()
+
+        -- If we've fallen behind, resync instead of bursting
+        if now - nextFire > interval * 4 then
+            nextFire = now
+        end
+
+        if now >= nextFire then
             local ball = getBall()
             if ball then
                 if AnimFix_Spam then PlayParryAnim() end
                 fireRemote(ball)
+                _bumpRPS()
             end
+            nextFire += interval
+        else
+            -- Yield only as long as needed, capped so we stay responsive
+            local sleep = math.min(nextFire - now, 0.001)
+            if sleep > 0 then task.wait(sleep) else task.wait() end
         end
     end
-end)
+end
+
+for _ = 1, SPAM_WORKERS do
+    task.spawn(spamWorker)
+end
 
 -- ============================================================
 -- SWORD CHANGER CORE INTERFACES
@@ -1290,6 +1334,7 @@ local function keyStr(o) if not o then return "?" end; local v = o.Value; return
 local kbItems = {
     {n = "AP", k = function() return keyStr(Options and Options.APKey) end, s = function() return AP_On end},
     {n = "Spam", k = function() return keyStr(Options and Options.SpamKey) end, s = function() return Spam_On end},
+    {n = "RPS", k = function() return (getgenv()._getRPS and getgenv()._getRPS()) or 0 end, s = function() return Spam_On end, raw = true},
     {n = "TB", k = function() return keyStr(Options and Options.TBKey) end, s = function() return TB_On end},
     {n = "Lock", k = function() return keyStr(Options and Options.LockKey) end, s = function() return LockEnabled end},
 }
@@ -1323,7 +1368,12 @@ RunService.RenderStepped:Connect(function()
     kbF.Visible = KBShow
     if KBShow then
         for i, it in ipairs(kbItems) do
-            local s = it.s(); local k = it.k()
+            if it.raw then
+                -- RPS row: no ket, just live count
+                local col = s and "#4cd964" or "#888888"
+                kbL[i].RichText = true
+                kbL[i].Text = string.format("<font color='%s'>%s: %s/s</font>", col, it.n, tostring(k))
+            else
             local sc = s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>"
             kbL[i].RichText = true; kbL[i].Text = string.format("[%s] %s %s", k, it.n, sc)
         end
