@@ -358,11 +358,16 @@ local function PlayParryAnim()
     end
     if not anim then return end
 
-    -- Stop existing parry tracks
+    -- Fully stop & reset any existing parry/grab tracks BEFORE replaying.
+    -- Stop(0) + TimePosition reset prevents the 2nd parry from blending
+    -- from wherever the 1st left off (the "weird sword" snap).
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
         if track.Name == "GrabParry" or track.Name == "Grab" or track.Name == "SuccessParry" or track.Name == "Success" then
-            track.TimePosition = 0
-            pcall(function() track:Stop(0.1) end)
+            pcall(function()
+                track:Stop(0)
+                track.TimePosition = 0
+                track:AdjustSpeed(1)
+            end)
         end
     end
 
@@ -373,10 +378,18 @@ local function PlayParryAnim()
         if not ok or not t then return end
         track = t
         track.Looped = false
+        track.Priority = Enum.AnimationPriority.Action4
         TrackCache[anim] = track
     end
 
-    pcall(function() track:Play(0, 1, 1) end)
+    -- Reset the cached track itself too. Without this, reusing the track
+    -- on the next parry resumes from its old TimePosition -> sword snap.
+    pcall(function()
+        track:Stop(0)
+        track.TimePosition = 0
+        track:AdjustSpeed(1)
+        track:Play(0, 1, 1)
+    end)
 end
 
 local function StopGrabAnimations()
@@ -389,7 +402,10 @@ local function StopGrabAnimations()
         if not animator then return end
         for _, track in pairs(animator:GetPlayingAnimationTracks()) do
             if track.Name == "GrabParry" or track.Name == "Grab" then
-                pcall(function() track:Stop(0.1) end)
+                pcall(function()
+                    track:Stop(0)
+                    track.TimePosition = 0
+                end)
             end
         end
     end)
