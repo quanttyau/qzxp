@@ -1368,14 +1368,18 @@ RunService.RenderStepped:Connect(function()
     kbF.Visible = KBShow
     if KBShow then
         for i, it in ipairs(kbItems) do
+            local s = it.s()
+            local k = it.k()
             if it.raw then
-                -- RPS row: no ket, just live count
+                -- RPS row: no key, just live count
                 local col = s and "#4cd964" or "#888888"
                 kbL[i].RichText = true
                 kbL[i].Text = string.format("<font color='%s'>%s: %s/s</font>", col, it.n, tostring(k))
             else
-            local sc = s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>"
-            kbL[i].RichText = true; kbL[i].Text = string.format("[%s] %s %s", k, it.n, sc)
+                local sc = s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>"
+                kbL[i].RichText = true
+                kbL[i].Text = string.format("[%s] %s %s", k, it.n, sc)
+            end
         end
     end
 
