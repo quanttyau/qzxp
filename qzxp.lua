@@ -654,17 +654,12 @@ local function fireRemote(ball)
 
     if ball then
         parryLockouts[ball] = os.clock()
-        local startT = os.clock()
-        task.spawn(function()
-            while os.clock() - startT < 0.4 do
-                if not ball or not ball.Parent then break end
-                if ball:GetAttribute("target") ~= LocalPlayer.Name then
-                    parryLockouts[ball] = nil
-                    return
-                end
-                task.wait(0.02)
+        local changedConn
+        changedConn = ball:GetAttributeChangedSignal("target"):Connect(function()
+            if ball:GetAttribute("target") ~= LocalPlayer.Name then
+                parryLockouts[ball] = nil
+                changedConn:Disconnect()
             end
-            parryLockouts[ball] = nil
         end)
     end
 end
@@ -701,174 +696,87 @@ end)
 local InfOn, DSOn, THOn, SFOn = false, false, false, false
 local InfDet, DSDet, THDet, SFDet = false, false, false, false
 
--- Detection helper: check if a value refers to the local player
-local function isLocalPlayer(v)
-    if v == nil then return false end
-    if v == LocalPlayer then return true end
-    if typeof(v) == "Instance" then
-        if v == LocalPlayer.Character then return true end
-        if v:IsA("Player") and v == LocalPlayer then return true end
-        if v.Name == LocalPlayer.Name then return true end
-    end
-    if type(v) == "string" and v == LocalPlayer.Name then return true end
-    return false
-end
-
--- Deep scan args for any reference to local player
-local function argsMentionLocal(...)
-    local args = {...}
-    for _, a in ipairs(args) do
-        if isLocalPlayer(a) then return true end
-        if type(a) == "table" then
-            for _, v in pairs(a) do
-                if isLocalPlayer(v) then return true end
-            end
-        end
-    end
-    return false
-end
-
--- ============================================================
--- DETECTION: Death Ball / Infinity Ball (via Remotes)
--- ============================================================
 pcall(function()
-    local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
-    if not remotes then return end
-
-    local deathBall = remotes:FindFirstChild("DeathBall")
-    if deathBall and deathBall:IsA("RemoteEvent") then
-        deathBall.OnClientEvent:Connect(function(...)
-            -- DeathBall fires with (player, bool) typically; if bool is true it's active
-            local args = {...}
-            local active = false
-            for _, a in ipairs(args) do
-                if type(a) == "boolean" then active = a end
-            end
-            if argsMentionLocal(...) or #args == 0 then
-                DSOn = active
-            end
-        end)
-    end
-
-    local infBall = remotes:FindFirstChild("InfinityBall")
-    if infBall and infBall:IsA("RemoteEvent") then
-        infBall.OnClientEvent:Connect(function(...)
-            local args = {...}
-            local active = false
-            for _, a in ipairs(args) do
-                if type(a) == "boolean" then active = a end
-            end
-            if argsMentionLocal(...) or #args == 0 then
-                InfOn = active
-            end
-        end)
-    end
+    ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_, d) DSOn = d or false end)
+    ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, b) InfOn = b or false end)
+end)
+pcall(function()
+    local net = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
+    net["RE/TimeHoleActivate"].OnClientEvent:Connect(function(...) local a = {...}; if a[1] == LocalPlayer or (a[1] and a[1].Name == LocalPlayer.Name) then THOn = true end end)
+    net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function() THOn = false end)
+    net["RE/SlashesOfFuryActivate"].OnClientEvent:Connect(function(...) local a = {...}; if a[1] == LocalPlayer or (a[1] and a[1].Name == LocalPlayer.Name) then SFOn = true end end)
+    net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function() SFOn = false end)
 end)
 
--- ============================================================
--- DETECTION: Time Hole / Slashes of Fury (via net package)
--- ============================================================
-pcall(function()
-    local packages = ReplicatedStorage:WaitForChild("Packages", 10)
-    if not packages then return end
-    local index = packages:FindFirstChild("_Index")
-    if not index then return end
-    local netPkg = index:FindFirstChild("sleitnick_net@0.1.0")
-    if not netPkg then return end
-    local net = require(netPkg.net)
+local function isApproachingPlayer(ball, rootPos)
+    local z = ball:FindFirstChild('zoomies')
+    if not z then return false end
+    local v = z.VectorVelocity
+    if v.Magnitude < 1 then return false end
+    return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
+end
 
-    local function hookNet(name, onFn, offFn)
-        local ev = net[name]
-        if not ev then return end
-        if ev.OnClientEvent then
-            ev.OnClientEvent:Connect(function(...)
-                if argsMentionLocal(...) or select("#", ...) == 0 then
-                    onFn()
-                end
-            end)
+RunService.PreSimulation:Connect(function()
+    if not AP_On then return end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local balls = getAllBalls()
+    local rootPos = root.Position
+
+    for _, ball in pairs(balls) do
+        if not ball then continue end
+        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.35 then
+            continue
         end
-        if offFn and net[name:gsub("Activate", "Deactivate")] then
-            net[name:gsub("Activate", "Deactivate")].OnClientEvent:Connect(function(...)
-                offFn()
-            end)
-        elseif offFn and net[name:gsub("Activate", "End")] then
-            net[name:gsub("Activate", "End")].OnClientEvent:Connect(function(...)
-                offFn()
-            end)
-        end
-    end
 
-    -- Time Hole
-    if net["RE/TimeHoleActivate"] and net["RE/TimeHoleActivate"].OnClientEvent then
-        net["RE/TimeHoleActivate"].OnClientEvent:Connect(function(...)
-            if argsMentionLocal(...) or select("#", ...) == 0 then
-                THOn = true
-            end
-        end)
-    end
-    if net["RE/TimeHoleDeactivate"] and net["RE/TimeHoleDeactivate"].OnClientEvent then
-        net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function()
-            THOn = false
-        end)
-    end
+        local z = ball:FindFirstChild('zoomies')
+        if not z then continue end
 
-    -- Slashes of Fury
-    if net["RE/SlashesOfFuryActivate"] and net["RE/SlashesOfFuryActivate"].OnClientEvent then
-        net["RE/SlashesOfFuryActivate"].OnClientEvent:Connect(function(...)
-            if argsMentionLocal(...) or select("#", ...) == 0 then
-                SFOn = true
-            end
-        end)
-    end
-    if net["RE/SlashesOfFuryEnd"] and net["RE/SlashesOfFuryEnd"].OnClientEvent then
-        net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function()
-            SFOn = false
-        end)
-    end
-end)
+        local tgt = ball:GetAttribute('target')
+        if tgt ~= LocalPlayer.Name then continue end
+        if not isApproachingPlayer(ball, rootPos) then continue end
 
--- ============================================================
--- DETECTION FALLBACK: scan character for ability indicators
--- ============================================================
--- If remotes don't fire correctly, detect via character state each frame.
-task.spawn(function()
-    while task.wait(0.2) do
-        local char = LocalPlayer.Character
-        if char then
-            -- Infinity Ball: check for InfinityBall attribute or ball targeting self
-            local ball = getBall()
-            if ball then
-                local tgt = ball:GetAttribute("target")
-                -- InfinityBall typically creates a persistent ball with special VFX
-                local infVFX = ball:FindFirstChild("InfinityBallVFX") or ball:FindFirstChild("InfinityVFX")
-                if infVFX and InfDet then
-                    InfOn = true
-                elseif not infVFX and InfOn then
-                    InfOn = false
-                end
-            elseif InfOn then
-                InfOn = false
+        local vel = z.VectorVelocity
+        local dist = (rootPos - ball.Position).Magnitude
+        local spd = vel.Magnitude
+        local pg = getPing() / 10
+        local pt = math.clamp(pg / 10, 5, 17)
+        local csd = math.min(math.max(spd - 9.5, 0), 650)
+        local sd = (2.4 + csd * 0.002) * (AP_Div or 1.1)
+        local pa = pt + math.max(spd / sd, 14) + 4
+        local curved = isCurved()
+
+        if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+        if curved and dist > 18 then continue end
+        if ball:FindFirstChild('ComboCounter') then continue end
+        if root:FindFirstChild('SingularityCape') then continue end
+        if InfDet and InfOn then continue end
+        if DSDet and DSOn then continue end
+        if THDet and THOn then continue end
+        if SFDet and SFOn then continue end
+
+        if dist <= pa then
+            if AutoAbility then
+                pcall(function()
+                    local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
+                    if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
+                        local ab = char.Abilities
+                        if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
+                           (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
+                           (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
+                           (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
+                           (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
+                           (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
+                            ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
+                        end
+                    end
+                end)
             end
 
-            -- Time Hole: check for TimeHole attachment/VFX on character
-            local thVFX = char:FindFirstChild("TimeHole") or char:FindFirstChild("TimeHoleVFX")
-            if thVFX then
-                THOn = true
-            elseif THOn and not thVFX then
-                -- only clear if we were detecting via VFX
-                THOn = false
-            end
-
-            -- Death Slash: check for DeathSlash VFX in workspace runtime
-            local runtime = Workspace:FindFirstChild("Runtime")
-            if runtime then
-                local dsVFX = runtime:FindFirstChild("DeathSlash")
-                if dsVFX then
-                    DSOn = true
-                elseif DSOn and not dsVFX then
-                    DSOn = false
-                end
-            end
+            doParry(ball, "AP")
+            break
         end
     end
 end)
@@ -876,13 +784,13 @@ end)
 -- ============================================================
 -- TRIGGERBOT
 -- ============================================================
-local TB_On = false
+local TB_On, TB_Delay = false, 50
 
 local _tbLastFire = 0
 RunService.Heartbeat:Connect(function()
     if not TB_On then return end
     local now = os.clock()
-    if now - _tbLastFire < 0.016 then return end
+    if now - _tbLastFire < 0.02 then return end
 
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -898,14 +806,6 @@ RunService.Heartbeat:Connect(function()
         local tgt = ball:GetAttribute('target')
         if tgt ~= LocalPlayer.Name then continue end
 
-        local z = ball:FindFirstChild('zoomies')
-        if not z then continue end
-
-        -- Only fire when ball is actually approaching
-        local vel = z.VectorVelocity
-        if vel.Magnitude < 1 then continue end
-        if (root.Position - ball.Position).Unit:Dot(vel.Unit) <= 0.05 then continue end
-
         if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
         if ball:FindFirstChild('ComboCounter') then continue end
         if InfDet and InfOn then continue end
@@ -913,8 +813,15 @@ RunService.Heartbeat:Connect(function()
         if THDet and THOn then continue end
         if SFDet and SFOn then continue end
 
-        doParry(ball, "TB")
-        _tbLastFire = now
+        if (TB_Delay or 0) > 0 then
+            local delayMs = TB_Delay
+            task.delay(delayMs / 1000, function()
+                if not ball or not ball.Parent or ball:GetAttribute('target') ~= LocalPlayer.Name then return end
+                doParry(ball, "TB")
+            end)
+        else
+            doParry(ball, "TB")
+        end
         break
     end
 end)
@@ -1376,6 +1283,7 @@ s3:AddKeybind("SpamKey", { Title = "Keybind", Default = "E", Callback = function
 -- TRIGGER TAB
 local s4 = Tabs.Trigger:AddSection("Triggerbot")
 s4:AddToggle("TBToggle", { Title = "Enabled", Default = false, Callback = function(v) TB_On = v; notify({Title = "TB", Content = v and "On" or "Off", Duration = 2}) end })
+s4:AddSlider("TBDelay", { Title = "Delay (ms)", Default = 50, Min = 0, Max = 500, Rounding = 0, Callback = function(v) TB_Delay = v end })
 s4:AddToggle("AnimFixTB", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_TB = v end })
 s4:AddKeybind("TBKey", { Title = "Keybind", Default = "R", Callback = function() if Options.TBToggle then Options.TBToggle:SetValue(not TB_On) end end, ChangedCallback = function() end })
 
