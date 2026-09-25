@@ -2,59 +2,9 @@
 --          LEAKED EAGLE HUB FOR BASICALLY EVERYTHING
 --          ANGELI FOR AUTOPARRY AND TRIGGERBOT
 
--- ============================================================
--- UI PARENT RESOLUTION (CoreGui-preferred, executor-safe)
---   1. gethui()   — executor's protected UI folder (best, invisible to game)
---   2. CoreGui    — Roblox CoreGui (write-probed so a locked CoreGui is skipped)
---   3. PlayerGui  — fallback
--- ============================================================
-local UI_PARENT, UI_PARENT_KIND
-
-do
-    local _env = (getgenv and getgenv()) or _G or {}
-
-    -- 1) executor hidden UI
-    local ok1, hui = pcall(function()
-        return _env.gethui and _env.gethui()
-    end)
-    if ok1 and hui then
-        UI_PARENT = hui
-        UI_PARENT_KIND = "gethui"
-    end
-
-    -- 2) CoreGui (only if actually writable)
-    if not UI_PARENT then
-        local ok2, cg = pcall(function()
-            return game:GetService("CoreGui")
-        end)
-        if ok2 and cg then
-            local writable = pcall(function()
-                local probe = Instance.new("Folder")
-                probe.Name = "__ui_probe__"
-                probe.Parent = cg
-                probe:Destroy()
-            end)
-            if writable then
-                UI_PARENT = cg
-                UI_PARENT_KIND = "CoreGui"
-            end
-        end
-    end
-
-    -- 3) PlayerGui fallback
-    if not UI_PARENT then
-        UI_PARENT = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
-        UI_PARENT_KIND = "PlayerGui"
-    end
-end
-
 local function GetSafeUIParent()
-    return UI_PARENT
+    return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 end
-
--- also expose for reloads / external use
-getgenv().qzxp_UIParent     = UI_PARENT
-getgenv().qzxp_UIParentKind = UI_PARENT_KIND
 
 -- [[ VFX HOOK CLEANUP — prevent duplication on reload ]]
 pcall(function()
@@ -76,24 +26,10 @@ getgenv().qzxp_VFXDisabled = {}
 task.spawn(function()
 
 local function PatchCoreGui(str)
-    -- If we already resolved to CoreGui, nothing to patch.
-    if UI_PARENT_KIND == "CoreGui" then
-        return str
-    end
-    -- Otherwise rewrite CoreGui references to whatever we resolved to.
-    local replacement
-    if UI_PARENT_KIND == "gethui" then
-        -- gethui() isn't reachable from a plain string, so bind the
-        -- already-resolved parent via a global the loader can read.
-        replacement = '(getgenv().qzxp_UIParent or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"))'
-    else
-        replacement = 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")'
-    end
-    return (str
-        :gsub('game:GetService%("CoreGui"%)', replacement)
-        :gsub("game:GetService%('CoreGui'%)", replacement)
-        :gsub("game%.CoreGui", replacement)
-    )
+    return str
+        :gsub('game:GetService("CoreGui")', 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")')
+        :gsub("game:GetService('CoreGui')", "game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui')")
+        :gsub('game.CoreGui', 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")')
 end
 
 local Fluent = loadstring(PatchCoreGui(game:HttpGet("https://raw.githubusercontent.com/discoart/FluentPlus/refs/heads/main/Beta.lua")))()
@@ -358,16 +294,11 @@ local function PlayParryAnim()
     end
     if not anim then return end
 
-    -- Fully stop & reset any existing parry/grab tracks BEFORE replaying.
-    -- Stop(0) + TimePosition reset prevents the 2nd parry from blending
-    -- from wherever the 1st left off (the "weird sword" snap).
+    -- Stop existing parry tracks
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
         if track.Name == "GrabParry" or track.Name == "Grab" or track.Name == "SuccessParry" or track.Name == "Success" then
-            pcall(function()
-                track:Stop(0)
-                track.TimePosition = 0
-                track:AdjustSpeed(1)
-            end)
+            track.TimePosition = 0
+            pcall(function() track:Stop(0.1) end)
         end
     end
 
@@ -378,18 +309,10 @@ local function PlayParryAnim()
         if not ok or not t then return end
         track = t
         track.Looped = false
-        track.Priority = Enum.AnimationPriority.Action4
         TrackCache[anim] = track
     end
 
-    -- Reset the cached track itself too. Without this, reusing the track
-    -- on the next parry resumes from its old TimePosition -> sword snap.
-    pcall(function()
-        track:Stop(0)
-        track.TimePosition = 0
-        track:AdjustSpeed(1)
-        track:Play(0, 1, 1)
-    end)
+    pcall(function() track:Play(0, 1, 1) end)
 end
 
 local function StopGrabAnimations()
@@ -402,10 +325,7 @@ local function StopGrabAnimations()
         if not animator then return end
         for _, track in pairs(animator:GetPlayingAnimationTracks()) do
             if track.Name == "GrabParry" or track.Name == "Grab" then
-                pcall(function()
-                    track:Stop(0)
-                    track.TimePosition = 0
-                end)
+                pcall(function() track:Stop(0.1) end)
             end
         end
     end)
@@ -772,107 +692,93 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
--- DETECTION STATES (FIXED)
--- ============================================================
+-- Detection states
 local InfOn, DSOn, THOn, SFOn = false, false, false, false
 local InfDet, DSDet, THDet, SFDet = false, false, false, false
 
--- Track which detection is actually ON the local player
--- Each detection gets its own verified state
-
-local function isLocalPlayerArg(a)
-    if a == nil then return false end
-    if typeof(a) == "Instance" then
-        return a == LocalPlayer or a == LocalPlayer.Character
-    end
-    if type(a) == "string" then
-        return a == LocalPlayer.Name or a == LocalPlayer.DisplayName
-    end
-    return false
-end
-
--- Helper: scan all args for local player reference
-local function anyArgIsLocal(...)
-    for _, a in ipairs({...}) do
-        if isLocalPlayerArg(a) then return true end
-    end
-    return false
-end
-
--- Infinity Ball
 pcall(function()
-    local rem = ReplicatedStorage.Remotes:FindFirstChild("InfinityBall")
-    if rem then
-        rem.OnClientEvent:Connect(function(...)
-            local args = {...}
-            -- Try to determine if this event targets us
-            local targetsUs = false
-            for _, a in ipairs(args) do
-                if isLocalPlayerArg(a) then targetsUs = true; break end
-            end
-            -- If the first bool arg is the state, use it; otherwise toggle
-            local state = nil
-            for _, a in ipairs(args) do
-                if type(a) == "boolean" then state = a; break end
-            end
-            if state ~= nil then
-                InfOn = state and targetsUs
-            else
-                InfOn = targetsUs
-            end
-        end)
-    end
+    ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_, d) DSOn = d or false end)
+    ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, b) InfOn = b or false end)
 end)
-
--- Death Slash
-pcall(function()
-    local rem = ReplicatedStorage.Remotes:FindFirstChild("DeathBall")
-    if rem then
-        rem.OnClientEvent:Connect(function(...)
-            local args = {...}
-            local targetsUs = false
-            for _, a in ipairs(args) do
-                if isLocalPlayerArg(a) then targetsUs = true; break end
-            end
-            local state = nil
-            for _, a in ipairs(args) do
-                if type(a) == "boolean" then state = a; break end
-            end
-            if state ~= nil then
-                DSOn = state and targetsUs
-            else
-                DSOn = targetsUs
-            end
-        end)
-    end
-end)
-
--- Time Hole / Slashes of Fury via net
 pcall(function()
     local net = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
-
-    net["RE/TimeHoleActivate"].OnClientEvent:Connect(function(...)
-        if anyArgIsLocal(...) then THOn = true end
-    end)
-    net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function(...)
-        -- Only clear if we were the target, or if no args (global off)
-        local args = {...}
-        if #args == 0 or anyArgIsLocal(...) then THOn = false end
-    end)
-
-    net["RE/SlashesOfFuryActivate"].OnClientEvent:Connect(function(...)
-        if anyArgIsLocal(...) then SFOn = true end
-    end)
-    net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function(...)
-        local args = {...}
-        if #args == 0 or anyArgIsLocal(...) then SFOn = false end
-    end)
+    net["RE/TimeHoleActivate"].OnClientEvent:Connect(function(...) local a = {...}; if a[1] == LocalPlayer or (a[1] and a[1].Name == LocalPlayer.Name) then THOn = true end end)
+    net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function() THOn = false end)
+    net["RE/SlashesOfFuryActivate"].OnClientEvent:Connect(function(...) local a = {...}; if a[1] == LocalPlayer or (a[1] and a[1].Name == LocalPlayer.Name) then SFOn = true end end)
+    net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function() SFOn = false end)
 end)
 
--- Reset detection state on respawn to avoid stuck flags
-LocalPlayer.CharacterAdded:Connect(function()
-    InfOn, DSOn, THOn, SFOn = false, false, false, false
+local function isApproachingPlayer(ball, rootPos)
+    local z = ball:FindFirstChild('zoomies')
+    if not z then return false end
+    local v = z.VectorVelocity
+    if v.Magnitude < 1 then return false end
+    return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
+end
+
+RunService.PreSimulation:Connect(function()
+    if not AP_On then return end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local balls = getAllBalls()
+    local rootPos = root.Position
+
+    for _, ball in pairs(balls) do
+        if not ball then continue end
+        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.35 then
+            continue
+        end
+
+        local z = ball:FindFirstChild('zoomies')
+        if not z then continue end
+
+        local tgt = ball:GetAttribute('target')
+        if tgt ~= LocalPlayer.Name then continue end
+        if not isApproachingPlayer(ball, rootPos) then continue end
+
+        local vel = z.VectorVelocity
+        local dist = (rootPos - ball.Position).Magnitude
+        local spd = vel.Magnitude
+        local pg = getPing() / 10
+        local pt = math.clamp(pg / 10, 5, 17)
+        local csd = math.min(math.max(spd - 9.5, 0), 650)
+        local sd = (2.4 + csd * 0.002) * (AP_Div or 1.1)
+        local pa = pt + math.max(spd / sd, 14) + 4
+        local curved = isCurved()
+
+        if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+        if curved and dist > 18 then continue end
+        if ball:FindFirstChild('ComboCounter') then continue end
+        if root:FindFirstChild('SingularityCape') then continue end
+        if InfDet and InfOn then continue end
+        if DSDet and DSOn then continue end
+        if THDet and THOn then continue end
+        if SFDet and SFOn then continue end
+
+        if dist <= pa then
+            if AutoAbility then
+                pcall(function()
+                    local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
+                    if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
+                        local ab = char.Abilities
+                        if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
+                           (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
+                           (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
+                           (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
+                           (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
+                           (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
+                            ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
+                        end
+                    end
+                end)
+            end
+
+            doParry(ball, "AP")
+            break
+        end
+    end
 end)
 
 -- ============================================================
@@ -928,23 +834,6 @@ local SpamRPS = 100
 local SpamInt = 0.01
 local SpamDetect = true
 
--- RPS counter (rolling 1-second window)
-local _rpsCount = 0
-local _rpsWindowStart = os.clock()
-local _rpsDisplay = 0
-
-local function _bumpRPS()
-    _rpsCount += 1
-    local now = os.clock()
-    if now - _rpsWindowStart >= 0.2 then
-        _rpsDisplay = _rpsCount
-        _rpsCount = 0
-        _rpsWindowStart = now
-    end
-end
-
-getgenv()._getRPS = function() return _rpsDisplay end
-
 local function spamOk()
     if not SpamDetect then return true end
     if InfDet and InfOn then return false end
@@ -959,62 +848,35 @@ end
 -- was unreachable. This schedules on the render tick and fires
 -- floor(acc / interval) times, so the rate stays exact regardless
 -- of framerate.
--- FPS-independent spam loop.
--- Runs on its own task, paced by os.clock() (wall time), not the render
--- pipeline. Fires as fast as the Lua scheduler + remote will allow,
--- regardless of framerate. Also runs N parallel workers so a single
--- task's yield points don't bottleneck the rate.
-local SPAM_WORKERS = 3
+local timeAccumulator = 0
 
-local function spamWorker()
-    local nextFire = os.clock()
-    while true do
-        if not Spam_On then
-            task.wait(0.05)
-            nextFire = os.clock()
-            continue
-        end
+RunService.RenderStepped:Connect(function(dt)
+    if not Spam_On then timeAccumulator = 0 return end
 
-        local char = LocalPlayer.Character
-        if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild('SingularityCape') then
-            task.wait(0.02)
-            nextFire = os.clock()
-            continue
-        end
+    local char = LocalPlayer.Character
+    if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild('SingularityCape') then
+        timeAccumulator = 0
+        return
+    end
 
-        if not spamOk() then
-            task.wait(0.02)
-            nextFire = os.clock()
-            continue
-        end
+    if not spamOk() then timeAccumulator = 0 return end
 
-        local interval = (SpamInt and SpamInt > 0) and SpamInt or 0.01
-        local now = os.clock()
-
-        -- If we've fallen behind, resync instead of bursting
-        if now - nextFire > interval * 4 then
-            nextFire = now
-        end
-
-        if now >= nextFire then
+    local interval = (SpamInt and SpamInt > 0) and SpamInt or 0.01
+    timeAccumulator += dt
+    if timeAccumulator >= interval then
+        local fires = math.floor(timeAccumulator / interval)
+        timeAccumulator -= fires * interval
+        if timeAccumulator > interval * 2 then timeAccumulator = 0 end
+        if fires > 200 then fires = 200 end
+        for _ = 1, fires do
             local ball = getBall()
             if ball then
                 if AnimFix_Spam then PlayParryAnim() end
                 fireRemote(ball)
-                _bumpRPS()
             end
-            nextFire += interval
-        else
-            -- Yield only as long as needed, capped so we stay responsive
-            local sleep = math.min(nextFire - now, 0.001)
-            if sleep > 0 then task.wait(sleep) else task.wait() end
         end
     end
-end
-
-for _ = 1, SPAM_WORKERS do
-    task.spawn(spamWorker)
-end
+end)
 
 -- ============================================================
 -- SWORD CHANGER CORE INTERFACES
@@ -1319,7 +1181,7 @@ local function MakeDrag(handle, frame)
 end
 
 local KBShow = false
-local bsGui = Instance.new("ScreenGui"); bsGui.Name = "q_BS"; bsGui.ResetOnSpawn = false; bsGui.IgnoreGuiInset = true; bsGui.DisplayOrder = 100; bsGui.Parent = CoreGui
+local kbGui = Instance.new("ScreenGui"); kbGui.Name = "q_KB"; kbGui.ResetOnSpawn = false; kbGui.IgnoreGuiInset = true; kbGui.DisplayOrder = 100; kbGui.Parent = CoreGui
 local kbF = Instance.new("Frame"); kbF.Size = UDim2.new(0, 220, 0, 200); kbF.Position = UDim2.new(1, -235, 0.5, -100); kbF.BackgroundColor3 = Color3.fromRGB(25, 25, 25); kbF.BackgroundTransparency = 0.15; kbF.Visible = false; kbF.Parent = kbGui
 Instance.new("UICorner", kbF).CornerRadius = UDim.new(0, 6)
 local kbS = Instance.new("UIStroke"); kbS.Color = Color3.fromRGB(60, 60, 60); kbS.Thickness = 1; kbS.Parent = kbF
@@ -1334,7 +1196,6 @@ local function keyStr(o) if not o then return "?" end; local v = o.Value; return
 local kbItems = {
     {n = "AP", k = function() return keyStr(Options and Options.APKey) end, s = function() return AP_On end},
     {n = "Spam", k = function() return keyStr(Options and Options.SpamKey) end, s = function() return Spam_On end},
-    {n = "RPS", k = function() return (getgenv()._getRPS and getgenv()._getRPS()) or 0 end, s = function() return Spam_On end, raw = true},
     {n = "TB", k = function() return keyStr(Options and Options.TBKey) end, s = function() return TB_On end},
     {n = "Lock", k = function() return keyStr(Options and Options.LockKey) end, s = function() return LockEnabled end},
 }
@@ -1368,18 +1229,9 @@ RunService.RenderStepped:Connect(function()
     kbF.Visible = KBShow
     if KBShow then
         for i, it in ipairs(kbItems) do
-            local s = it.s()
-            local k = it.k()
-            if it.raw then
-                -- RPS row: no key, just live count
-                local col = s and "#4cd964" or "#888888"
-                kbL[i].RichText = true
-                kbL[i].Text = string.format("<font color='%s'>%s: %s/s</font>", col, it.n, tostring(k))
-            else
-                local sc = s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>"
-                kbL[i].RichText = true
-                kbL[i].Text = string.format("[%s] %s %s", k, it.n, sc)
-            end
+            local s = it.s(); local k = it.k()
+            local sc = s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>"
+            kbL[i].RichText = true; kbL[i].Text = string.format("[%s] %s %s", k, it.n, sc)
         end
     end
 
