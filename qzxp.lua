@@ -221,64 +221,28 @@ local function resolve(input)
 end
 
 -- ============================================================
--- ANIMATION FIX (ported from Tsukuyomi)
+-- ANIMATION FIX
 -- ============================================================
 local AnimFix_AP = true
 local AnimFix_TB = true
 local AnimFix_Spam = true
 
-local AnimFix_Cache = {}
+local AnimCache = {}
+local TrackCache = {}
+local LastAnimTime = 0
+local SuccessFlag = false
 
-local function GetParryAnimation(swordName)
-    if not swordName or swordName == "" then
-        return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
-            or SwordAPI.Collection.Default:FindFirstChild("Grab")
-    end
-    if AnimFix_Cache[swordName] then return AnimFix_Cache[swordName] end
+local function PlayParryAnim()
+    local now = os.clock()
+    if not SuccessFlag and (now - LastAnimTime) < 0.2 then return end
+    LastAnimTime = now
+    SuccessFlag = false
 
-    local resolved = resolve(swordName)
-    if AnimFix_Cache[resolved] then
-        AnimFix_Cache[swordName] = AnimFix_Cache[resolved]
-        return AnimFix_Cache[resolved]
-    end
-
-    local default = SwordAPI.Collection.Default:FindFirstChild("GrabParry")
-        or SwordAPI.Collection.Default:FindFirstChild("Grab")
-
-    local swordData
-    local ok, data = pcall(function() return swordModule:GetSword(resolved) end)
-    if ok and data and type(data) == "table" then swordData = data end
-    if not swordData then
-        pcall(function()
-            local d = ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(resolved)
-            if d and type(d) == "table" then swordData = d end
-        end)
-    end
-
-    local animType = swordData and swordData.AnimationType
-    local result = default
-
-    if animType and SwordAPI.Collection:FindFirstChild(animType) then
-        local folder = SwordAPI.Collection[animType]
-        local a = folder:FindFirstChild("GrabParry") or folder:FindFirstChild("Grab")
-        if a then result = a end
-    elseif SwordAPI.Collection:FindFirstChild(resolved) then
-        local folder = SwordAPI.Collection[resolved]
-        local a = folder:FindFirstChild("GrabParry") or folder:FindFirstChild("Grab")
-        if a then result = a end
-    end
-
-    AnimFix_Cache[swordName] = result
-    AnimFix_Cache[resolved] = result
-    return result
-end
-
-local function PlayParryAnimation()
     local char = LocalPlayer.Character
     if not char then return end
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
-    local animator = humanoid:FindFirstChildOfClass("Animator")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local animator = hum:FindFirstChildOfClass("Animator")
     if not animator then return end
 
     -- Block check
@@ -289,132 +253,100 @@ local function PlayParryAnimation()
         end
     end
 
+    -- Resolve animation
     local swordName = char:GetAttribute("CurrentlyEquippedSword") or ""
     if getgenv().skinChanger and getgenv().swordAnimations ~= "" then
         swordName = getgenv().swordAnimations
     end
 
-    local animation = GetParryAnimation(swordName)
-    if not animation then return end
+    local default = SwordAPI.Collection.Default:FindFirstChild("GrabParry") or SwordAPI.Collection.Default:FindFirstChild("Grab")
+    if not swordName or swordName == "" then return end
 
-    -- Stop existing parry / success tracks first
-    for _, track in pairs(animator:GetPlayingAnimationTracks()) do
-        if track.Name == "GrabParry" or track.Name == "Grab" then
-            pcall(function() track.TimePosition = 0 end)
-            pcall(function() track:Stop(0.1) end)
-        elseif track.Name == "SuccessParry" or track.Name == "Success" then
-            pcall(function() track:Stop(0.1) end)
-        end
-    end
-
-    local ok, newTrack = pcall(function() return animator:LoadAnimation(animation) end)
-    if ok and newTrack then
+    local resolved = resolve(swordName)
+    local anim = AnimCache[resolved]
+    if not anim then
+        anim = default
+        local animType
         pcall(function()
-            newTrack:Play(
-                newTrack:GetAttribute("PlayFadeTime") or 0,
-                newTrack:GetAttribute("PlayWeight") or 1,
-                newTrack:GetAttribute("PlaySpeed") or 1
-            )
+            local data = swordModule:GetSword(resolved)
+            if data and type(data) == "table" then animType = data.AnimationType end
         end)
-    end
-end
-
--- Single-shot (triggerbot / autoparry) animation with 0.1s debounce
-local SingleAnimLast = 0
-local function PlaySingleParryAnimation()
-    if os.clock() - SingleAnimLast < 0.1 then return end
-    SingleAnimLast = os.clock()
-    PlayParryAnimation()
-end
-
--- Spam animation throttle (for the 100+ RPS macro)
-local SpamAnimRate = 140
-local SpamAnimLastPlayed = 0
-local SpamAnimBypass = false
-local SpamAnimDelayLimit = 0
-local SpamAnimSpammingMode = false
-local SpamAnimParries = 0
-
-local function SpamParryAnimation()
-    if os.clock() - SpamAnimDelayLimit >= (1 / SpamAnimRate) then
-        SpamAnimDelayLimit = os.clock()
-        if (os.clock() - SpamAnimLastPlayed) >= 0.1 or SpamAnimBypass or SpamAnimSpammingMode then
-            SpamAnimLastPlayed = os.clock()
-            SpamAnimBypass = false
-            PlayParryAnimation()
-        end
-    end
-end
-
-task.spawn(function()
-    while true do
-        SpamAnimSpammingMode = (SpamAnimParries > 1)
-        task.wait(0.1)
-    end
-end)
-
--- ============================================================
--- PARRY ANIM GUARD
--- Only touches tracks while the macro is actively firing, or
--- shortly after the triggerbot fired. Manual F/click parries
--- are left alone so the game's own animation plays out fully.
--- ============================================================
-local _tbLastFire = 0
-
-local function _shouldTouchParryAnim()
-    if Spam_On and AnimFix_Spam then
-        return true
-    end
-    if TB_On and AnimFix_TB then
-        return (os.clock() - _tbLastFire) < 0.5
-    end
-    return false
-end
-
-local function StopParryGrabTracks()
-    local char = LocalPlayer.Character
-    if not char then return end
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
-    local animator = humanoid:FindFirstChildOfClass("Animator")
-    if not animator then return end
-    for _, track in pairs(animator:GetPlayingAnimationTracks()) do
-        if track.Name == "GrabParry" or track.Name == "Grab" then
-            pcall(function() track:Stop(0.1) end)
-        end
-    end
-end
-
-pcall(function()
-    ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
-        if SpamAnimParries < 5 then
-            SpamAnimParries += 1
-            task.delay(0.05, function()
-                if SpamAnimParries > 0 then SpamAnimParries -= 1 end
+        if not animType then
+            pcall(function()
+                local data = ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(resolved)
+                if data and type(data) == "table" then animType = data.AnimationType end
             end)
         end
-        SpamAnimBypass = true
 
-        if not _shouldTouchParryAnim() then return end
-        StopParryGrabTracks()
+        if animType and SwordAPI.Collection:FindFirstChild(animType) then
+            local f = SwordAPI.Collection[animType]
+            local a = f:FindFirstChild("GrabParry") or f:FindFirstChild("Grab")
+            if a then anim = a end
+        end
+
+        if not animType and SwordAPI.Collection:FindFirstChild(resolved) then
+            local f = SwordAPI.Collection[resolved]
+            local a = f:FindFirstChild("GrabParry") or f:FindFirstChild("Grab")
+            if a then anim = a end
+        end
+
+        AnimCache[resolved] = anim
+    end
+    if not anim then return end
+
+    -- Stop existing parry tracks
+    for _, track in pairs(animator:GetPlayingAnimationTracks()) do
+        if track.Name == "GrabParry" or track.Name == "Grab" or track.Name == "SuccessParry" or track.Name == "Success" then
+            track.TimePosition = 0
+            pcall(function() track:Stop(0.1) end)
+        end
+    end
+
+    -- Play
+    local track = TrackCache[anim]
+    if not track or not track.Parent then
+        local ok, t = pcall(function() return animator:LoadAnimation(anim) end)
+        if not ok or not t then return end
+        track = t
+        track.Looped = false
+        TrackCache[anim] = track
+    end
+
+    pcall(function() track:Play(0, 1, 1) end)
+end
+
+local function StopGrabAnimations()
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        local animator = hum:FindFirstChildOfClass("Animator")
+        if not animator then return end
+        for _, track in pairs(animator:GetPlayingAnimationTracks()) do
+            if track.Name == "GrabParry" or track.Name == "Grab" then
+                pcall(function() track:Stop(0.1) end)
+            end
+        end
     end)
+end
+
+LocalPlayer.CharacterAdded:Connect(function()
+    TrackCache = {}
+    AnimCache = {}
 end)
 
 pcall(function()
     ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function()
-        if not _shouldTouchParryAnim() then return end
-        StopParryGrabTracks()
+        SuccessFlag = true
+        StopGrabAnimations()
     end)
 end)
 
--- Clear caches on respawn
-LocalPlayer.CharacterAdded:Connect(function()
-    AnimFix_Cache = {}
-    SingleAnimLast = 0
-    SpamAnimLastPlayed = 0
-    SpamAnimBypass = false
-    SpamAnimDelayLimit = 0
-    SpamAnimParries = 0
+pcall(function()
+    ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+        StopGrabAnimations()
+    end)
 end)
 
 -- ============================================================
@@ -733,14 +665,8 @@ local function fireRemote(ball)
 end
 
 local function doParry(ball, source)
-    if source == "AP" then
-        if AnimFix_AP then PlaySingleParryAnimation() end
-    elseif source == "TB" then
-        if AnimFix_TB then
-            _tbLastFire = os.clock()
-            PlaySingleParryAnimation()
-        end
-    end
+    local animOn = (source == "AP" and AnimFix_AP) or (source == "TB" and AnimFix_TB)
+    if animOn then PlayParryAnim() end
     fireRemote(ball)
 end
 
@@ -931,10 +857,10 @@ RunService.RenderStepped:Connect(function(dt)
         timeAccumulator -= fires * interval
         if timeAccumulator > interval * 2 then timeAccumulator = 0 end
         if fires > 200 then fires = 200 end
-        if AnimFix_Spam then SpamParryAnimation() end
         for _ = 1, fires do
             local ball = getBall()
             if ball then
+                if AnimFix_Spam then PlayParryAnim() end
                 fireRemote(ball)
             end
         end
