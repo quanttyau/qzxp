@@ -80,6 +80,10 @@ end)
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
 
+local AP_On   = false
+local TB_On   = false
+local Spam_On = false
+
 local suppressNotifies = false
 local function notify(cfg)
     if suppressNotifies then return end
@@ -221,132 +225,153 @@ local function resolve(input)
 end
 
 -- ============================================================
--- ANIMATION FIX
+-- ANIMATION SYSTEM  (ported verbatim from INFINITE TSUKUYOMI)
 -- ============================================================
-local AnimFix_AP = true
-local AnimFix_TB = true
+local AnimFix_AP   = true
+local AnimFix_TB   = true
 local AnimFix_Spam = true
 
-local AnimCache = {}
-local TrackCache = {}
-local LastAnimTime = 0
-local SuccessFlag = false
+local AnimFix_Cache = {}
 
-local function PlayParryAnim()
-    local now = os.clock()
-    if not SuccessFlag and (now - LastAnimTime) < 0.2 then return end
-    LastAnimTime = now
-    SuccessFlag = false
+local function GetParryAnimation(swordName)
+    if not swordName or swordName == "" then
+        return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
+    end
+    if AnimFix_Cache[swordName] then return AnimFix_Cache[swordName] end
+    local ok, swordData = pcall(function()
+        return ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(swordName)
+    end)
+    if not ok or not swordData or type(swordData) ~= "table" or not swordData.AnimationType then
+        AnimFix_Cache[swordName] = SwordAPI.Collection.Default:FindFirstChild("GrabParry")
+        return AnimFix_Cache[swordName]
+    end
+    for _, obj in pairs(SwordAPI.Collection:GetChildren()) do
+        if obj.Name == swordData.AnimationType then
+            local anim = obj:FindFirstChild("GrabParry") or obj:FindFirstChild("Grab")
+            if anim then AnimFix_Cache[swordName] = anim return anim end
+        end
+    end
+    AnimFix_Cache[swordName] = SwordAPI.Collection.Default:FindFirstChild("GrabParry")
+    return AnimFix_Cache[swordName]
+end
 
+local function PlayParryAnimation()
     local char = LocalPlayer.Character
     if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    local animator = hum:FindFirstChildOfClass("Animator")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    local animator = humanoid:FindFirstChildOfClass("Animator")
     if not animator then return end
-
-    -- Block check
-    for _, t in pairs(animator:GetPlayingAnimationTracks()) do
-        local n = t.Name:lower()
-        if (n:find("block") or n:find("shield") or n:find("defend")) and t.IsPlaying then
-            return
-        end
-    end
-
-    -- Resolve animation
-    local swordName = char:GetAttribute("CurrentlyEquippedSword") or ""
-    if getgenv().skinChanger and getgenv().swordAnimations ~= "" then
-        swordName = getgenv().swordAnimations
-    end
-
-    local default = SwordAPI.Collection.Default:FindFirstChild("GrabParry") or SwordAPI.Collection.Default:FindFirstChild("Grab")
-    if not swordName or swordName == "" then return end
-
-    local resolved = resolve(swordName)
-    local anim = AnimCache[resolved]
-    if not anim then
-        anim = default
-        local animType
-        pcall(function()
-            local data = swordModule:GetSword(resolved)
-            if data and type(data) == "table" then animType = data.AnimationType end
-        end)
-        if not animType then
-            pcall(function()
-                local data = ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(resolved)
-                if data and type(data) == "table" then animType = data.AnimationType end
-            end)
-        end
-
-        if animType and SwordAPI.Collection:FindFirstChild(animType) then
-            local f = SwordAPI.Collection[animType]
-            local a = f:FindFirstChild("GrabParry") or f:FindFirstChild("Grab")
-            if a then anim = a end
-        end
-
-        if not animType and SwordAPI.Collection:FindFirstChild(resolved) then
-            local f = SwordAPI.Collection[resolved]
-            local a = f:FindFirstChild("GrabParry") or f:FindFirstChild("Grab")
-            if a then anim = a end
-        end
-
-        AnimCache[resolved] = anim
-    end
-    if not anim then return end
-
-    -- Stop existing parry tracks
+    local animation = GetParryAnimation(char:GetAttribute("CurrentlyEquippedSword"))
+    if not animation then return end
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
-        if track.Name == "GrabParry" or track.Name == "Grab" or track.Name == "SuccessParry" or track.Name == "Success" then
-            track.TimePosition = 0
+        if track.Name == "GrabParry" or track.Name == "Grab" then
+            pcall(function() track.TimePosition = 0 end)
+            pcall(function() track:Stop(0.1) end)
+        elseif track.Name == "SuccessParry" or track.Name == "Success" then
             pcall(function() track:Stop(0.1) end)
         end
     end
-
-    -- Play
-    local track = TrackCache[anim]
-    if not track or not track.Parent then
-        local ok, t = pcall(function() return animator:LoadAnimation(anim) end)
-        if not ok or not t then return end
-        track = t
-        track.Looped = false
-        TrackCache[anim] = track
+    local ok, newTrack = pcall(function() return animator:LoadAnimation(animation) end)
+    if ok and newTrack then
+        pcall(function()
+            newTrack:Play(
+                newTrack:GetAttribute("PlayFadeTime") or 0,
+                newTrack:GetAttribute("PlayWeight")   or 1,
+                newTrack:GetAttribute("PlaySpeed")    or 1
+            )
+        end)
     end
-
-    pcall(function() track:Play(0, 1, 1) end)
 end
 
-local function StopGrabAnimations()
-    pcall(function()
-        local char = LocalPlayer.Character
-        if not char then return end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if not hum then return end
-        local animator = hum:FindFirstChildOfClass("Animator")
-        if not animator then return end
-        for _, track in pairs(animator:GetPlayingAnimationTracks()) do
-            if track.Name == "GrabParry" or track.Name == "Grab" then
-                pcall(function() track:Stop(0.1) end)
-            end
+local SingleAnimLast = 0
+local function PlaySingleParryAnimation()
+    if os.clock() - SingleAnimLast < 0.1 then return end
+    SingleAnimLast = os.clock()
+    PlayParryAnimation()
+end
+
+local SpamAnimRate         = 140
+local SpamAnimLastPlayed   = 0
+local SpamAnimBypass       = false
+local SpamAnimDelayLimit   = 0
+local SpamAnimSpammingMode = false
+local SpamAnimParries      = 0
+
+local function SpamParryAnimation()
+    if os.clock() - SpamAnimDelayLimit >= (1 / SpamAnimRate) then
+        SpamAnimDelayLimit = os.clock()
+        if (os.clock() - SpamAnimLastPlayed) >= 0.1
+            or SpamAnimBypass
+            or SpamAnimSpammingMode then
+            SpamAnimLastPlayed = os.clock()
+            SpamAnimBypass = false
+            PlayParryAnimation()
         end
-    end)
+    end
 end
 
-LocalPlayer.CharacterAdded:Connect(function()
-    TrackCache = {}
-    AnimCache = {}
+task.spawn(function()
+    while true do
+        SpamAnimSpammingMode = (SpamAnimParries > 1)
+        task.wait(0.1)
+    end
+end)
+
+local _tbLastFire = 0
+local _apLastFire = 0
+
+local function _shouldTouchParryAnim()
+    if Spam_On and AnimFix_Spam then
+        return true
+    end
+    if TB_On and AnimFix_TB then
+        return (os.clock() - _tbLastFire) < 0.5
+    end
+    if AP_On and AnimFix_AP then
+        return (os.clock() - _apLastFire) < 0.5
+    end
+    return false
+end
+
+local function StopParryGrabTracks()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then return end
+    for _, track in pairs(animator:GetPlayingAnimationTracks()) do
+        if track.Name == "GrabParry" or track.Name == "Grab" then
+            pcall(function() track:Stop(0.1) end)
+        end
+    end
+end
+
+pcall(function()
+    ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+        if SpamAnimParries < 5 then
+            SpamAnimParries += 1
+            task.delay(0.05, function()
+                if SpamAnimParries > 0 then SpamAnimParries -= 1 end
+            end)
+        end
+        SpamAnimBypass = true
+
+        if not _shouldTouchParryAnim() then return end
+        StopParryGrabTracks()
+    end)
 end)
 
 pcall(function()
     ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function()
-        SuccessFlag = true
-        StopGrabAnimations()
+        if not _shouldTouchParryAnim() then return end
+        StopParryGrabTracks()
     end)
 end)
 
-pcall(function()
-    ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
-        StopGrabAnimations()
-    end)
+LocalPlayer.CharacterAdded:Connect(function()
+    AnimFix_Cache = {}
 end)
 
 -- ============================================================
@@ -567,7 +592,7 @@ local CURVES = {"Camera", "Dot", "Nearest", "Random", "Accel", "Backwards", "Slo
 local CurveMode = "Camera"
 
 local lastCFCalcFrame, cachedCF, frameCount = 0, nil, 0
-RunService.Heartbeat:Connect(function() frameCount += 1 end)
+RunService.RenderStepped:Connect(function() frameCount += 1 end)
 
 local function getCurveCF()
     if cachedCF and frameCount == lastCFCalcFrame then return cachedCF end
@@ -633,7 +658,7 @@ end
 local parryLockouts = {}
 
 local function fireRemote(ball)
-    if not _remote or not _args or not _tokenFound then return end
+    if not _remote or not _args or not _tokenFound then return false end
 
     local rcf = getCurveCF()
     local ed = {}
@@ -662,18 +687,14 @@ local function fireRemote(ball)
             end
         end)
     end
-end
 
-local function doParry(ball, source)
-    local animOn = (source == "AP" and AnimFix_AP) or (source == "TB" and AnimFix_TB)
-    if animOn then PlayParryAnim() end
-    fireRemote(ball)
+    return true
 end
 
 -- ============================================================
 -- AUTOPARRY
 -- ============================================================
-local AP_On, AP_Acc, AP_Div = false, 50, 1.1
+local AP_Acc, AP_Div = 50, 1.1
 local RandAcc = false
 local AutoAbility = false
 
@@ -700,12 +721,101 @@ pcall(function()
     ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_, d) DSOn = d or false end)
     ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, b) InfOn = b or false end)
 end)
-pcall(function()
-    local net = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
-    net["RE/TimeHoleActivate"].OnClientEvent:Connect(function(...) local a = {...}; if a[1] == LocalPlayer or (a[1] and a[1].Name == LocalPlayer.Name) then THOn = true end end)
-    net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function() THOn = false end)
-    net["RE/SlashesOfFuryActivate"].OnClientEvent:Connect(function(...) local a = {...}; if a[1] == LocalPlayer or (a[1] and a[1].Name == LocalPlayer.Name) then SFOn = true end end)
-    net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function() SFOn = false end)
+-- ============================================================
+-- TIME HOLE / SLASHES OF FURY DETECTION
+-- Scans every arg (not just a[1]) for the local player, since the
+-- net events pass (abilityName, caster, ...) or (caster, ...) and
+-- the caster isn't always in slot 1.
+-- ============================================================
+local function _argsContainMe(a)
+    for _, v in ipairs(a) do
+        if v == LocalPlayer then return true end
+        if typeof(v) == "Instance" and v.Name == LocalPlayer.Name then return true end
+        if typeof(v) == "Instance" then
+            -- sometimes the arg is the character model, not the player object
+            local p = Players:GetPlayerFromCharacter(v)
+            if p == LocalPlayer then return true end
+        end
+    end
+    return false
+end
+
+local function _hookNetEvent(name, onFire)
+    -- try both known locations for the net module
+    local net
+    pcall(function()
+        net = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
+    end)
+    if not net then
+        pcall(function()
+            for _, m in ipairs(ReplicatedStorage.Packages:GetDescendants()) do
+                if m.Name == "net" and m:IsA("ModuleScript") then net = require(m); break end
+            end
+        end)
+    end
+
+    local hooked = false
+    if net then
+        pcall(function()
+            local ev = net[name]
+            if ev and ev.OnClientEvent then
+                ev.OnClientEvent:Connect(function(...)
+                    if onFire({...}) then hooked = true end
+                end)
+                hooked = true
+            end
+        end)
+    end
+
+    -- fallback: top-level Remotes with the same name
+    if not hooked then
+        pcall(function()
+            local ev = ReplicatedStorage.Remotes:FindFirstChild(name)
+            if ev and ev:IsA("RemoteEvent") then
+                ev.OnClientEvent:Connect(function(...)
+                    if onFire({...}) then hooked = true end
+                end)
+                hooked = true
+            end
+        end)
+    end
+
+    if not hooked then
+        warn("[qzxp] detection: could not hook net event " .. name)
+    end
+end
+
+_hookNetEvent("RE/TimeHoleActivate", function(a)
+    if _argsContainMe(a) then THOn = true end
+end)
+_hookNetEvent("RE/TimeHoleDeactivate", function(a)
+    if _argsContainMe(a) or #a == 0 then THOn = false end
+end)
+_hookNetEvent("RE/SlashesOfFuryActivate", function(a)
+    if _argsContainMe(a) then SFOn = true end
+end)
+_hookNetEvent("RE/SlashesOfFuryEnd", function(a)
+    if _argsContainMe(a) or #a == 0 then SFOn = false end
+end)
+
+-- Optional: also keep the Deactivate/End events from being scoped to the
+-- local player — they're global state, so just clear the flag whenever
+-- they fire.
+task.spawn(function()
+    local net
+    pcall(function()
+        net = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
+    end)
+    if net then
+        pcall(function() net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function() THOn = false end) end)
+        pcall(function() net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function() SFOn = false end) end)
+    end
+    pcall(function()
+        local th = ReplicatedStorage.Remotes:FindFirstChild("RE/TimeHoleDeactivate")
+        if th then th.OnClientEvent:Connect(function() THOn = false end) end
+        local sf = ReplicatedStorage.Remotes:FindFirstChild("RE/SlashesOfFuryEnd")
+        if sf then sf.OnClientEvent:Connect(function() SFOn = false end) end
+    end)
 end)
 
 local function isApproachingPlayer(ball, rootPos)
@@ -716,8 +826,13 @@ local function isApproachingPlayer(ball, rootPos)
     return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
 end
 
-RunService.PreSimulation:Connect(function()
+RunService.RenderStepped:Connect(function()
     if not AP_On then return end
+    -- TB overpowers AP: if triggerbot is on, let it own all parries.
+    if TB_On then return end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
@@ -775,7 +890,11 @@ RunService.PreSimulation:Connect(function()
                 end)
             end
 
-            doParry(ball, "AP")
+            local fired = fireRemote(ball)
+            if fired then
+                _apLastFire = os.clock()
+                if AnimFix_AP then PlaySingleParryAnimation() end
+            end
             break
         end
     end
@@ -784,9 +903,8 @@ end)
 -- ============================================================
 -- TRIGGERBOT
 -- ============================================================
-local TB_On = false
 
-RunService.Heartbeat:Connect(function()
+RunService.RenderStepped:Connect(function()
     if not TB_On then return end
 
     local char = LocalPlayer.Character
@@ -810,7 +928,11 @@ RunService.Heartbeat:Connect(function()
         if THDet and THOn then continue end
         if SFDet and SFOn then continue end
 
-        doParry(ball, "TB")
+        local fired = fireRemote(ball)
+        if fired then
+            _tbLastFire = os.clock()
+            if AnimFix_TB then PlaySingleParryAnimation() end
+        end
         break
     end
 end)
@@ -818,7 +940,6 @@ end)
 -- ============================================================
 -- SPAM ENGINE
 -- ============================================================
-local Spam_On = false
 local SpamRPS = 100
 local SpamInt = 0.01
 local SpamDetect = true
@@ -860,10 +981,10 @@ RunService.RenderStepped:Connect(function(dt)
         for _ = 1, fires do
             local ball = getBall()
             if ball then
-                if AnimFix_Spam then PlayParryAnim() end
                 fireRemote(ball)
             end
         end
+        if AnimFix_Spam then SpamParryAnimation() end
     end
 end)
 
@@ -960,7 +1081,7 @@ end
 
 getgenv().updateSword = function()
     refreshSlash()
-    AnimCache = {}
+    AnimFix_Cache = {}
     if getgenv().skinChanger and getgenv().swordModel ~= "" then
         getgenv().saveLastEquippedSword(getgenv().swordModel)
         equip(getgenv().swordModel)
@@ -969,7 +1090,7 @@ end
 
 getgenv().revertSword = function()
     if realSword ~= "" then equip(realSword) end
-    AnimCache = {}
+    AnimFix_Cache = {}
 end
 
 -- VFX hooker (with duplication prevention via global tracking)
