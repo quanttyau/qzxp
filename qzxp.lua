@@ -662,9 +662,10 @@ end
 -- REMOTE FIRE (no rate limiter — RenderStepped accumulator handles pacing)
 -- ============================================================
 local parryLockouts = {}
-local firedForCycle = {}   -- [ball] = true once we've fired for the current targeting cycle
+local firedForCycle = {}   -- [ball] = true once AP/TB has fired for the current targeting cycle
+local spamFiredForCycle = {} -- [ball] = true once spam has fired for the current targeting cycle
 
-local function fireRemote(ball)
+local function fireRemote(ball, isSpam)
     if not _remote or not _args or not _tokenFound then return false end
 
     local rcf = getCurveCF()
@@ -686,12 +687,17 @@ local function fireRemote(ball)
 
     if ball then
         parryLockouts[ball] = os.clock()
-        firedForCycle[ball] = true
+        if isSpam then
+            spamFiredForCycle[ball] = true
+        else
+            firedForCycle[ball] = true
+        end
         local changedConn
         changedConn = ball:GetAttributeChangedSignal("target"):Connect(function()
             if ball:GetAttribute("target") ~= LocalPlayer.Name then
                 parryLockouts[ball] = nil
                 firedForCycle[ball] = nil
+                spamFiredForCycle[ball] = nil
                 changedConn:Disconnect()
             end
         end)
@@ -847,7 +853,7 @@ RunService.RenderStepped:Connect(function()
     for _, ball in pairs(balls) do
         if not ball then continue end
         if firedForCycle[ball] then continue end
-        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
+        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
             continue
         end
 
@@ -922,7 +928,7 @@ RunService.RenderStepped:Connect(function()
     for _, ball in pairs(balls) do
         if not ball then continue end
         if firedForCycle[ball] then continue end
-        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
+        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
             continue
         end
 
@@ -991,7 +997,7 @@ RunService.RenderStepped:Connect(function(dt)
         for _ = 1, fires do
             local ball = getBall()
             if ball then
-                fireRemote(ball)
+                fireRemote(ball, true)
             end
         end
         if AnimFix_Spam then SpamParryAnimation() end
