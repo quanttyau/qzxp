@@ -39,7 +39,7 @@ local InterfaceManager = loadstring(PatchCoreGui(game:HttpGet("https://raw.githu
 local Window = Fluent:CreateWindow({
     Title = "qzxp",
     TabWidth = 130,
-    Size = UDim2.fromOffset(750, 530),
+    Size = UDim2.fromOffset(750, 450),
     Acrylic = false,
     Theme = "Darker",
     MinimizeKey = Enum.KeyCode.LeftControl
@@ -65,17 +65,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Stats             = game:GetService("Stats")
 local Workspace         = game:GetService("Workspace")
 local CoreGui           = GetSafeUIParent()
-local ContentProvider   = game:GetService("ContentProvider")
 local HttpService       = game:GetService("HttpService")
-local Debris            = game:GetService("Debris")
-
-pcall(function()
-    if hookfunction then
-        hookfunction(ContentProvider.PreloadAsync, function() return end)
-        hookfunction(ContentProvider.Preload, function() return end)
-        hookfunction(ContentProvider.GetAssetFetchStatus, function() return Enum.AssetFetchStatus.Success end)
-    end
-end)
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
@@ -156,7 +146,6 @@ local swordModuleInstance = ReplicatedStorage:WaitForChild("Shared", 9e9):WaitFo
 local swordModule = require(swordModuleInstance)
 
 local SwordRegistry = {}
-local SwordList = {}
 
 local function norm(s)
     return s and tostring(s):lower():gsub("[%s_%-%p]+", "") or ""
@@ -165,13 +154,11 @@ end
 local function buildRegistry()
     local seen = {}
     SwordRegistry = {}
-    SwordList = {}
 
     local function reg(name)
         if not name or name == "" or seen[name] then return end
         seen[name] = true
         SwordRegistry[norm(name)] = name
-        table.insert(SwordList, name)
     end
 
     pcall(function()
@@ -209,8 +196,6 @@ local function buildRegistry()
         end
     end)
 
-    table.sort(SwordList, function(a, b) return a:lower() < b:lower() end)
-    if #SwordList == 0 then table.insert(SwordList, "Default") end
 end
 buildRegistry()
 
@@ -592,7 +577,28 @@ local CURVES = {"Camera", "Dot", "Nearest", "Random", "Accel", "Backwards", "Slo
 local CurveMode = "Camera"
 
 local lastCFCalcFrame, cachedCF, frameCount = 0, nil, 0
-RunService.RenderStepped:Connect(function() frameCount += 1 end)
+local _frameBlockOk = nil
+
+local function IsBlockLegit()
+    local c = LocalPlayer.Character
+    if not c or not c.Parent then return false end
+    if c:GetAttribute("Stunned") then return false end
+    if c:GetAttribute("DoNotParry") then return false end
+    local alive = Workspace:FindFirstChild("Alive")
+    local dead  = Workspace:FindFirstChild("Dead")
+    local inAlive = alive and c.Parent == alive
+    local inDead  = dead  and c.Parent == dead
+    local lobbyParry    = LocalPlayer:GetAttribute("LobbyParry")
+    local lobbyTraining = LocalPlayer:GetAttribute("LobbyTraining")
+    if not inAlive and not (lobbyParry or (lobbyTraining and inDead)) then return false end
+    if lobbyParry and LocalPlayer:GetAttribute("InLobbyParryCooldown") then return false end
+    return true
+end
+
+RunService.RenderStepped:Connect(function()
+    frameCount += 1
+    _frameBlockOk = nil
+end)
 
 local function getCurveCF()
     if cachedCF and frameCount == lastCFCalcFrame then return cachedCF end
@@ -656,6 +662,7 @@ end
 -- REMOTE FIRE (no rate limiter — RenderStepped accumulator handles pacing)
 -- ============================================================
 local parryLockouts = {}
+local firedForCycle = {}   -- [ball] = true once we've fired for the current targeting cycle
 
 local function fireRemote(ball)
     if not _remote or not _args or not _tokenFound then return false end
@@ -679,10 +686,12 @@ local function fireRemote(ball)
 
     if ball then
         parryLockouts[ball] = os.clock()
+        firedForCycle[ball] = true
         local changedConn
         changedConn = ball:GetAttributeChangedSignal("target"):Connect(function()
             if ball:GetAttribute("target") ~= LocalPlayer.Name then
                 parryLockouts[ball] = nil
+                firedForCycle[ball] = nil
                 changedConn:Disconnect()
             end
         end)
@@ -759,9 +768,7 @@ local function _hookNetEvent(name, onFire)
         pcall(function()
             local ev = net[name]
             if ev and ev.OnClientEvent then
-                ev.OnClientEvent:Connect(function(...)
-                    if onFire({...}) then hooked = true end
-                end)
+                ev.OnClientEvent:Connect(function(...) onFire({...}) end)
                 hooked = true
             end
         end)
@@ -772,9 +779,7 @@ local function _hookNetEvent(name, onFire)
         pcall(function()
             local ev = ReplicatedStorage.Remotes:FindFirstChild(name)
             if ev and ev:IsA("RemoteEvent") then
-                ev.OnClientEvent:Connect(function(...)
-                    if onFire({...}) then hooked = true end
-                end)
+                ev.OnClientEvent:Connect(function(...) onFire({...}) end)
                 hooked = true
             end
         end)
@@ -830,9 +835,8 @@ RunService.RenderStepped:Connect(function()
     if not AP_On then return end
     -- TB overpowers AP: if triggerbot is on, let it own all parries.
     if TB_On then return end
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then return end
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
@@ -842,7 +846,8 @@ RunService.RenderStepped:Connect(function()
 
     for _, ball in pairs(balls) do
         if not ball then continue end
-        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.35 then
+        if firedForCycle[ball] then continue end
+        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
             continue
         end
 
@@ -906,6 +911,8 @@ end)
 
 RunService.RenderStepped:Connect(function()
     if not TB_On then return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then return end
 
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -914,7 +921,8 @@ RunService.RenderStepped:Connect(function()
     local balls = getAllBalls()
     for _, ball in pairs(balls) do
         if not ball then continue end
-        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.35 then
+        if firedForCycle[ball] then continue end
+        if parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
             continue
         end
 
@@ -962,6 +970,8 @@ local timeAccumulator = 0
 
 RunService.RenderStepped:Connect(function(dt)
     if not Spam_On then timeAccumulator = 0 return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then timeAccumulator = 0 return end
 
     local char = LocalPlayer.Character
     if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild('SingularityCape') then
@@ -1385,7 +1395,26 @@ s2:AddToggle("SFDet", { Title = "Slashes of Fury", Default = false, Callback = f
 -- SPAM TAB
 local s3 = Tabs.Spam:AddSection("Spam")
 s3:AddToggle("SpamToggle", { Title = "Enabled", Default = false, Callback = function(v) Spam_On = v; notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2}) end })
-s3:AddSlider("SpamRPS", { Title = "RPS", Default = 100, Min = 1, Max = 1000, Rounding = 0, Callback = function(v) SpamRPS = v; SpamInt = 1 / v end })
+local spamRPSSlider
+spamRPSSlider = s3:AddSlider("SpamRPS", {
+    Title = "RPS",
+    Default = 100,
+    Min = 5,
+    Max = 1000,
+    Rounding = 0,
+    Callback = function(v)
+        -- snap to the nearest multiple of 5 (like Tsukuyomi's Step = 5)
+        local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
+        SpamRPS = snapped
+        SpamInt = 1 / snapped
+        -- push the snapped value back into the slider so the label/handle match
+        if spamRPSSlider and spamRPSSlider.Value ~= snapped then
+            task.defer(function()
+                pcall(function() spamRPSSlider:SetValue(snapped) end)
+            end)
+        end
+    end,
+})
 s3:AddToggle("SpamDet", { Title = "Respect Detections", Default = true, Callback = function(v) SpamDetect = v end })
 s3:AddToggle("AnimFixSpam", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_Spam = v end })
 s3:AddKeybind("SpamKey", { Title = "Keybind", Default = "E", Callback = function() if Options.SpamToggle then Options.SpamToggle:SetValue(not Spam_On) else Spam_On = not Spam_On end end, ChangedCallback = function() end })
