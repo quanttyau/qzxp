@@ -412,14 +412,20 @@ local function checkTornadoActive()
     return false
 end
 
-local function isCurved()
-    local ball = getBall()
+local function isCurved(ball)
+    ball = ball or getBall()
     if not ball then return false end
     local z = ball:FindFirstChild("zoomies")
     if not z then return false end
     local vel = z.VectorVelocity
     local spd = vel.Magnitude
-    if spd < 1 then return false end
+    if spd < 1 then
+        CurveProps.__curving = 0
+        CurveProps.__last_warping = 0
+        CurveProps.__lerp_radians = 0
+        CurveProps.__previous_velocity = {}
+        return false
+    end
     local bdir = vel.Unit
     local char = LocalPlayer.Character
     if not char or not char.PrimaryPart then return false end
@@ -578,6 +584,7 @@ local CurveMode = "Camera"
 
 local lastCFCalcFrame, cachedCF, frameCount = 0, nil, 0
 local _frameBlockOk = nil
+local _frameEd, _frameEdFrame = nil, 0
 
 local function IsBlockLegit()
     local c = LocalPlayer.Character
@@ -669,9 +676,14 @@ local function fireRemote(ball, isSpam)
     if not _remote or not _args or not _tokenFound then return false end
 
     local rcf = getCurveCF()
-    local ed = {}
-    local af = Workspace:FindFirstChild("Alive")
-    if af then for _, e in pairs(af:GetChildren()) do if e.PrimaryPart then local ok, sp = pcall(Camera.WorldToScreenPoint, Camera, e.PrimaryPart.Position); if ok then ed[e.Name] = sp end end end end
+    if _frameEdFrame ~= frameCount then
+        _frameEdFrame = frameCount
+        local ed = {}
+        local af = Workspace:FindFirstChild("Alive")
+        if af then for _, e in pairs(af:GetChildren()) do if e.PrimaryPart then local ok, sp = pcall(Camera.WorldToScreenPoint, Camera, e.PrimaryPart.Position); if ok then ed[e.Name] = sp end end end end
+        _frameEd = ed
+    end
+    local ed = _frameEd
 
     local vp = Camera.ViewportSize
     local mp = Vector2.new(vp.X / 2, vp.Y / 2)
@@ -692,14 +704,21 @@ local function fireRemote(ball, isSpam)
         else
             firedForCycle[ball] = true
         end
-        local changedConn
+        local changedConn, destroyConn
         changedConn = ball:GetAttributeChangedSignal("target"):Connect(function()
             if ball:GetAttribute("target") ~= LocalPlayer.Name then
                 parryLockouts[ball] = nil
                 firedForCycle[ball] = nil
                 spamFiredForCycle[ball] = nil
                 changedConn:Disconnect()
+                if destroyConn then destroyConn:Disconnect() end
             end
+        end)
+        destroyConn = ball.Destroying:Connect(function()
+            parryLockouts[ball] = nil
+            firedForCycle[ball] = nil
+            spamFiredForCycle[ball] = nil
+            changedConn:Disconnect()
         end)
     end
 
@@ -872,7 +891,7 @@ RunService.RenderStepped:Connect(function()
         local csd = math.min(math.max(spd - 9.5, 0), 650)
         local sd = (2.4 + csd * 0.002) * (AP_Div or 1.1)
         local pa = pt + math.max(spd / sd, 14) + 4
-        local curved = isCurved()
+        local curved = isCurved(ball)
 
         if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
         if curved and dist > 18 then continue end
@@ -906,7 +925,6 @@ RunService.RenderStepped:Connect(function()
                 _apLastFire = os.clock()
                 if AnimFix_AP then PlaySingleParryAnimation() end
             end
-            break
         end
     end
 end)
@@ -915,40 +933,77 @@ end)
 -- TRIGGERBOT
 -- ============================================================
 
-RunService.RenderStepped:Connect(function()
-    if not TB_On then return end
-    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
-    if not _frameBlockOk then return end
+local function tryTBForBall(ball)
+    if not TB_On or not ball or not ball.Parent then return end
+    if firedForCycle[ball] then return end
+    if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
+
+    local tgt = ball:GetAttribute('target')
+    if tgt ~= LocalPlayer.Name then return end
+
+    if not IsBlockLegit() then return end
 
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root or root:FindFirstChild('SingularityCape') then return end
 
-    local balls = getAllBalls()
-    for _, ball in pairs(balls) do
-        if not ball then continue end
-        if firedForCycle[ball] then continue end
-        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
-            continue
-        end
+    if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+    if ball:FindFirstChild('ComboCounter') then return end
+    if InfDet and InfOn then return end
+    if DSDet and DSOn then return end
+    if THDet and THOn then return end
+    if SFDet and SFOn then return end
 
-        local tgt = ball:GetAttribute('target')
-        if tgt ~= LocalPlayer.Name then continue end
-
-        if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-        if ball:FindFirstChild('ComboCounter') then continue end
-        if InfDet and InfOn then continue end
-        if DSDet and DSOn then continue end
-        if THDet and THOn then continue end
-        if SFDet and SFOn then continue end
-
-        local fired = fireRemote(ball)
-        if fired then
-            _tbLastFire = os.clock()
-            if AnimFix_TB then PlaySingleParryAnimation() end
-        end
-        break
+    local fired = fireRemote(ball)
+    if fired then
+        _tbLastFire = os.clock()
+        if AnimFix_TB then PlaySingleParryAnimation() end
     end
+end
+
+-- Event-driven: fire the instant a ball targets us.
+task.spawn(function()
+    local conns = {}
+    local function attach(ball)
+        if not ball:GetAttribute('realBall') then return end
+        if conns[ball] then return end
+        conns[ball] = ball:GetAttributeChangedSignal('target'):Connect(function()
+            if ball:GetAttribute('target') == LocalPlayer.Name then
+                tryTBForBall(ball)
+                -- if the immediate attempt was blocked by a transient gate
+                -- (IsBlockLegit false for one frame, cape just appeared, etc)
+                -- retry once on the next frame before AP has a chance to fall
+                -- through the same gate and miss the window entirely
+                task.defer(function()
+                    if TB_On and ball and ball.Parent
+                       and ball:GetAttribute('target') == LocalPlayer.Name
+                       and not firedForCycle[ball] then
+                        tryTBForBall(ball)
+                    end
+                end)
+            end
+        end)
+        ball.Destroying:Connect(function()
+            if conns[ball] then conns[ball]:Disconnect(); conns[ball] = nil end
+        end)
+    end
+
+    local function scan()
+        local b = Workspace:FindFirstChild('Balls')
+        if not b then return end
+        for _, ball in ipairs(b:GetChildren()) do
+            attach(ball)
+        end
+    end
+
+    scan()
+    task.spawn(function()
+        local b = Workspace:WaitForChild('Balls', 9e9)
+        b.ChildAdded:Connect(function(child) task.defer(attach, child) end)
+    end)
+
+    -- Safety net: re-scan in case a ball's realBall attribute is set after it's added
+    while task.wait(2) do scan() end
 end)
 
 -- ============================================================
@@ -1346,10 +1401,6 @@ MakeDrag(bsT, bsF)
 local function bsLabel(o) local l = Instance.new("TextLabel"); l.Size = UDim2.new(1, 0, 0, 18); l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamBold; l.TextSize = 13; l.TextXAlignment = Enum.TextXAlignment.Left; l.TextColor3 = Color3.fromRGB(200, 200, 200); l.LayoutOrder = o; l.Text = "N/A"; l.Parent = bsC; return l end
 local bsSp, bsDi, bsTg, bsCu = bsLabel(1), bsLabel(2), bsLabel(3), bsLabel(4)
 
--- No Render
-local NR_On = false
-local NR_Conn = nil
-
 -- UI Update Loop
 RunService.RenderStepped:Connect(function()
     kbF.Visible = KBShow
@@ -1476,24 +1527,6 @@ local s7c = Tabs.Visuals:AddSection("Character")
 s7c:AddToggle("HeadlessT", { Title = "Headless", Default = false, Callback = function(v) Headless = v; if v then doHeadless() else undoHeadless() end end })
 s7c:AddToggle("KorbloxT", { Title = "Korblox Leg", Default = false, Callback = function(v) Korblox = v; if v then doKorblox() else undoKorblox() end end })
 
-local s7d = Tabs.Visuals:AddSection("Performance")
-s7d:AddToggle("NRToggle", {
-    Title = "No Slash VFX",
-    Default = false,
-    Callback = function(state)
-        NR_On = state
-        if state then
-            NR_Conn = Workspace.Runtime.ChildAdded:Connect(function(child)
-                if NR_On and child.Name:find("Slash") then
-                    task.defer(function() pcall(function() child:Destroy() end) end)
-                end
-            end)
-        else
-            if NR_Conn then NR_Conn:Disconnect(); NR_Conn = nil end
-        end
-    end
-})
-
 -- SETTINGS TAB
 local s8 = Tabs.Settings:AddSection("Engine")
 s8:AddToggle("KBToggle", { Title = "Keybind List", Default = false, Callback = function(v) KBShow = v; kbF.Visible = v end })
@@ -1538,7 +1571,6 @@ getgenv().qzxp_Cleanup = function()
         getgenv().swordModel = nil; getgenv().swordAnimations = nil; getgenv().swordFX = nil
         getgenv().slashName = nil; getgenv().updateSword = nil; getgenv().revertSword = nil
         getgenv().saveLastEquippedSword = nil; getgenv().setSkinUI = nil; getgenv().qzxp_Cleanup = nil
-        if NR_Conn then NR_Conn:Disconnect() end
     end)
 end
 
