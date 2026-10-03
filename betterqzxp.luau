@@ -73,6 +73,8 @@ local Camera      = Workspace.CurrentCamera
 local AP_On   = false
 local TB_On   = false
 local Spam_On = false
+-- Frame counter — hoisted so the ball cache (declared earlier than the
+-- Curve CFrame section) can reference it without shadowing to a global.
 local frameCount = 0
 
 local suppressNotifies = false
@@ -100,6 +102,7 @@ task.defer(function()
     notify({Title = "AC", Content = _tokenFound and "Bypassed" or "Failed", Duration = 4})
 end)
 
+-- [EDIT 4] buffer-backed tokenizer. Zero per-call table/string allocations.
 local _tokenBuf = buffer.create(16)
 
 local function _tokenize(uid)
@@ -201,6 +204,7 @@ local function buildRegistry()
             end
         end
     end)
+
 end
 buildRegistry()
 
@@ -215,7 +219,7 @@ local function resolve(input)
 end
 
 -- ============================================================
--- ANIMATION SYSTEM
+-- ANIMATION SYSTEM  (ported verbatim from INFINITE TSUKUYOMI)
 -- ============================================================
 local AnimFix_AP   = true
 local AnimFix_TB   = true
@@ -360,9 +364,17 @@ pcall(function()
     end)
 end)
 
+-- [EDIT 5] Removed: LocalPlayer.CharacterAdded:Connect(function() AnimFix_Cache = {} end)
+-- The cache is keyed by sword name and the animation instances live in
+-- SwordAPI.Collection (server-side, shared across respawns). Clearing it on
+-- every respawn forced a blocking :Invoke() round-trip on the first parry.
+
 -- ============================================================
 -- BALL SYSTEM
 -- ============================================================
+-- [EDIT 1] Frame-cached ball list. getBall/getAllBalls now resolve in O(1)
+-- and only touch Workspace.Balls once per frame, regardless of how many
+-- times the spam/AP/TB paths call them.
 local _ballCache, _ballCacheFrame = nil, -1
 
 local function refreshBallCache()
@@ -381,21 +393,61 @@ local function refreshBallCache()
     _ballCache = list
 end
 
--- [FIXED] Prefer the ball currently targeting us so AP/TB never evaluate
--- the wrong ball when multiple exist.
 local function getBall()
     refreshBallCache()
-    for _, ball in ipairs(_ballCache) do
-        if ball:GetAttribute('target') == LocalPlayer.Name then
-            return ball
-        end
-    end
     return _ballCache[1]
 end
 
 local function getAllBalls()
     refreshBallCache()
     return _ballCache
+end
+
+-- ============================================================
+-- MULTI-BALL BURST HELPERS
+-- ============================================================
+local BURST_MAX_PER_BALL     = 3
+local BURST_CLUSTER_RADIUS   = 8
+local BURST_NEAR_DIST        = 25
+local BURST_HIGHSPEED_THRESH = 2000
+local BURST_HIGHSPEED_FIRE   = 3
+
+local function computeBurstForFrame(rootPos, targetingBalls)
+    local n = #targetingBalls
+    if n == 0 then return 1, 0 end
+
+    local maxSpeed = 0
+    for _, b in ipairs(targetingBalls) do
+        local z = b:FindFirstChild('zoomies')
+        local spd = z and z.VectorVelocity.Magnitude or 0
+        if spd > maxSpeed then maxSpeed = spd end
+    end
+
+    local speedBurst = (maxSpeed >= BURST_HIGHSPEED_THRESH) and BURST_HIGHSPEED_FIRE or 1
+
+    local clusterCount = 1
+    if n >= 2 then
+        for i = 1, n do
+            local ballA = targetingBalls[i]
+            local distA = (rootPos - ballA.Position).Magnitude
+            if distA < BURST_NEAR_DIST then
+                local group = 1
+                for j = 1, n do
+                    if i ~= j then
+                        local ballB = targetingBalls[j]
+                        if (ballA.Position - ballB.Position).Magnitude < BURST_CLUSTER_RADIUS then
+                            group += 1
+                        end
+                    end
+                end
+                if group > clusterCount then clusterCount = group end
+            end
+        end
+    end
+
+    local burst = math.max(speedBurst, clusterCount)
+    if burst > BURST_MAX_PER_BALL then burst = BURST_MAX_PER_BALL end
+    return burst, clusterCount
 end
 
 local _ping, _pingTime = 0, 0
@@ -514,6 +566,8 @@ local function isCurved(ball)
     return dot < (dthr - 0.25)
 end
 
+-- [EDIT 3] Throttled curve cache. Curve state develops over tens of ms, so
+-- 30 Hz is plenty. Avoids running isCurved() every frame for every ball.
 local _curveCache, _curveCacheTime = {}, 0
 local CURVE_INTERVAL = 1 / 30
 
@@ -700,23 +754,26 @@ local function getCurveCF()
 end
 
 -- ============================================================
--- REMOTE FIRE
+-- REMOTE FIRE (no rate limiter — RenderStepped accumulator handles pacing)
 -- ============================================================
 local parryLockouts = {}
 local firedForCycle = {}
 local spamFiredForCycle = {}
 
+-- [EDIT 2] Persistent per-ball cleanup. One pair of connections per ball,
+-- ever — not two per fire. Eliminates the connection churn that was
+-- dominating GC at high RPS.
 local ballCleanupConns = {}
 
--- [FIXED] Clears per-cycle state on ANY target change (not just when
--- leaving us), so fast retargets away -> back fire immediately.
 local function ensureBallCleanup(ball)
     if ballCleanupConns[ball] then return end
     local changed, destroyed
     changed = ball:GetAttributeChangedSignal("target"):Connect(function()
-        parryLockouts[ball] = nil
-        firedForCycle[ball] = nil
-        spamFiredForCycle[ball] = nil
+        if ball:GetAttribute("target") ~= LocalPlayer.Name then
+            parryLockouts[ball] = nil
+            firedForCycle[ball] = nil
+            spamFiredForCycle[ball] = nil
+        end
     end)
     destroyed = ball.Destroying:Connect(function()
         parryLockouts[ball] = nil
@@ -729,7 +786,7 @@ local function ensureBallCleanup(ball)
     ballCleanupConns[ball] = changed
 end
 
-local function fireRemote(ball, isSpam)
+local function fireRemote(ball, isSpam, burstCount)
     if not _remote or not _args or not _tokenFound then return false end
 
     local rcf = getCurveCF()
@@ -752,7 +809,10 @@ local function fireRemote(ball, isSpam)
         if ok and loc then mp = loc end
     end
 
-    _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
+    local fires = math.max(1, math.floor(burstCount or 1))
+    for _ = 1, fires do
+        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
+    end
 
     if ball then
         parryLockouts[ball] = os.clock()
@@ -800,6 +860,9 @@ end)
 
 -- ============================================================
 -- TIME HOLE / SLASHES OF FURY DETECTION
+-- Scans every arg (not just a[1]) for the local player, since the
+-- net events pass (abilityName, caster, ...) or (caster, ...) and
+-- the caster isn't always in slot 1.
 -- ============================================================
 local function _argsContainMe(a)
     for _, v in ipairs(a) do
@@ -887,60 +950,72 @@ local function isApproachingPlayer(ball, rootPos)
     if not z then return false end
     local v = z.VectorVelocity
     if v.Magnitude < 1 then return false end
-    return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.35
+    return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
 end
 
--- [FIXED] AP loop: handles every ball targeting us in one frame, tight
--- 30ms lockout so fast retargets fire on the next tick.
 RunService.RenderStepped:Connect(function()
     if not AP_On then return end
     if TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
+
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
+    local rootPos = root.Position
 
     local balls = getAllBalls()
-    local rootPos = root.Position
-    local now = os.clock()
 
+    local targetingBalls = {}
     for _, ball in ipairs(balls) do
-        if not ball or not ball.Parent then continue end
-
+        if not ball then continue end
+        if firedForCycle[ball] then continue end
+        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then continue end
         local z = ball:FindFirstChild('zoomies')
         if not z then continue end
-
         local tgt = ball:GetAttribute('target')
         if tgt ~= LocalPlayer.Name then continue end
-
-        if not Spam_On and firedForCycle[ball] then continue end
-        if not Spam_On and parryLockouts[ball] and (now - parryLockouts[ball]) < 0.03 then
-            continue
-        end
-
         if not isApproachingPlayer(ball, rootPos) then continue end
-
-        local vel = z.VectorVelocity
-        local spd = vel.Magnitude
-        local pingSec = getPing() / 1000
-        local predictedPos = ball.Position + vel * pingSec
-        local dist = (rootPos - predictedPos).Magnitude
-        local tti = dist / math.max(spd, 1)
-        local fireWindow = 0.65 - (AP_Acc / 100) * 0.30
-        local curved = isCurvedCached(ball)
-        if curved then fireWindow = fireWindow + 0.10 end
-
-        if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-        if curved and dist > 18 then continue end
         if ball:FindFirstChild('ComboCounter') then continue end
         if root:FindFirstChild('SingularityCape') then continue end
         if InfDet and InfOn then continue end
         if DSDet and DSOn then continue end
         if THDet and THOn then continue end
         if SFDet and SFOn then continue end
+        targetingBalls[#targetingBalls + 1] = ball
+    end
 
-        if tti <= fireWindow then
+    if #targetingBalls == 0 then return end
+
+    local burstCount, clusterCount = computeBurstForFrame(rootPos, targetingBalls)
+
+    if clusterCount > 1 and not Spam_On then
+        for _, ball in ipairs(targetingBalls) do
+            if parryLockouts[ball] then
+                parryLockouts[ball] = math.min(parryLockouts[ball], os.clock() - 0.06)
+            end
+        end
+    end
+
+    for _, ball in ipairs(targetingBalls) do
+        if firedForCycle[ball] then continue end
+
+        local z = ball:FindFirstChild('zoomies')
+        local vel = z.VectorVelocity
+        local dist = (rootPos - ball.Position).Magnitude
+        local spd = vel.Magnitude
+
+        local pg = getPing() / 10
+        local pt = math.clamp(pg / 10, 5, 17)
+        local csd = math.min(math.max(spd - 9.5, 0), 650)
+        local sd = (2.4 + csd * 0.002) * (AP_Div or 1.1)
+        local pa = pt + math.max(spd / sd, 14) + 4
+        local curved = isCurvedCached(ball)
+
+        if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+        if curved and dist > 18 then continue end
+
+        if dist <= pa then
             if AutoAbility then
                 pcall(function()
                     local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
@@ -958,7 +1033,7 @@ RunService.RenderStepped:Connect(function()
                 end)
             end
 
-            local fired = fireRemote(ball)
+            local fired = fireRemote(ball, false, burstCount)
             if fired then
                 _apLastFire = os.clock()
                 if AnimFix_AP then PlaySingleParryAnimation() end
@@ -970,10 +1045,10 @@ end)
 -- ============================================================
 -- TRIGGERBOT
 -- ============================================================
-local function tryTBForBall(ball)
+local function tryTBForBall(ball, burstCount)
     if not TB_On or not ball or not ball.Parent then return end
     if firedForCycle[ball] then return end
-    if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.03 then return end
+    if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
 
     local tgt = ball:GetAttribute('target')
     if tgt ~= LocalPlayer.Name then return end
@@ -991,15 +1066,20 @@ local function tryTBForBall(ball)
     if THDet and THOn then return end
     if SFDet and SFOn then return end
 
-    local fired = fireRemote(ball)
+    local fired = fireRemote(ball, false, burstCount or 1)
     if fired then
         _tbLastFire = os.clock()
         if AnimFix_TB then PlaySingleParryAnimation() end
     end
 end
 
--- [FIXED] Single TB RenderStepped loop (duplicate removed), handles every
--- ball targeting us in one frame.
+-- ============================================================
+-- TRIGGERBOT RENDERSTEPPED FALLBACK
+-- The event-driven path only fires when the ball's 'target' attribute
+-- *changes* to us. If TB is toggled on while a ball is already targeting
+-- us, that transition never happens again, so the callback never runs.
+-- This sweep catches that case (and any other missed event) once per frame.
+-- ============================================================
 RunService.RenderStepped:Connect(function()
     if not TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
@@ -1010,63 +1090,47 @@ RunService.RenderStepped:Connect(function()
     if not root or root:FindFirstChild('SingularityCape') then return end
 
     local balls = getAllBalls()
-    local now = os.clock()
 
+    local targeting = {}
     for _, ball in ipairs(balls) do
-        if not ball or not ball.Parent then continue end
-        if not Spam_On and firedForCycle[ball] then continue end
-        if not Spam_On and parryLockouts[ball] and (now - parryLockouts[ball]) < 0.03 then
-            continue
-        end
-
-        local tgt = ball:GetAttribute('target')
-        if tgt ~= LocalPlayer.Name then continue end
-
+        if firedForCycle[ball] then continue end
+        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then continue end
+        if ball:GetAttribute('target') ~= LocalPlayer.Name then continue end
         if ball:FindFirstChild('ComboCounter') then continue end
         if InfDet and InfOn then continue end
         if DSDet and DSOn then continue end
         if THDet and THOn then continue end
         if SFDet and SFOn then continue end
+        targeting[#targeting + 1] = ball
+    end
 
-        local fired = fireRemote(ball)
-        if fired then
-            _tbLastFire = os.clock()
-            if AnimFix_TB then PlaySingleParryAnimation() end
-        end
+    if #targeting == 0 then return end
+
+    local burstCount = computeBurstForFrame(root.Position, targeting)
+
+    for _, ball in ipairs(targeting) do
+        tryTBForBall(ball, burstCount)
     end
 end)
 
--- [FIXED] Event-driven TB attach — seeds ensureBallCleanup immediately so
--- retargets clear state before the first fire, and clears state on EVERY
--- target change (not just when leaving us).
+-- Event-driven: fire the instant a ball targets us.
 task.spawn(function()
     local conns = {}
-
     local function attach(ball)
-        if conns[ball] then return end
         if not ball:GetAttribute('realBall') then return end
-
-        ensureBallCleanup(ball)
-
+        if conns[ball] then return end
         conns[ball] = ball:GetAttributeChangedSignal('target'):Connect(function()
-            local nt = ball:GetAttribute('target')
-
-            firedForCycle[ball] = nil
-            spamFiredForCycle[ball] = nil
-            parryLockouts[ball] = nil
-
-            if nt == LocalPlayer.Name then
-                tryTBForBall(ball)
+            if ball:GetAttribute('target') == LocalPlayer.Name then
+                tryTBForBall(ball, 1)
                 task.defer(function()
                     if TB_On and ball and ball.Parent
                        and ball:GetAttribute('target') == LocalPlayer.Name
                        and not firedForCycle[ball] then
-                        tryTBForBall(ball)
+                        tryTBForBall(ball, 1)
                     end
                 end)
             end
         end)
-
         ball.Destroying:Connect(function()
             if conns[ball] then conns[ball]:Disconnect(); conns[ball] = nil end
         end)
@@ -1086,7 +1150,7 @@ task.spawn(function()
         b.ChildAdded:Connect(function(child) task.defer(attach, child) end)
     end)
 
-    while task.wait(0.25) do scan() end
+    while task.wait(2) do scan() end
 end)
 
 -- ============================================================
@@ -1127,6 +1191,7 @@ RunService.RenderStepped:Connect(function(dt)
         timeAccumulator -= fires * interval
         if timeAccumulator > interval * 2 then timeAccumulator = 0 end
         if fires > 200 then fires = 200 end
+        -- [EDIT 1] resolve ball once per frame instead of once per fire.
         local ball = getBall()
         if ball then
             for _ = 1, fires do
@@ -1242,7 +1307,7 @@ getgenv().revertSword = function()
     AnimFix_Cache = {}
 end
 
--- VFX hooker
+-- VFX hooker (with duplication prevention via global tracking)
 local hooked = getgenv().qzxp_VFXHooked
 local vfxConns = getgenv().qzxp_VFXConns
 local vfxDisabled = getgenv().qzxp_VFXDisabled
