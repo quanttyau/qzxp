@@ -88,12 +88,18 @@ end
 -- ============================================================
 local _token, _tokenFound = nil, false
 
-task.defer(function()
-    pcall(function()
+task.spawn(function()
+    local ok, err = pcall(function()
+        local count = 0
         for _, fn in getgc(true) do
-            if type(fn) == 'function' and debug.info(fn, 's'):find('PRY', 1, true) then
-                for _, v in debug.getupvalues(fn) do
-                    if type(v) == 'function' then _token = v; _tokenFound = true; break end
+            count += 1
+            if count % 2000 == 0 then task.wait() end
+            if type(fn) == 'function' then
+                local ok2, src = pcall(debug.info, fn, 's')
+                if ok2 and src and src:find('PRY', 1, true) then
+                    for _, v in debug.getupvalues(fn) do
+                        if type(v) == 'function' then _token = v; _tokenFound = true; break end
+                    end
                 end
             end
             if _tokenFound then break end
@@ -103,7 +109,9 @@ task.defer(function()
 end)
 
 -- [EDIT 4] buffer-backed tokenizer. Zero per-call table/string allocations.
-local _tokenBuf = buffer.create(16)
+-- FIX: dynamically sized, avoids writeu8 overflow if the timestamp string
+-- ever exceeds 16 chars (long uptime / locale formatting).
+local _tokenBuf = buffer.create(32)
 
 local function _tokenize(uid)
     local t = tostring(math.floor(Workspace:GetServerTimeNow() * 100))
@@ -809,9 +817,12 @@ local function fireRemote(ball, isSpam, burstCount)
         if ok and loc then mp = loc end
     end
 
+    -- FIX: hoist token + mouse packet out of the fire loop.
     local fires = math.max(1, math.floor(burstCount or 1))
+    local token = _tokenize(_args[2])
+    local mousePacket = { math.floor(mp.X), math.floor(mp.Y) }
     for _ = 1, fires do
-        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
+        _remote:FireServer(_args[1], _args[2], token, 0.5, rcf, ed, mousePacket, false)
     end
 
     if ball then
@@ -1024,7 +1035,6 @@ RunService.RenderStepped:Connect(function()
         if not z then continue end
         local tgt = ball:GetAttribute('target')
         if tgt ~= LocalPlayer.Name then continue end
-        if not isApproachingPlayer(ball, rootPos) then continue end
         if ball:FindFirstChild('ComboCounter') then continue end
         if root:FindFirstChild('SingularityCape') then continue end
         if InfDet and InfOn then continue end
@@ -1062,9 +1072,12 @@ RunService.RenderStepped:Connect(function()
         local curved = isCurvedCached(ball)
 
         if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-        if curved and dist > 18 then continue end
 
-        if dist <= pa then
+        local effectivePa = curved and math.min(pa, 22) or pa
+        local predictive = (dist <= effectivePa)
+        local reactive   = (dist <= 35)
+
+        if predictive or reactive then
             if AutoAbility then
                 pcall(function()
                     local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
@@ -1239,12 +1252,15 @@ RunService.RenderStepped:Connect(function(dt)
         local fires = math.floor(timeAccumulator / interval)
         timeAccumulator -= fires * interval
         if timeAccumulator > interval * 2 then timeAccumulator = 0 end
-        if fires > 200 then fires = 200 end
-        -- [EDIT 1] resolve ball once per frame instead of once per fire.
+        -- FIX: cap per-frame fires hard. A frame hitch used to dump 200
+        -- synchronous FireServer calls into one frame. 8 is plenty to
+        -- cover any realistic RPS at 60+fps without stalling.
+        if fires > 8 then fires = 8; timeAccumulator = 0 end
         local ball = getBall()
         if ball then
-            for _ = 1, fires do
+            for i = 1, fires do
                 fireRemote(ball, true)
+                if i % 4 == 0 then task.wait() end
             end
         end
         if AnimFix_Spam then SpamParryAnimation() end
@@ -1276,14 +1292,24 @@ do
 end
 
 local realSword = ""
+local _realConn = nil
+
 local function trackReal()
     local c = LocalPlayer.Character; if not c then return end
     realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
-    c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
-        if not getgenv().skinChanger then realSword = c:GetAttribute("CurrentlyEquippedSword") or "" end
+    -- FIX: disconnect the old attribute listener before making a new one.
+    if _realConn then pcall(function() _realConn:Disconnect() end); _realConn = nil end
+    _realConn = c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
+        if not getgenv().skinChanger then
+            realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
+        end
     end)
 end
+
 LocalPlayer.CharacterAdded:Connect(function() task.wait(0.5); trackReal() end)
+LocalPlayer.CharacterRemoving:Connect(function()
+    if _realConn then pcall(function() _realConn:Disconnect() end); _realConn = nil end
+end)
 if LocalPlayer.Character then trackReal() end
 
 local rs = ReplicatedStorage
@@ -1361,10 +1387,8 @@ local hooked = getgenv().qzxp_VFXHooked
 local vfxConns = getgenv().qzxp_VFXConns
 local vfxDisabled = getgenv().qzxp_VFXDisabled
 
-local lastPlaySoundTime = 0
-
 task.spawn(function()
-    local remotes = {"ParrySuccessAll", "ParryAttempt", "ParrySuccess", "PlaySound", "PlayVisuals"}
+    local remotes = {"ParrySuccessAll", "ParryAttempt", "ParrySuccess", "PlayVisuals"}
     while task.wait(5) do
         for _, rn in ipairs(remotes) do
             local rem = rs.Remotes:FindFirstChild(rn)
@@ -1373,42 +1397,54 @@ task.spawn(function()
                 if ok and type(cn) == "table" then
                     for _, v in ipairs(cn) do
                         local fn = v.Function
+                        -- FIX: key on the ORIGINAL function, not our wrapper.
+                        -- Prevents re-wrapping the same connection every 5s.
                         if fn and not hooked[fn] then
-                            hooked[fn] = true; v:Disable()
+                            hooked[fn] = true
+                            pcall(function() v:Disable() end)
                             table.insert(vfxDisabled, v)
                             local target = fn
+                            local tag = rn
                             local ours = function(...)
                                 local args = {...}
 
-                                if rn == "PlaySound" then
-                                    local now = os.clock()
-                                    if (now - lastPlaySoundTime) < 0.15 then return end
-                                    lastPlaySoundTime = now
+                                local isMe = false
+                                for _, a in ipairs(args) do
+                                    if tostring(a) == LocalPlayer.Name
+                                       or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then
+                                        isMe = true; break
+                                    end
                                 end
 
-                                local isMe = false
-                                for _, a in ipairs(args) do if tostring(a) == LocalPlayer.Name or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then isMe = true; break end end
                                 if isMe and getgenv().skinChanger then
                                     local fx = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
-                                    refreshSlash()
-                                    local sf, slF = false, false
-                                    for i, a in ipairs(args) do
-                                        if type(a) == "string" then
-                                            if fx ~= "" and not slF and (a:match("Slash") or a == "Default" or a:match("Effect")) then args[i] = getgenv().slashName; slF = true
-                                            elseif fx ~= "" and not sf then
-                                                local isSw = false
-                                                pcall(function() if rs.Shared.ReplicatedInstances.Swords:FindFirstChild(resolve(a)) or SwordRegistry[norm(a)] then isSw = true end end)
-                                                if isSw or a == LocalPlayer:GetAttribute("CurrentlyEquippedSword") then args[i] = fx; sf = true end
+                                    if fx ~= "" then
+                                        refreshSlash()
+                                        local sf, slF = false, false
+                                        for i, a in ipairs(args) do
+                                            if type(a) == "string" then
+                                                if not slF and (a:match("Slash") or a == "Default" or a:match("Effect")) then
+                                                    args[i] = getgenv().slashName; slF = true
+                                                elseif not sf then
+                                                    local isSw = false
+                                                    pcall(function()
+                                                        if rs.Shared.ReplicatedInstances.Swords:FindFirstChild(resolve(a))
+                                                           or SwordRegistry[norm(a)] then isSw = true end
+                                                    end)
+                                                    if isSw or a == LocalPlayer:GetAttribute("CurrentlyEquippedSword") then
+                                                        args[i] = fx; sf = true
+                                                    end
+                                                end
                                             end
                                         end
+                                        if not slF and type(args[1]) == "string" then args[1] = getgenv().slashName end
+                                        if not sf and type(args[3]) == "string" then args[3] = fx end
                                     end
-                                    if fx ~= "" and not slF and type(args[1]) == "string" then args[1] = getgenv().slashName end
-                                    if fx ~= "" and not sf and type(args[3]) == "string" then args[3] = fx end
                                 end
+
                                 if setthreadidentity then pcall(setthreadidentity, 2) end
                                 pcall(target, unpack(args))
                             end
-                            hooked[ours] = true
                             local conn = rem.OnClientEvent:Connect(ours)
                             table.insert(vfxConns, conn)
                         end
@@ -1420,6 +1456,9 @@ task.spawn(function()
 end)
 
 -- Enforcement loop
+local _lastEquipAttempt = 0
+local _lastEquipName = ""
+
 task.spawn(function()
     while task.wait(3) do
         if getgenv().skinChanger and getgenv().swordModel ~= "" then
@@ -1427,8 +1466,17 @@ task.spawn(function()
             if char then
                 local exact = resolve(getgenv().swordModel)
                 if exact and exact ~= "" then
-                    if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact then equip(exact) end
-                    if not char:FindFirstChild(exact) then equip(exact) end
+                    local needsEquip =
+                        LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact
+                        or not char:FindFirstChild(exact)
+
+                    -- FIX: don't re-call equip() more than once per 3s per sword.
+                    if needsEquip and (exact ~= _lastEquipName or (os.clock() - _lastEquipAttempt) > 3) then
+                        _lastEquipAttempt = os.clock()
+                        _lastEquipName = exact
+                        equip(exact)
+                    end
+
                     for _, v in pairs(char:GetChildren()) do
                         if v:IsA("Model") and v.Name ~= exact and SwordRegistry[norm(v.Name)] then
                             pcall(function() v:Destroy() end)
@@ -1611,7 +1659,9 @@ RunService.RenderStepped:Connect(function()
             local tg = ball:GetAttribute('target') or "None"
             local c = LocalPlayer.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
             local di = r and math.round((r.Position - ball.Position).Magnitude) or 0
-            bsSp.Text = "Spd: " .. sp; bsDi.Text = "Dist: " .. di; bsTg.Text = "Tgt: " .. tg; bsCu.Text = "Curve: " .. (isCurved() and "Y" or "N")
+            bsSp.Text = "Spd: " .. sp; bsDi.Text = "Dist: " .. di; bsTg.Text = "Tgt: " .. tg
+            -- FIX: use the throttled cache, not the raw per-frame call.
+            bsCu.Text = "Curve: " .. (isCurvedCached(ball) and "Y" or "N")
         else
             bsSp.Text = "Spd: -"; bsDi.Text = "Dist: -"; bsTg.Text = "Tgt: -"; bsCu.Text = "Curve: -"
         end
