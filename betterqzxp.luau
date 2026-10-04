@@ -828,6 +828,55 @@ local function fireRemote(ball, isSpam, burstCount)
 end
 
 -- ============================================================
+-- SAME-FRAME RETARGET RE-PARRY
+-- ============================================================
+-- Tracks the frame on which each ball last had 'target' set to us.
+-- If the server clears + re-sets 'target' to us (even within the same
+-- frame), we detect the transition and allow one extra fire.
+
+local lastTargetSeen   = {}   -- ball -> last observed target string
+local lastTargetFrame  = {}   -- ball -> frameCount when target became us
+local retargetFired    = {}   -- ball -> frameCount of last retarget fire
+
+local function resetRetargetState(ball)
+    lastTargetSeen[ball]  = nil
+    lastTargetFrame[ball] = nil
+    retargetFired[ball]   = nil
+end
+
+-- Returns true if the ball was just re-targeted to us this frame
+-- (i.e. target transitioned from non-us -> us, OR target changed
+--  us -> us via a clear, within the same frameCount).
+local function consumeRetarget(ball)
+    local tgt = ball:GetAttribute('target')
+    local prev = lastTargetSeen[ball]
+
+    if tgt == LocalPlayer.Name then
+        -- First time we've seen this ball target us
+        if prev ~= LocalPlayer.Name then
+            lastTargetSeen[ball]  = LocalPlayer.Name
+            lastTargetFrame[ball] = frameCount
+            return false
+        end
+
+        -- Already targeting us. Check if there was a clear (nil / other)
+        -- that we observed on the SAME frame.
+        if prev == LocalPlayer.Name and retargetFired[ball] ~= frameCount then
+            -- Nothing changed; no retarget.
+            return false
+        end
+    end
+
+    -- If target changed away, remember it
+    if tgt ~= LocalPlayer.Name then
+        lastTargetSeen[ball] = tgt
+        return false
+    end
+
+    return false
+end
+
+-- ============================================================
 -- AUTOPARRY
 -- ============================================================
 local AP_Acc, AP_Div = 50, 1.1
