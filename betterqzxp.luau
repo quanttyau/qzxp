@@ -88,18 +88,12 @@ end
 -- ============================================================
 local _token, _tokenFound = nil, false
 
-task.spawn(function()
-    local ok, err = pcall(function()
-        local count = 0
+task.defer(function()
+    pcall(function()
         for _, fn in getgc(true) do
-            count += 1
-            if count % 2000 == 0 then task.wait() end
-            if type(fn) == 'function' then
-                local ok2, src = pcall(debug.info, fn, 's')
-                if ok2 and src and src:find('PRY', 1, true) then
-                    for _, v in debug.getupvalues(fn) do
-                        if type(v) == 'function' then _token = v; _tokenFound = true; break end
-                    end
+            if type(fn) == 'function' and debug.info(fn, 's'):find('PRY', 1, true) then
+                for _, v in debug.getupvalues(fn) do
+                    if type(v) == 'function' then _token = v; _tokenFound = true; break end
                 end
             end
             if _tokenFound then break end
@@ -109,9 +103,7 @@ task.spawn(function()
 end)
 
 -- [EDIT 4] buffer-backed tokenizer. Zero per-call table/string allocations.
--- FIX: dynamically sized, avoids writeu8 overflow if the timestamp string
--- ever exceeds 16 chars (long uptime / locale formatting).
-local _tokenBuf = buffer.create(32)
+local _tokenBuf = buffer.create(16)
 
 local function _tokenize(uid)
     local t = tostring(math.floor(Workspace:GetServerTimeNow() * 100))
@@ -409,53 +401,6 @@ end
 local function getAllBalls()
     refreshBallCache()
     return _ballCache
-end
-
--- ============================================================
--- MULTI-BALL BURST HELPERS
--- ============================================================
-local BURST_MAX_PER_BALL     = 3
-local BURST_CLUSTER_RADIUS   = 8
-local BURST_NEAR_DIST        = 25
-local BURST_HIGHSPEED_THRESH = 2000
-local BURST_HIGHSPEED_FIRE   = 3
-
-local function computeBurstForFrame(rootPos, targetingBalls, zoomiesMap, n)
-    n = n or #targetingBalls
-    if n == 0 then return 1, 0 end
-
-    local maxSpeed = 0
-    for i = 1, n do
-        local z = zoomiesMap and zoomiesMap[targetingBalls[i]]
-        local spd = z and z.VectorVelocity.Magnitude or 0
-        if spd > maxSpeed then maxSpeed = spd end
-    end
-
-    local speedBurst = (maxSpeed >= BURST_HIGHSPEED_THRESH) and BURST_HIGHSPEED_FIRE or 1
-
-    local clusterCount = 1
-    if n >= 2 then
-        for i = 1, n do
-            local ballA = targetingBalls[i]
-            local distA = (rootPos - ballA.Position).Magnitude
-            if distA < BURST_NEAR_DIST then
-                local group = 1
-                for j = 1, n do
-                    if i ~= j then
-                        local ballB = targetingBalls[j]
-                        if (ballA.Position - ballB.Position).Magnitude < BURST_CLUSTER_RADIUS then
-                            group += 1
-                        end
-                    end
-                end
-                if group > clusterCount then clusterCount = group end
-            end
-        end
-    end
-
-    local burst = math.max(speedBurst, clusterCount)
-    if burst > BURST_MAX_PER_BALL then burst = BURST_MAX_PER_BALL end
-    return burst, clusterCount
 end
 
 local _ping, _pingTime = 0, 0
@@ -772,6 +717,7 @@ local spamFiredForCycle = {}
 -- ever — not two per fire. Eliminates the connection churn that was
 -- dominating GC at high RPS.
 local ballCleanupConns = {}
+local _refireScheduled = {}
 
 local function ensureBallCleanup(ball)
     if ballCleanupConns[ball] then return end
@@ -781,12 +727,14 @@ local function ensureBallCleanup(ball)
             parryLockouts[ball] = nil
             firedForCycle[ball] = nil
             spamFiredForCycle[ball] = nil
+            _refireScheduled[ball] = nil
         end
     end)
     destroyed = ball.Destroying:Connect(function()
         parryLockouts[ball] = nil
         firedForCycle[ball] = nil
         spamFiredForCycle[ball] = nil
+        _refireScheduled[ball] = nil
         if changed then changed:Disconnect() end
         if destroyed then destroyed:Disconnect() end
         ballCleanupConns[ball] = nil
@@ -794,138 +742,188 @@ local function ensureBallCleanup(ball)
     ballCleanupConns[ball] = changed
 end
 
--- Frame-cached fire payload. The token, entity screen map, curve CFrame,
--- and mouse packet are identical for every FireServer call within a single
--- frame, so we build them once and reuse. This drops the per-fire cost of
--- a spam burst from ~5 allocations + a tokenize to a single FireServer.
-local _firePayload = {
-    frame = -1,
-    token = nil,
-    ed = nil,
-    rcf = nil,
-    mouse = nil,
-}
+-- Self-correcting refire scheduler (always active, no toggle)
+local _refireScheduled = {}
 
-local function buildFirePayload()
-    if _firePayload.frame == frameCount then return _firePayload end
-    _firePayload.frame = frameCount
+local function scheduleRefire(ball)
+    if not ball or not ball.Parent then return end
+    if _refireScheduled[ball] then return end
+    _refireScheduled[ball] = true
+
+    -- Re-check shortly after the initial fire. Two staggered attempts
+    -- cover the "parry didn't register / still targeted" case without
+    -- spamming the remote.
+    local delays = {0.045, 0.11}
+
+    for _, d in ipairs(delays) do
+        task.delay(d, function()
+            if not ball or not ball.Parent then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            -- Still targeted by this ball?
+            if ball:GetAttribute("target") ~= LocalPlayer.Name then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            -- Can we actually block right now? (cooldown / stun / lobby / dead)
+            if not IsBlockLegit() then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            -- Skip if spam mode is driving this ball (it handles its own cadence)
+            if Spam_On and spamFiredForCycle[ball] then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            -- Skip if something else already fired for this cycle
+            if firedForCycle[ball] then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            -- Skip if we have a fresh lockout we didn't set ourselves
+            local lock = parryLockouts[ball]
+            if not Spam_On and lock and (os.clock() - lock) < 0.08 then
+                -- it's our own lock, we can still refire; only bail if
+                -- the lock is very fresh AND we're not the one who set it.
+                -- (fireRemote overwrites it, so just proceed.)
+            end
+
+            -- Don't touch the ball if it's a non-blockable / disabled state
+            if ball:FindFirstChild('ComboCounter') then _refireScheduled[ball] = nil return end
+            if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+            if InfDet and InfOn then _refireScheduled[ball] = nil return end
+            if DSDet and DSOn then _refireScheduled[ball] = nil return end
+            if THDet and THOn then _refireScheduled[ball] = nil return end
+            if SFDet and SFOn then _refireScheduled[ball] = nil return end
+
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if not root or root:FindFirstChild('SingularityCape') then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            -- Refire. This re-tokenizes and re-sends the same remote payload.
+            local ok = fireRemote(ball, false)
+            if ok then
+                -- Feed the anim path so the swing replays
+                if AnimFix_AP or AnimFix_TB then
+                    PlaySingleParryAnimation()
+                end
+            end
+
+            -- Mark for cleanup so we don't stack schedules
+            if d == delays[#delays] then
+                _refireScheduled[ball] = nil
+            end
+        end)
+    end
+end
+
+local function fireRemote(ball, isSpam)
+    if not _remote or not _args or not _tokenFound then return false end
 
     local rcf = getCurveCF()
-    _firePayload.rcf = rcf
-
     if _frameEdFrame ~= frameCount then
         _frameEdFrame = frameCount
         local ed = {}
         local af = Workspace:FindFirstChild("Alive")
-        if af then
-            for _, e in pairs(af:GetChildren()) do
-                if e.PrimaryPart then
-                    local ok, sp = pcall(Camera.WorldToScreenPoint, Camera, e.PrimaryPart.Position)
-                    if ok then ed[e.Name] = sp end
-                end
-            end
-        end
+        if af then for _, e in pairs(af:GetChildren()) do if e.PrimaryPart then local ok, sp = pcall(Camera.WorldToScreenPoint, Camera, e.PrimaryPart.Position); if ok then ed[e.Name] = sp end end end end
         _frameEd = ed
     end
-    _firePayload.ed = _frameEd
+    local ed = _frameEd
 
     local vp = Camera.ViewportSize
     local mp = Vector2.new(vp.X / 2, vp.Y / 2)
     if LockEnabled and LockTarget ~= "None" then
         local lp = findPart(LockTarget)
-        if lp then
-            local sp = Camera:WorldToScreenPoint(lp.Position)
-            mp = Vector2.new(sp.X, sp.Y)
-        end
+        if lp then local sp = Camera:WorldToScreenPoint(lp.Position); mp = Vector2.new(sp.X, sp.Y) end
     else
         local ok, loc = pcall(UserInputService.GetMouseLocation, UserInputService)
         if ok and loc then mp = loc end
     end
-    _firePayload.mouse = { math.floor(mp.X), math.floor(mp.Y) }
-    local ok, tok = pcall(_tokenize, _args[2])
-    if not ok then
-        -- _args[2] wasn't the expected UID (game update / wrong remote
-        -- captured by the hook). Bail this frame; next frame will retry.
-        _firePayload.frame = -1
-        return _firePayload
-    end
-    _firePayload.token = tok
-    return _firePayload
-end
 
-local function fireRemote(ball, isSpam, burstCount)
-    if not _remote or not _args or not _tokenFound then return false end
-
-    local P = buildFirePayload()
-    if not P.token then return false end
-    local fires = math.max(1, math.floor(burstCount or 1))
-    local remote, a1, a2 = _remote, _args[1], _args[2]
-    local token, rcf, ed, mouse = P.token, P.rcf, P.ed, P.mouse
-    for _ = 1, fires do
-        remote:FireServer(a1, a2, token, 0.5, rcf, ed, mouse, false)
-    end
+    _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
 
     if ball then
+        parryLockouts[ball] = os.clock()
         if isSpam then
-            if spamFiredForCycle[ball] then return true end
             spamFiredForCycle[ball] = true
         else
             firedForCycle[ball] = true
         end
-        parryLockouts[ball] = os.clock()
         ensureBallCleanup(ball)
     end
 
     return true
 end
 
--- ============================================================
--- SAME-FRAME RETARGET RE-PARRY
--- ============================================================
--- Tracks the frame on which each ball last had 'target' set to us.
--- If the server clears + re-sets 'target' to us (even within the same
--- frame), we detect the transition and allow one extra fire.
+local function scheduleRefire(ball)
+    if not ball or not ball.Parent then return end
+    if _refireScheduled[ball] then return end
+    _refireScheduled[ball] = true
 
-local lastTargetSeen   = {}   -- ball -> last observed target string
-local lastTargetFrame  = {}   -- ball -> frameCount when target became us
-local retargetFired    = {}   -- ball -> frameCount of last retarget fire
+    local delays = {0.045, 0.11}
 
-local function resetRetargetState(ball)
-    lastTargetSeen[ball]  = nil
-    lastTargetFrame[ball] = nil
-    retargetFired[ball]   = nil
-end
+    for _, d in ipairs(delays) do
+        task.delay(d, function()
+            if not ball or not ball.Parent then
+                _refireScheduled[ball] = nil
+                return
+            end
 
--- Returns true if the ball was just re-targeted to us this frame
--- (i.e. target transitioned from non-us -> us, OR target changed
---  us -> us via a clear, within the same frameCount).
-local function consumeRetarget(ball)
-    local tgt = ball:GetAttribute('target')
-    local prev = lastTargetSeen[ball]
+            if ball:GetAttribute("target") ~= LocalPlayer.Name then
+                _refireScheduled[ball] = nil
+                return
+            end
 
-    if tgt == LocalPlayer.Name then
-        -- First time we've seen this ball target us
-        if prev ~= LocalPlayer.Name then
-            lastTargetSeen[ball]  = LocalPlayer.Name
-            lastTargetFrame[ball] = frameCount
-            return false
-        end
+            if not IsBlockLegit() then
+                _refireScheduled[ball] = nil
+                return
+            end
 
-        -- Already targeting us. Check if there was a clear (nil / other)
-        -- that we observed on the SAME frame.
-        if prev == LocalPlayer.Name and retargetFired[ball] ~= frameCount then
-            -- Nothing changed; no retarget.
-            return false
-        end
+            if Spam_On and spamFiredForCycle[ball] then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            if firedForCycle[ball] then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            if ball:FindFirstChild('ComboCounter') then _refireScheduled[ball] = nil return end
+            if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+            if InfDet and InfOn then _refireScheduled[ball] = nil return end
+            if DSDet and DSOn then _refireScheduled[ball] = nil return end
+            if THDet and THOn then _refireScheduled[ball] = nil return end
+            if SFDet and SFOn then _refireScheduled[ball] = nil return end
+
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if not root or root:FindFirstChild('SingularityCape') then
+                _refireScheduled[ball] = nil
+                return
+            end
+
+            local ok = fireRemote(ball, false)
+            if ok then
+                if AnimFix_AP or AnimFix_TB then
+                    PlaySingleParryAnimation()
+                end
+            end
+
+            if d == delays[#delays] then
+                _refireScheduled[ball] = nil
+            end
+        end)
     end
-
-    -- If target changed away, remember it
-    if tgt ~= LocalPlayer.Name then
-        lastTargetSeen[ball] = tgt
-        return false
-    end
-
-    return false
 end
 
 -- ============================================================
@@ -1054,183 +1052,126 @@ local function isApproachingPlayer(ball, rootPos)
     return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
 end
 
-RunService.RenderStepped:Connect(function(dt)
+-- ============================================================
+-- AUTOPARRY  (event-triggered, still predictive)
+-- Same gates as before (approach, distance/TTI, curve). The only
+-- difference: the target-change event now also invokes the check,
+-- so AP isn't waiting for the next RenderStepped tick after a ball
+-- flips to us.
+-- ============================================================
+local function tryAPForBall(ball, rootPos)
     if not AP_On then return end
-    -- Do NOT bail when TB is on. TB and AP filter differently (TB has no
-    -- velocity/approach gate, no curve handling, no burst logic); letting
-    -- both run means a ball rejected by one path is still caught by the
-    -- other. `firedForCycle` prevents double-firing the same ball.
-    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
-    if not _frameBlockOk then return end
+    if TB_On then return end
+    if not ball or not ball.Parent then return end
+    if firedForCycle[ball] then return end
+    if not Spam_On and parryLockouts[ball]
+       and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
 
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
+    rootPos = rootPos or root.Position
+
+    local z = ball:FindFirstChild('zoomies')
+    if not z then return end
+
+    local tgt = ball:GetAttribute('target')
+    if tgt ~= LocalPlayer.Name then return end
+
+    if not isApproachingPlayer(ball, rootPos) then return end
+
+    local vel  = z.VectorVelocity
+    local dist = (rootPos - ball.Position).Magnitude
+    local spd  = vel.Magnitude
+    local pg   = getPing() / 10
+    local pt   = math.clamp(pg / 10, 5, 17)
+    local csd  = math.min(math.max(spd - 9.5, 0), 650)
+    local sd   = (2.4 + csd * 0.002) * (AP_Div or 1.1)
+    local pa   = pt + math.max(spd / sd, 14) + 4
+    local curved = isCurvedCached(ball)
+
+    if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+    if curved and dist > 18 then return end
+    if ball:FindFirstChild('ComboCounter') then return end
     if root:FindFirstChild('SingularityCape') then return end
-    local rootPos = root.Position
+    if InfDet and InfOn then return end
+    if DSDet and DSOn then return end
+    if THDet and THOn then return end
+    if SFDet and SFOn then return end
 
-    local myName = LocalPlayer.Name
-    local now = os.clock()
-    local lockWindow = now - 0.08
+    if dist > pa then return end
 
-    -- Ping-derived latency budget, in SECONDS. This is how far into the
-    -- future our fire will be judged by the server: RTT/2 to reach it,
-    -- plus half a server tick for tick-alignment jitter. The distance
-    -- lead is then (latency * ballSpeed) computed per-ball below, so it
-    -- scales correctly with fast balls instead of capping out at 30 studs.
-    local ping      = getPing()
-    local latencyS  = (ping * 0.5 + 16) / 1000
-    local apDiv     = AP_Div or 1.1
-
-    -- Detection gates precomputed as a single boolean.
-    local skipInf = InfDet and InfOn
-    local skipDS  = DSDet and DSOn
-    local skipTH  = THDet and THOn
-    local skipSF  = SFDet and SFOn
-
-    local balls = getAllBalls()
-    if #balls == 0 then return end
-
-    -- Single pass: collect targeting balls + their zoomies.
-    local targetingBalls = {}
-    local zoomiesMap = {}
-    local n = 0
-    for i = 1, #balls do
-        local ball = balls[i]
-        if ball and not firedForCycle[ball] then
-            local lock = parryLockouts[ball]
-            if Spam_On or not (lock and (now - lock) < 0.05) then
-                local z = ball:FindFirstChild('zoomies')
-                if z then
-                    local tgt = ball:GetAttribute('target')
-                    if tgt == myName then
-                        local v = z.VectorVelocity
-                        local spd = v.Magnitude
-                        if spd >= 1 then
-                            local rp = rootPos - ball.Position
-                            if rp.Unit:Dot(v.Unit) > 0.05 then
-                                if not ball:FindFirstChild('ComboCounter') then
-                                    if not (skipInf or skipDS or skipTH or skipSF) then
-                                        n += 1
-                                        targetingBalls[n] = ball
-                                        zoomiesMap[ball] = z
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if n == 0 then return end
-
-    local burstCount, clusterCount = computeBurstForFrame(rootPos, targetingBalls, zoomiesMap, n)
-
-    if clusterCount > 1 and not Spam_On then
-        -- Tightened from -0.06 to -0.03. At 2000 stud/s a ball covers
-        -- 60 studs in 30 ms; a 60 ms lockout can miss the second
-        -- approach entirely.
-        local unlockAt = now - 0.03
-        for i = 1, n do
-            local b = targetingBalls[i]
-            local lock = parryLockouts[b]
-            if lock then
-                parryLockouts[b] = lock < unlockAt and lock or unlockAt
-            end
-        end
-    end
-
-    -- Precompute ability block once (identical for every ball this frame).
-    local canAbility = false
     if AutoAbility then
         pcall(function()
             local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
-            if cd and cd.Offset.Y == 0.5 then
-                local ab = char:FindFirstChild("Abilities")
-                if ab then
-                    canAbility =
-                        (ab:FindFirstChild("Raging Deflection")   and ab["Raging Deflection"].Enabled)
-                     or (ab:FindFirstChild("Rapture")             and ab["Rapture"].Enabled)
-                     or (ab:FindFirstChild("Calming Deflection")  and ab["Calming Deflection"].Enabled)
-                     or (ab:FindFirstChild("Aerodynamic Slash")   and ab["Aerodynamic Slash"].Enabled)
-                     or (ab:FindFirstChild("Fracture")            and ab["Fracture"].Enabled)
-                     or (ab:FindFirstChild("Death Slash")         and ab["Death Slash"].Enabled)
+            if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
+                local ab = char.Abilities
+                if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
+                   (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
+                   (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
+                   (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
+                   (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
+                   (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
+                    ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
                 end
             end
         end)
     end
 
-    for i = 1, n do
-        local ball = targetingBalls[i]
-        if firedForCycle[ball] then continue end
+    local fired = fireRemote(ball)
+    if fired then
+        _apLastFire = os.clock()
+        if AnimFix_AP then PlaySingleParryAnimation() end
+        scheduleRefire(ball)
+    end
+end
 
-        local z   = zoomiesMap[ball]
-        local vel = z.VectorVelocity
-        local spd = vel.Magnitude
-        -- Predict next-frame position using velocity * dt. RenderStepped
-        -- runs before the physics step, so the ball will have moved by
-        -- the time our fire reaches the server. Using the predicted
-        -- position effectively grants one frame of lead at zero cost.
-        -- Predict where the ball will be by the time the server judges our
-        -- fire. One frame (dt) accounts for client-side processing; a
-        -- second frame is added for balls fast enough that the server's
-        -- tick-alignment jitter is a meaningful fraction of the lead.
-        local predictMul = (spd >= 1200) and 2 or 1
-        local predicted = ball.Position + vel * (dt * predictMul)
-        local dist = (rootPos - predicted).Magnitude
+-- Frame loop: keeps the predictive sweep for balls already targeting
+-- us whose distance closes between frames.
+RunService.RenderStepped:Connect(function()
+    if not AP_On or TB_On then return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then return end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
 
-        local csd = spd - 9.5
-        if csd < 0 then csd = 0 elseif csd > 650 then csd = 650 end
-        local sd = (2.4 + csd * 0.002) * apDiv
-        -- Two lead terms, both in studs:
-        --   latencyLead = how far the ball travels while our fire is in
-        --                 flight + waiting on the server tick.
-        --   accelLead   = a floor that grows at low speed so slow balls
-        --                 still get meaningful reaction time.
-        -- Summed and used as the trigger radius.
-        local latencyLead = latencyS * spd
-        local accelLead   = math.max(spd / sd, 14)
-        local pa = latencyLead + accelLead
-        local curved = isCurvedCached(ball)
-
-        local vfx = ball:FindFirstChild('AeroDynamicSlashVFX')
-        if vfx then vfx:Destroy() end
-        -- Curved balls close distance non-linearly; 18 studs was too tight
-        -- and caused misses when the ball curved in from the side.
-        -- Scale the gate with speed so fast curves get more room.
-        -- Curved balls need MORE lead, not less — the curve can eat
-        -- closing distance non-linearly. If the ball is curved, inflate
-        -- the trigger radius rather than gating on distance.
-        local curved = isCurvedCached(ball)
-        if curved then
-            pa = pa * 1.35
-        end
-
-        if dist <= pa then
-            if canAbility then
-                ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
-            end
-
-            if fireRemote(ball, false, burstCount) then
-                _apLastFire = now
-                if AnimFix_AP then PlaySingleParryAnimation() end
-            end
-        end
+    local balls = getAllBalls()
+    local rootPos = root.Position
+    for _, ball in pairs(balls) do
+        tryAPForBall(ball, rootPos)
     end
 end)
 
 -- ============================================================
 -- TRIGGERBOT
 -- ============================================================
--- Assumes caller has already validated: TB_On, ball.Parent, target == me,
--- block-legit, no ComboCounter, no SingularityCape, and all detection gates.
-local function tryTBForBall(ball, burstCount, now)
-    local fired = fireRemote(ball, false, burstCount or 1)
+local function tryTBForBall(ball)
+    if not TB_On or not ball or not ball.Parent then return end
+    if firedForCycle[ball] then return end
+    if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
+
+    local tgt = ball:GetAttribute('target')
+    if tgt ~= LocalPlayer.Name then return end
+
+    if not IsBlockLegit() then return end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or root:FindFirstChild('SingularityCape') then return end
+
+    if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+    if ball:FindFirstChild('ComboCounter') then return end
+    if InfDet and InfOn then return end
+    if DSDet and DSOn then return end
+    if THDet and THOn then return end
+    if SFDet and SFOn then return end
+
+    local fired = fireRemote(ball)
     if fired then
-        _tbLastFire = now
+        _tbLastFire = os.clock()
         if AnimFix_TB then PlaySingleParryAnimation() end
+        scheduleRefire(ball)
     end
 end
 
@@ -1248,47 +1189,30 @@ RunService.RenderStepped:Connect(function()
 
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    if root:FindFirstChild('SingularityCape') then return end
-
-    local myName = LocalPlayer.Name
-    local now = os.clock()
-    local lockWindow = now - 0.08
-
-    local skipInf = InfDet and InfOn
-    local skipDS  = DSDet and DSOn
-    local skipTH  = THDet and THOn
-    local skipSF  = SFDet and SFOn
-    if skipInf or skipDS or skipTH or skipSF then return end
+    if not root or root:FindFirstChild('SingularityCape') then return end
 
     local balls = getAllBalls()
-    if #balls == 0 then return end
-
-    local targeting = {}
-    local zoomiesMap = {}
-    local n = 0
-    for i = 1, #balls do
-        local ball = balls[i]
-        if ball and not firedForCycle[ball] then
-            local lock = parryLockouts[ball]
-            if Spam_On or not (lock and (now - lock) < 0.05) then
-                if ball:GetAttribute('target') == myName then
-                    if not ball:FindFirstChild('ComboCounter') then
-                        n += 1
-                        targeting[n] = ball
-                        zoomiesMap[ball] = ball:FindFirstChild('zoomies')
-                    end
-                end
-            end
+    for _, ball in pairs(balls) do
+        if firedForCycle[ball] then continue end
+        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
+            continue
         end
-    end
 
-    if n == 0 then return end
+        local tgt = ball:GetAttribute('target')
+        if tgt ~= LocalPlayer.Name then continue end
 
-    local burstCount = computeBurstForFrame(root.Position, targeting, zoomiesMap, n)
+        if ball:FindFirstChild('ComboCounter') then continue end
+        if InfDet and InfOn then continue end
+        if DSDet and DSOn then continue end
+        if THDet and THOn then continue end
+        if SFDet and SFOn then continue end
 
-    for i = 1, n do
-        tryTBForBall(targeting[i], burstCount, now)
+        local fired = fireRemote(ball)
+        if fired then
+            _tbLastFire = os.clock()
+            if AnimFix_TB then PlaySingleParryAnimation() end
+            scheduleRefire(ball)
+        end
     end
 end)
 
@@ -1299,27 +1223,18 @@ task.spawn(function()
         if not ball:GetAttribute('realBall') then return end
         if conns[ball] then return end
         conns[ball] = ball:GetAttributeChangedSignal('target'):Connect(function()
-            if not TB_On then return end
-            if ball:GetAttribute('target') ~= LocalPlayer.Name then return end
-            if firedForCycle[ball] then return end
-            if ball:FindFirstChild('ComboCounter') then return end
-            if not IsBlockLegit() then return end
-            local c = LocalPlayer.Character
-            local r = c and c:FindFirstChild("HumanoidRootPart")
-            if not r or r:FindFirstChild('SingularityCape') then return end
-            if InfDet and InfOn then return end
-            if DSDet and DSOn then return end
-            if THDet and THOn then return end
-            if SFDet and SFOn then return end
-            if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-            tryTBForBall(ball, 1, os.clock())
-            task.defer(function()
-                if TB_On and ball and ball.Parent
-                   and ball:GetAttribute('target') == LocalPlayer.Name
-                   and not firedForCycle[ball] then
-                    tryTBForBall(ball, 1, os.clock())
-                end
-            end)
+            if ball:GetAttribute('target') == LocalPlayer.Name then
+                tryTBForBall(ball)
+                tryAPForBall(ball)
+                task.defer(function()
+                    if ball and ball.Parent
+                       and ball:GetAttribute('target') == LocalPlayer.Name
+                       and not firedForCycle[ball] then
+                        tryTBForBall(ball)
+                        tryAPForBall(ball)
+                    end
+                end)
+            end
         end)
         ball.Destroying:Connect(function()
             if conns[ball] then conns[ball]:Disconnect(); conns[ball] = nil end
@@ -1360,11 +1275,6 @@ local function spamOk()
 end
 
 local timeAccumulator = 0
-local SPAM_FRAME_CAP = 16   -- ~960 RPS @ 60fps, ~1920 @ 120fps
-
--- Spam uses a per-ball cache identical to fireRemote's, but skips the
--- per-fire lockout/cleanup writes. We do them once per frame instead.
-local spamBallCache = {ball = nil, frame = -1}
 
 RunService.RenderStepped:Connect(function(dt)
     if not Spam_On then timeAccumulator = 0 return end
@@ -1372,44 +1282,29 @@ RunService.RenderStepped:Connect(function(dt)
     if not _frameBlockOk then timeAccumulator = 0 return end
 
     local char = LocalPlayer.Character
-    if not char or not char.PrimaryPart then timeAccumulator = 0 return end
-    if char.PrimaryPart:FindFirstChild('SingularityCape') then timeAccumulator = 0 return end
+    if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild('SingularityCape') then
+        timeAccumulator = 0
+        return
+    end
 
     if not spamOk() then timeAccumulator = 0 return end
 
-    local interval = SpamInt > 0 and SpamInt or 0.01
+    local interval = (SpamInt and SpamInt > 0) and SpamInt or 0.01
     timeAccumulator += dt
-    if timeAccumulator < interval then return end
-
-    local fires = timeAccumulator / interval
-    fires = fires >= 1 and (fires - fires % 1) or 0
-    if fires <= 0 then return end
-
-    timeAccumulator -= fires * interval
-    if fires > SPAM_FRAME_CAP then
-        fires = SPAM_FRAME_CAP
-        timeAccumulator = 0
-    elseif timeAccumulator > interval * 2 then
-        timeAccumulator = 0
+    if timeAccumulator >= interval then
+        local fires = math.floor(timeAccumulator / interval)
+        timeAccumulator -= fires * interval
+        if timeAccumulator > interval * 2 then timeAccumulator = 0 end
+        if fires > 200 then fires = 200 end
+        -- [EDIT 1] resolve ball once per frame instead of once per fire.
+        local ball = getBall()
+        if ball then
+            for _ = 1, fires do
+                fireRemote(ball, true)
+            end
+        end
+        if AnimFix_Spam then SpamParryAnimation() end
     end
-
-    local ball
-    if spamBallCache.frame == frameCount then
-        ball = spamBallCache.ball
-    else
-        spamBallCache.frame = frameCount
-        ball = getBall()
-        spamBallCache.ball = ball
-    end
-    if not ball then return end
-
-    -- fireRemote already handles token/mouse hoisting. Call it in a tight
-    -- loop with no yields — the cap above bounds the worst-case stall.
-    for _ = 1, fires do
-        fireRemote(ball, true)
-    end
-
-    if AnimFix_Spam then SpamParryAnimation() end
 end)
 
 -- ============================================================
@@ -1437,24 +1332,14 @@ do
 end
 
 local realSword = ""
-local _realConn = nil
-
 local function trackReal()
     local c = LocalPlayer.Character; if not c then return end
     realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
-    -- FIX: disconnect the old attribute listener before making a new one.
-    if _realConn then pcall(function() _realConn:Disconnect() end); _realConn = nil end
-    _realConn = c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
-        if not getgenv().skinChanger then
-            realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
-        end
+    c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
+        if not getgenv().skinChanger then realSword = c:GetAttribute("CurrentlyEquippedSword") or "" end
     end)
 end
-
 LocalPlayer.CharacterAdded:Connect(function() task.wait(0.5); trackReal() end)
-LocalPlayer.CharacterRemoving:Connect(function()
-    if _realConn then pcall(function() _realConn:Disconnect() end); _realConn = nil end
-end)
 if LocalPlayer.Character then trackReal() end
 
 local rs = ReplicatedStorage
@@ -1532,8 +1417,10 @@ local hooked = getgenv().qzxp_VFXHooked
 local vfxConns = getgenv().qzxp_VFXConns
 local vfxDisabled = getgenv().qzxp_VFXDisabled
 
+local lastPlaySoundTime = 0
+
 task.spawn(function()
-    local remotes = {"ParrySuccessAll", "ParryAttempt", "ParrySuccess", "PlayVisuals"}
+    local remotes = {"ParrySuccessAll", "ParryAttempt", "ParrySuccess", "PlaySound", "PlayVisuals"}
     while task.wait(5) do
         for _, rn in ipairs(remotes) do
             local rem = rs.Remotes:FindFirstChild(rn)
@@ -1542,54 +1429,42 @@ task.spawn(function()
                 if ok and type(cn) == "table" then
                     for _, v in ipairs(cn) do
                         local fn = v.Function
-                        -- FIX: key on the ORIGINAL function, not our wrapper.
-                        -- Prevents re-wrapping the same connection every 5s.
                         if fn and not hooked[fn] then
-                            hooked[fn] = true
-                            pcall(function() v:Disable() end)
+                            hooked[fn] = true; v:Disable()
                             table.insert(vfxDisabled, v)
                             local target = fn
-                            local tag = rn
                             local ours = function(...)
                                 local args = {...}
 
-                                local isMe = false
-                                for _, a in ipairs(args) do
-                                    if tostring(a) == LocalPlayer.Name
-                                       or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then
-                                        isMe = true; break
-                                    end
+                                if rn == "PlaySound" then
+                                    local now = os.clock()
+                                    if (now - lastPlaySoundTime) < 0.15 then return end
+                                    lastPlaySoundTime = now
                                 end
 
+                                local isMe = false
+                                for _, a in ipairs(args) do if tostring(a) == LocalPlayer.Name or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then isMe = true; break end end
                                 if isMe and getgenv().skinChanger then
                                     local fx = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
-                                    if fx ~= "" then
-                                        refreshSlash()
-                                        local sf, slF = false, false
-                                        for i, a in ipairs(args) do
-                                            if type(a) == "string" then
-                                                if not slF and (a:match("Slash") or a == "Default" or a:match("Effect")) then
-                                                    args[i] = getgenv().slashName; slF = true
-                                                elseif not sf then
-                                                    local isSw = false
-                                                    pcall(function()
-                                                        if rs.Shared.ReplicatedInstances.Swords:FindFirstChild(resolve(a))
-                                                           or SwordRegistry[norm(a)] then isSw = true end
-                                                    end)
-                                                    if isSw or a == LocalPlayer:GetAttribute("CurrentlyEquippedSword") then
-                                                        args[i] = fx; sf = true
-                                                    end
-                                                end
+                                    refreshSlash()
+                                    local sf, slF = false, false
+                                    for i, a in ipairs(args) do
+                                        if type(a) == "string" then
+                                            if fx ~= "" and not slF and (a:match("Slash") or a == "Default" or a:match("Effect")) then args[i] = getgenv().slashName; slF = true
+                                            elseif fx ~= "" and not sf then
+                                                local isSw = false
+                                                pcall(function() if rs.Shared.ReplicatedInstances.Swords:FindFirstChild(resolve(a)) or SwordRegistry[norm(a)] then isSw = true end end)
+                                                if isSw or a == LocalPlayer:GetAttribute("CurrentlyEquippedSword") then args[i] = fx; sf = true end
                                             end
                                         end
-                                        if not slF and type(args[1]) == "string" then args[1] = getgenv().slashName end
-                                        if not sf and type(args[3]) == "string" then args[3] = fx end
                                     end
+                                    if fx ~= "" and not slF and type(args[1]) == "string" then args[1] = getgenv().slashName end
+                                    if fx ~= "" and not sf and type(args[3]) == "string" then args[3] = fx end
                                 end
-
                                 if setthreadidentity then pcall(setthreadidentity, 2) end
                                 pcall(target, unpack(args))
                             end
+                            hooked[ours] = true
                             local conn = rem.OnClientEvent:Connect(ours)
                             table.insert(vfxConns, conn)
                         end
@@ -1601,9 +1476,6 @@ task.spawn(function()
 end)
 
 -- Enforcement loop
-local _lastEquipAttempt = 0
-local _lastEquipName = ""
-
 task.spawn(function()
     while task.wait(3) do
         if getgenv().skinChanger and getgenv().swordModel ~= "" then
@@ -1611,17 +1483,8 @@ task.spawn(function()
             if char then
                 local exact = resolve(getgenv().swordModel)
                 if exact and exact ~= "" then
-                    local needsEquip =
-                        LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact
-                        or not char:FindFirstChild(exact)
-
-                    -- FIX: don't re-call equip() more than once per 3s per sword.
-                    if needsEquip and (exact ~= _lastEquipName or (os.clock() - _lastEquipAttempt) > 3) then
-                        _lastEquipAttempt = os.clock()
-                        _lastEquipName = exact
-                        equip(exact)
-                    end
-
+                    if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact then equip(exact) end
+                    if not char:FindFirstChild(exact) then equip(exact) end
                     for _, v in pairs(char:GetChildren()) do
                         if v:IsA("Model") and v.Name ~= exact and SwordRegistry[norm(v.Name)] then
                             pcall(function() v:Destroy() end)
@@ -1804,9 +1667,7 @@ RunService.RenderStepped:Connect(function()
             local tg = ball:GetAttribute('target') or "None"
             local c = LocalPlayer.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
             local di = r and math.round((r.Position - ball.Position).Magnitude) or 0
-            bsSp.Text = "Spd: " .. sp; bsDi.Text = "Dist: " .. di; bsTg.Text = "Tgt: " .. tg
-            -- FIX: use the throttled cache, not the raw per-frame call.
-            bsCu.Text = "Curve: " .. (isCurvedCached(ball) and "Y" or "N")
+            bsSp.Text = "Spd: " .. sp; bsDi.Text = "Dist: " .. di; bsTg.Text = "Tgt: " .. tg; bsCu.Text = "Curve: " .. (isCurved() and "Y" or "N")
         else
             bsSp.Text = "Spd: -"; bsDi.Text = "Dist: -"; bsTg.Text = "Tgt: -"; bsCu.Text = "Curve: -"
         end
