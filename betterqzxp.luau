@@ -70,12 +70,12 @@ local HttpService       = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
 
+-- [FIX] frameCount hoisted here so ball cache (declared below) can use it
+local frameCount = 0
+
 local AP_On   = false
 local TB_On   = false
 local Spam_On = false
--- Frame counter — hoisted so the ball cache (declared earlier than the
--- Curve CFrame section) can reference it without shadowing to a global.
-local frameCount = 0
 
 local suppressNotifies = false
 local function notify(cfg)
@@ -742,90 +742,6 @@ local function ensureBallCleanup(ball)
     ballCleanupConns[ball] = changed
 end
 
--- Self-correcting refire scheduler (always active, no toggle)
-local _refireScheduled = {}
-
-local function scheduleRefire(ball)
-    if not ball or not ball.Parent then return end
-    if _refireScheduled[ball] then return end
-    _refireScheduled[ball] = true
-
-    -- Re-check shortly after the initial fire. Two staggered attempts
-    -- cover the "parry didn't register / still targeted" case without
-    -- spamming the remote.
-    local delays = {0.045, 0.11}
-
-    for _, d in ipairs(delays) do
-        task.delay(d, function()
-            if not ball or not ball.Parent then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            -- Still targeted by this ball?
-            if ball:GetAttribute("target") ~= LocalPlayer.Name then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            -- Can we actually block right now? (cooldown / stun / lobby / dead)
-            if not IsBlockLegit() then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            -- Skip if spam mode is driving this ball (it handles its own cadence)
-            if Spam_On and spamFiredForCycle[ball] then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            -- Skip if something else already fired for this cycle
-            if firedForCycle[ball] then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            -- Skip if we have a fresh lockout we didn't set ourselves
-            local lock = parryLockouts[ball]
-            if not Spam_On and lock and (os.clock() - lock) < 0.08 then
-                -- it's our own lock, we can still refire; only bail if
-                -- the lock is very fresh AND we're not the one who set it.
-                -- (fireRemote overwrites it, so just proceed.)
-            end
-
-            -- Don't touch the ball if it's a non-blockable / disabled state
-            if ball:FindFirstChild('ComboCounter') then _refireScheduled[ball] = nil return end
-            if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-            if InfDet and InfOn then _refireScheduled[ball] = nil return end
-            if DSDet and DSOn then _refireScheduled[ball] = nil return end
-            if THDet and THOn then _refireScheduled[ball] = nil return end
-            if SFDet and SFOn then _refireScheduled[ball] = nil return end
-
-            local char = LocalPlayer.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            if not root or root:FindFirstChild('SingularityCape') then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            -- Refire. This re-tokenizes and re-sends the same remote payload.
-            local ok = fireRemote(ball, false)
-            if ok then
-                -- Feed the anim path so the swing replays
-                if AnimFix_AP or AnimFix_TB then
-                    PlaySingleParryAnimation()
-                end
-            end
-
-            -- Mark for cleanup so we don't stack schedules
-            if d == delays[#delays] then
-                _refireScheduled[ball] = nil
-            end
-        end)
-    end
-end
-
 local function fireRemote(ball, isSpam)
     if not _remote or not _args or not _tokenFound then return false end
 
@@ -849,7 +765,9 @@ local function fireRemote(ball, isSpam)
         if ok and loc then mp = loc end
     end
 
-    _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
+    pcall(function()
+        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
+    end)
 
     if ball then
         parryLockouts[ball] = os.clock()
@@ -1078,17 +996,20 @@ local function tryAPForBall(ball, rootPos)
     local tgt = ball:GetAttribute('target')
     if tgt ~= LocalPlayer.Name then return end
 
-    if not isApproachingPlayer(ball, rootPos) then return end
-
     local vel  = z.VectorVelocity
     local dist = (rootPos - ball.Position).Magnitude
     local spd  = vel.Magnitude
-    local pg   = getPing() / 10
-    local pt   = math.clamp(pg / 10, 5, 17)
+    local curved = isCurvedCached(ball)
+
+    -- Curved balls rarely have velocity pointing straight at us, so the
+    -- approach check rejects them until it's too late. Skip it when curved.
+    if not curved and not isApproachingPlayer(ball, rootPos) then return end
+
+    -- Ping compensation scaled by ball speed: higher ping -> fire earlier.
+    local pt   = math.clamp(getPing() / 12, 5, 20)
     local csd  = math.min(math.max(spd - 9.5, 0), 650)
     local sd   = (2.4 + csd * 0.002) * (AP_Div or 1.1)
     local pa   = pt + math.max(spd / sd, 14) + 4
-    local curved = isCurvedCached(ball)
 
     if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
     if curved and dist > 18 then return end
@@ -1702,7 +1623,7 @@ local spamRPSSlider
 spamRPSSlider = s3:AddSlider("SpamRPS", {
     Title = "RPS",
     Default = 100,
-    Min = 5,
+    Min = 10,
     Max = 1000,
     Rounding = 0,
     Callback = function(v)
