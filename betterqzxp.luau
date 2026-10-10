@@ -1049,7 +1049,7 @@ end
 
 -- Frame loop: keeps the predictive sweep for balls already targeting
 -- us whose distance closes between frames.
-RunService.RenderStepped:Connect(function()
+RunService.Heartbeat:Connect(function()
     if not AP_On or TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
@@ -1103,7 +1103,7 @@ end
 -- us, that transition never happens again, so the callback never runs.
 -- This sweep catches that case (and any other missed event) once per frame.
 -- ============================================================
-RunService.RenderStepped:Connect(function()
+RunService.Heartbeat:Connect(function()
     if not TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
@@ -1197,7 +1197,7 @@ end
 
 local timeAccumulator = 0
 
-RunService.RenderStepped:Connect(function(dt)
+RunService.Heartbeat:Connect(function(dt)
     if not Spam_On then timeAccumulator = 0 return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then timeAccumulator = 0 return end
