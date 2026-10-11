@@ -70,13 +70,12 @@ local HttpService       = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
 
--- [FIX] frameCount hoisted here so ball cache (declared below) can use it
+local AP_On   = false
+local TB_On   = false
+local Spam_On = false
+-- Frame counter — hoisted so the ball cache (declared earlier than the
+-- Curve CFrame section) can reference it without shadowing to a global.
 local frameCount = 0
-
--- Renamed internal states per image
-local ParryEnabled = false
-local TriggerEnabled = false
-local SpamEnabled = false
 
 local suppressNotifies = false
 local function notify(cfg)
@@ -222,9 +221,9 @@ end
 -- ============================================================
 -- ANIMATION SYSTEM  (ported verbatim from INFINITE TSUKUYOMI)
 -- ============================================================
-local AnimationFixEnabled = true
-local TriggerAnimationFix = true
-local SpamAnimationFix = true
+local AnimFix_AP   = true
+local AnimFix_TB   = true
+local AnimFix_Spam = true
 
 local AnimFix_Cache = {}
 
@@ -317,13 +316,13 @@ local _tbLastFire = 0
 local _apLastFire = 0
 
 local function _shouldTouchParryAnim()
-    if SpamEnabled and SpamAnimationFix then
+    if Spam_On and AnimFix_Spam then
         return true
     end
-    if TriggerEnabled and TriggerAnimationFix then
+    if TB_On and AnimFix_TB then
         return (os.clock() - _tbLastFire) < 0.5
     end
-    if ParryEnabled and AnimationFixEnabled then
+    if AP_On and AnimFix_AP then
         return (os.clock() - _apLastFire) < 0.5
     end
     return false
@@ -365,9 +364,17 @@ pcall(function()
     end)
 end)
 
+-- [EDIT 5] Removed: LocalPlayer.CharacterAdded:Connect(function() AnimFix_Cache = {} end)
+-- The cache is keyed by sword name and the animation instances live in
+-- SwordAPI.Collection (server-side, shared across respawns). Clearing it on
+-- every respawn forced a blocking :Invoke() round-trip on the first parry.
+
 -- ============================================================
 -- BALL SYSTEM
 -- ============================================================
+-- [EDIT 1] Frame-cached ball list. getBall/getAllBalls now resolve in O(1)
+-- and only touch Workspace.Balls once per frame, regardless of how many
+-- times the spam/AP/TB paths call them.
 local _ballCache, _ballCacheFrame = nil, -1
 
 local function refreshBallCache()
@@ -710,7 +717,6 @@ local spamFiredForCycle = {}
 -- ever — not two per fire. Eliminates the connection churn that was
 -- dominating GC at high RPS.
 local ballCleanupConns = {}
-local _refireScheduled = {}
 
 local function ensureBallCleanup(ball)
     if ballCleanupConns[ball] then return end
@@ -720,14 +726,12 @@ local function ensureBallCleanup(ball)
             parryLockouts[ball] = nil
             firedForCycle[ball] = nil
             spamFiredForCycle[ball] = nil
-            _refireScheduled[ball] = nil
         end
     end)
     destroyed = ball.Destroying:Connect(function()
         parryLockouts[ball] = nil
         firedForCycle[ball] = nil
         spamFiredForCycle[ball] = nil
-        _refireScheduled[ball] = nil
         if changed then changed:Disconnect() end
         if destroyed then destroyed:Disconnect() end
         ballCleanupConns[ball] = nil
@@ -758,9 +762,7 @@ local function fireRemote(ball, isSpam)
         if ok and loc then mp = loc end
     end
 
-    pcall(function()
-        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
-    end)
+    _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
 
     if ball then
         parryLockouts[ball] = os.clock()
@@ -775,87 +777,24 @@ local function fireRemote(ball, isSpam)
     return true
 end
 
-local function scheduleRefire(ball)
-    if not ball or not ball.Parent then return end
-    if _refireScheduled[ball] then return end
-    _refireScheduled[ball] = true
-
-    local delays = {0.045, 0.11}
-
-    for _, d in ipairs(delays) do
-        task.delay(d, function()
-            if not ball or not ball.Parent then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            if ball:GetAttribute("target") ~= LocalPlayer.Name then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            if not IsBlockLegit() then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            if SpamEnabled and spamFiredForCycle[ball] then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            if firedForCycle[ball] then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            if ball:FindFirstChild('ComboCounter') then _refireScheduled[ball] = nil return end
-            if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-            if InfDet and InfOn then _refireScheduled[ball] = nil return end
-            if DSDet and DSOn then _refireScheduled[ball] = nil return end
-            if THDet and THOn then _refireScheduled[ball] = nil return end
-            if SFDet and SFOn then _refireScheduled[ball] = nil return end
-
-            local char = LocalPlayer.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            if not root or root:FindFirstChild('SingularityCape') then
-                _refireScheduled[ball] = nil
-                return
-            end
-
-            local ok = fireRemote(ball, false)
-            if ok then
-                if AnimationFixEnabled or TriggerAnimationFix then
-                    PlaySingleParryAnimation()
-                end
-            end
-
-            if d == delays[#delays] then
-                _refireScheduled[ball] = nil
-            end
-        end)
-    end
-end
-
 -- ============================================================
 -- AUTOPARRY
 -- ============================================================
-local Accuracy = 100 -- Changed default to 100 per image
-local AutoParryDiv = 1.1
-local RandomAccuracy = false
+local AP_Acc, AP_Div = 50, 1.1
+local RandAcc = false
 local AutoAbility = false
 
-local function updDiv() AutoParryDiv = 0.7 + (Accuracy - 1) * (0.9 / 99) end
+local function updDiv() AP_Div = 0.7 + (AP_Acc - 1) * (0.9 / 99) end
 updDiv()
 
 task.spawn(function()
     while task.wait(1) do
-        if RandomAccuracy then
+        if RandAcc then
             local p = getPing()
-            if p >= 90 then Accuracy = 4
-            elseif p <= 50 then Accuracy = math.random(70, 100) end
+            if p >= 90 then AP_Acc = 4
+            elseif p <= 50 then AP_Acc = math.random(70, 100) end
             updDiv()
-            if Options and Options.Accuracy then pcall(function() Options.Accuracy:SetValue(Accuracy) end) end
+            if Options and Options.Accuracy then pcall(function() Options.Accuracy:SetValue(AP_Acc) end) end
         end
     end
 end)
@@ -871,6 +810,9 @@ end)
 
 -- ============================================================
 -- TIME HOLE / SLASHES OF FURY DETECTION
+-- Scans every arg (not just a[1]) for the local player, since the
+-- net events pass (abilityName, caster, ...) or (caster, ...) and
+-- the caster isn't always in slot 1.
 -- ============================================================
 local function _argsContainMe(a)
     for _, v in ipairs(a) do
@@ -961,80 +903,9 @@ local function isApproachingPlayer(ball, rootPos)
     return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
 end
 
--- ============================================================
--- AUTOPARRY  (event-triggered, still predictive)
--- ============================================================
-local function tryAPForBall(ball, rootPos)
-    if not ParryEnabled then return end
-    if TriggerEnabled then return end
-    if not ball or not ball.Parent then return end
-    if firedForCycle[ball] then return end
-    if not SpamEnabled and parryLockouts[ball]
-       and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
-
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    rootPos = rootPos or root.Position
-
-    local z = ball:FindFirstChild('zoomies')
-    if not z then return end
-
-    local tgt = ball:GetAttribute('target')
-    if tgt ~= LocalPlayer.Name then return end
-
-    local vel  = z.VectorVelocity
-    local dist = (rootPos - ball.Position).Magnitude
-    local spd  = vel.Magnitude
-    local curved = isCurvedCached(ball)
-
-    if not curved and not isApproachingPlayer(ball, rootPos) then return end
-
-    local pt   = math.clamp(getPing() / 12, 5, 20)
-    local csd  = math.min(math.max(spd - 9.5, 0), 650)
-    local sd   = (2.4 + csd * 0.002) * (AutoParryDiv or 1.1)
-    local pa   = pt + math.max(spd / sd, 14) + 4
-
-    if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-    if curved and dist > 18 then return end
-    if ball:FindFirstChild('ComboCounter') then return end
-    if root:FindFirstChild('SingularityCape') then return end
-    if InfDet and InfOn then return end
-    if DSDet and DSOn then return end
-    if THDet and THOn then return end
-    if SFDet and SFOn then return end
-
-    if dist > pa then return end
-
-    if AutoAbility then
-        pcall(function()
-            local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
-            if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
-                local ab = char.Abilities
-                if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
-                   (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
-                   (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
-                   (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
-                   (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
-                   (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
-                    ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
-                end
-            end
-        end)
-    end
-
-    local fired = fireRemote(ball)
-    if fired then
-        _apLastFire = os.clock()
-        if AnimationFixEnabled then PlaySingleParryAnimation() end
-        scheduleRefire(ball)
-    end
-end
-
--- Frame loop: keeps the predictive sweep for balls already targeting
--- us whose distance closes between frames.
-RunService.Heartbeat:Connect(function()
-    if not ParryEnabled or TriggerEnabled then return end
+RunService.RenderStepped:Connect(function()
+    if not AP_On then return end
+    if TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
     local char = LocalPlayer.Character
@@ -1043,8 +914,65 @@ RunService.Heartbeat:Connect(function()
 
     local balls = getAllBalls()
     local rootPos = root.Position
+
     for _, ball in pairs(balls) do
-        tryAPForBall(ball, rootPos)
+        if not ball then continue end
+        if firedForCycle[ball] then continue end
+        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
+            continue
+        end
+
+        local z = ball:FindFirstChild('zoomies')
+        if not z then continue end
+
+        local tgt = ball:GetAttribute('target')
+        if tgt ~= LocalPlayer.Name then continue end
+        if not isApproachingPlayer(ball, rootPos) then continue end
+
+        local vel = z.VectorVelocity
+        local dist = (rootPos - ball.Position).Magnitude
+        local spd = vel.Magnitude
+        local pg = getPing() / 10
+        local pt = math.clamp(pg / 10, 5, 17)
+        local csd = math.min(math.max(spd - 9.5, 0), 650)
+        local sd = (2.4 + csd * 0.002) * (AP_Div or 1.1)
+        local pa = pt + math.max(spd / sd, 14) + 4
+        -- [EDIT 3] use throttled curve lookup instead of per-frame isCurved()
+        local curved = isCurvedCached(ball)
+
+        if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+        if curved and dist > 18 then continue end
+        if ball:FindFirstChild('ComboCounter') then continue end
+        if root:FindFirstChild('SingularityCape') then continue end
+        if InfDet and InfOn then continue end
+        if DSDet and DSOn then continue end
+        if THDet and THOn then continue end
+        if SFDet and SFOn then continue end
+
+        if dist <= pa then
+            if AutoAbility then
+                pcall(function()
+                    local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
+                    if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
+                        local ab = char.Abilities
+                        if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
+                           (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
+                           (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
+                           (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
+                           (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
+                           (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
+                            ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
+                        end
+                    end
+                end)
+            end
+
+            local fired = fireRemote(ball)
+            if fired then
+                _apLastFire = os.clock()
+                if AnimFix_AP then PlaySingleParryAnimation() end
+            end
+        end
     end
 end)
 
@@ -1052,9 +980,9 @@ end)
 -- TRIGGERBOT
 -- ============================================================
 local function tryTBForBall(ball)
-    if not TriggerEnabled or not ball or not ball.Parent then return end
+    if not TB_On or not ball or not ball.Parent then return end
     if firedForCycle[ball] then return end
-    if not SpamEnabled and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
+    if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
 
     local tgt = ball:GetAttribute('target')
     if tgt ~= LocalPlayer.Name then return end
@@ -1075,16 +1003,19 @@ local function tryTBForBall(ball)
     local fired = fireRemote(ball)
     if fired then
         _tbLastFire = os.clock()
-        if TriggerAnimationFix then PlaySingleParryAnimation() end
-        scheduleRefire(ball)
+        if AnimFix_TB then PlaySingleParryAnimation() end
     end
 end
 
 -- ============================================================
 -- TRIGGERBOT RENDERSTEPPED FALLBACK
+-- The event-driven path only fires when the ball's 'target' attribute
+-- *changes* to us. If TB is toggled on while a ball is already targeting
+-- us, that transition never happens again, so the callback never runs.
+-- This sweep catches that case (and any other missed event) once per frame.
 -- ============================================================
-RunService.Heartbeat:Connect(function()
-    if not TriggerEnabled then return end
+RunService.RenderStepped:Connect(function()
+    if not TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
 
@@ -1095,7 +1026,7 @@ RunService.Heartbeat:Connect(function()
     local balls = getAllBalls()
     for _, ball in pairs(balls) do
         if firedForCycle[ball] then continue end
-        if not SpamEnabled and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
+        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then
             continue
         end
 
@@ -1111,8 +1042,7 @@ RunService.Heartbeat:Connect(function()
         local fired = fireRemote(ball)
         if fired then
             _tbLastFire = os.clock()
-            if TriggerAnimationFix then PlaySingleParryAnimation() end
-            scheduleRefire(ball)
+            if AnimFix_TB then PlaySingleParryAnimation() end
         end
     end
 end)
@@ -1126,13 +1056,11 @@ task.spawn(function()
         conns[ball] = ball:GetAttributeChangedSignal('target'):Connect(function()
             if ball:GetAttribute('target') == LocalPlayer.Name then
                 tryTBForBall(ball)
-                tryAPForBall(ball)
                 task.defer(function()
-                    if ball and ball.Parent
+                    if TB_On and ball and ball.Parent
                        and ball:GetAttribute('target') == LocalPlayer.Name
                        and not firedForCycle[ball] then
                         tryTBForBall(ball)
-                        tryAPForBall(ball)
                     end
                 end)
             end
@@ -1162,12 +1090,12 @@ end)
 -- ============================================================
 -- SPAM ENGINE
 -- ============================================================
-local SpamRate = 5 -- Changed default to 5 per image
-local SpamInterval = 0.2
-local RespectDetections = true
+local SpamRPS = 100
+local SpamInt = 0.01
+local SpamDetect = true
 
 local function spamOk()
-    if not RespectDetections then return true end
+    if not SpamDetect then return true end
     if InfDet and InfOn then return false end
     if DSDet and DSOn then return false end
     if THDet and THOn then return false end
@@ -1177,8 +1105,8 @@ end
 
 local timeAccumulator = 0
 
-RunService.Heartbeat:Connect(function(dt)
-    if not SpamEnabled then timeAccumulator = 0 return end
+RunService.RenderStepped:Connect(function(dt)
+    if not Spam_On then timeAccumulator = 0 return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then timeAccumulator = 0 return end
 
@@ -1190,7 +1118,7 @@ RunService.Heartbeat:Connect(function(dt)
 
     if not spamOk() then timeAccumulator = 0 return end
 
-    local interval = (SpamInterval and SpamInterval > 0) and SpamInterval or 0.01
+    local interval = (SpamInt and SpamInt > 0) and SpamInt or 0.01
     timeAccumulator += dt
     if timeAccumulator >= interval then
         local fires = math.floor(timeAccumulator / interval)
@@ -1204,7 +1132,7 @@ RunService.Heartbeat:Connect(function(dt)
                 fireRemote(ball, true)
             end
         end
-        if SpamAnimationFix then SpamParryAnimation() end
+        if AnimFix_Spam then SpamParryAnimation() end
     end
 end)
 
@@ -1513,7 +1441,7 @@ local kbGui = Instance.new("ScreenGui"); kbGui.Name = "q_KB"; kbGui.ResetOnSpawn
 local kbF = Instance.new("Frame"); kbF.Size = UDim2.new(0, 220, 0, 200); kbF.Position = UDim2.new(1, -235, 0.5, -100); kbF.BackgroundColor3 = Color3.fromRGB(25, 25, 25); kbF.BackgroundTransparency = 0.15; kbF.Visible = false; kbF.Parent = kbGui
 Instance.new("UICorner", kbF).CornerRadius = UDim.new(0, 6)
 local kbS = Instance.new("UIStroke"); kbS.Color = Color3.fromRGB(60, 60, 60); kbS.Thickness = 1; kbS.Parent = kbF
-local kbT = Instance.new("TextLabel"); kbT.Size = UDim2.new(1, 0, 0, 28); kbT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); kbT.BackgroundTransparency = 0.2; kbT.Font = Enum.Font.GothamBold; kbT.TextSize = 13; kbT.TextColor3 = Color3.fromRGB(200, 200, 200); kbT.Text = "  Keybind List"; kbT.TextXAlignment = Enum.TextXAlignment.Left; kbT.Parent = kbF
+local kbT = Instance.new("TextLabel"); kbT.Size = UDim2.new(1, 0, 0, 28); kbT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); kbT.BackgroundTransparency = 0.2; kbT.Font = Enum.Font.GothamBold; kbT.TextSize = 13; kbT.TextColor3 = Color3.fromRGB(200, 200, 200); kbT.Text = "  Keys"; kbT.TextXAlignment = Enum.TextXAlignment.Left; kbT.Parent = kbF
 Instance.new("UICorner", kbT).CornerRadius = UDim.new(0, 6)
 local kbC = Instance.new("Frame"); kbC.Size = UDim2.new(1, -10, 1, -34); kbC.Position = UDim2.new(0, 5, 0, 31); kbC.BackgroundTransparency = 1; kbC.Parent = kbF
 Instance.new("UIListLayout", kbC).Padding = UDim.new(0, 4)
@@ -1522,10 +1450,10 @@ MakeDrag(kbT, kbF)
 local function keyStr(o) if not o then return "?" end; local v = o.Value; return typeof(v) == "EnumItem" and v.Name or tostring(v) end
 
 local kbItems = {
-    {n = "Autoparry", k = function() return keyStr(Options and Options.ParryKey) end, s = function() return ParryEnabled end},
-    {n = "Manual Spam", k = function() return keyStr(Options and Options.SpamKey) end, s = function() return SpamEnabled end},
-    {n = "Triggerbot", k = function() return keyStr(Options and Options.TriggerKey) end, s = function() return TriggerEnabled end},
-    {n = "Parry Lock", k = function() return keyStr(Options and Options.LockKey) end, s = function() return LockEnabled end},
+    {n = "AP", k = function() return keyStr(Options and Options.APKey) end, s = function() return AP_On end},
+    {n = "Spam", k = function() return keyStr(Options and Options.SpamKey) end, s = function() return Spam_On end},
+    {n = "TB", k = function() return keyStr(Options and Options.TBKey) end, s = function() return TB_On end},
+    {n = "Lock", k = function() return keyStr(Options and Options.LockKey) end, s = function() return LockEnabled end},
 }
 
 local kbL = {}
@@ -1539,7 +1467,7 @@ local bsGui = Instance.new("ScreenGui"); bsGui.Name = "q_BS"; bsGui.ResetOnSpawn
 local bsF = Instance.new("Frame"); bsF.Size = UDim2.new(0, 220, 0, 120); bsF.Position = UDim2.new(1, -470, 0.5, -60); bsF.BackgroundColor3 = Color3.fromRGB(25, 25, 25); bsF.BackgroundTransparency = 0.15; bsF.Visible = false; bsF.Parent = bsGui
 Instance.new("UICorner", bsF).CornerRadius = UDim.new(0, 6)
 Instance.new("UIStroke", bsF).Color = Color3.fromRGB(60, 60, 60)
-local bsT = Instance.new("TextLabel"); bsT.Size = UDim2.new(1, 0, 0, 28); bsT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); bsT.BackgroundTransparency = 0.2; bsT.Font = Enum.Font.GothamBold; bsT.TextSize = 13; bsT.TextColor3 = Color3.fromRGB(200, 200, 200); bsT.Text = "  Ball Stats"; bsT.TextXAlignment = Enum.TextXAlignment.Left; bsT.Parent = bsF
+local bsT = Instance.new("TextLabel"); bsT.Size = UDim2.new(1, 0, 0, 28); bsT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); bsT.BackgroundTransparency = 0.2; bsT.Font = Enum.Font.GothamBold; bsT.TextSize = 13; bsT.TextColor3 = Color3.fromRGB(200, 200, 200); bsT.Text = "  Ball"; bsT.TextXAlignment = Enum.TextXAlignment.Left; bsT.Parent = bsF
 Instance.new("UICorner", bsT).CornerRadius = UDim.new(0, 6)
 local bsC = Instance.new("Frame"); bsC.Size = UDim2.new(1, -10, 1, -34); bsC.Position = UDim2.new(0, 5, 0, 31); bsC.BackgroundTransparency = 1; bsC.Parent = bsF
 Instance.new("UIListLayout", bsC).Padding = UDim.new(0, 3)
@@ -1568,9 +1496,9 @@ RunService.RenderStepped:Connect(function()
             local tg = ball:GetAttribute('target') or "None"
             local c = LocalPlayer.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
             local di = r and math.round((r.Position - ball.Position).Magnitude) or 0
-            bsSp.Text = "Speed: " .. sp; bsDi.Text = "Distance: " .. di; bsTg.Text = "Target: " .. tg; bsCu.Text = "Curving: " .. (isCurved() and "Y" or "N")
+            bsSp.Text = "Spd: " .. sp; bsDi.Text = "Dist: " .. di; bsTg.Text = "Tgt: " .. tg; bsCu.Text = "Curve: " .. (isCurved() and "Y" or "N")
         else
-            bsSp.Text = "Speed: -"; bsDi.Text = "Distance: -"; bsTg.Text = "Target: -"; bsCu.Text = "Curving: -"
+            bsSp.Text = "Spd: -"; bsDi.Text = "Dist: -"; bsTg.Text = "Tgt: -"; bsCu.Text = "Curve: -"
         end
     end
 end)
@@ -1581,13 +1509,13 @@ end)
 
 -- PARRY TAB
 local s1 = Tabs.Main:AddSection("Autoparry")
-s1:AddToggle("ParryToggle", { Title = "Parry Enabled", Default = false, Callback = function(v) ParryEnabled = v; notify({Title = "AP", Content = v and "On" or "Off", Duration = 2}) end })
-s1:AddSlider("Accuracy", { Title = "Accuracy", Default = 100, Min = 1, Max = 100, Rounding = 1, Callback = function(v) Accuracy = v; updDiv() end })
-s1:AddToggle("RandomizeAccuracy", { Title = "Randomize Acc", Default = false, Callback = function(v) RandomAccuracy = v end })
+s1:AddToggle("APToggle", { Title = "Enabled", Default = false, Callback = function(v) AP_On = v; notify({Title = "AP", Content = v and "On" or "Off", Duration = 2}) end })
+s1:AddSlider("Accuracy", { Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 1, Callback = function(v) AP_Acc = v; updDiv() end })
+s1:AddToggle("RandAccToggle", { Title = "Randomize Acc", Default = false, Callback = function(v) RandAcc = v end })
 s1:AddDropdown("CurveMode", { Title = "Curve", Values = CURVES, Default = "Camera", Multi = false, Callback = function(v) CurveMode = v end })
-s1:AddToggle("AutoAbility", { Title = "Auto Ability", Default = false, Callback = function(v) AutoAbility = v end })
-s1:AddToggle("AnimationFix", { Title = "Anim Fix", Default = true, Callback = function(v) AnimationFixEnabled = v end })
-s1:AddKeybind("ParryKey", { Title = "Keybind", Default = "Y", Callback = function() if Options.ParryToggle then Options.ParryToggle:SetValue(not ParryEnabled) end end, ChangedCallback = function() end })
+s1:AddToggle("AbilityToggle", { Title = "Auto Ability", Default = false, Callback = function(v) AutoAbility = v end })
+s1:AddToggle("AnimFixAP", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_AP = v end })
+s1:AddKeybind("APKey", { Title = "Keybind", Default = "P", Callback = function() if Options.APToggle then Options.APToggle:SetValue(not AP_On) end end, ChangedCallback = function() end })
 
 -- DETECTION TAB
 local s2 = Tabs.Detection:AddSection("Detections")
@@ -1598,18 +1526,18 @@ s2:AddToggle("SFDet", { Title = "Slashes of Fury", Default = false, Callback = f
 
 -- SPAM TAB
 local s3 = Tabs.Spam:AddSection("Spam")
-s3:AddToggle("SpamToggle", { Title = "Spam Enabled", Default = false, Callback = function(v) SpamEnabled = v; notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2}) end })
+s3:AddToggle("SpamToggle", { Title = "Enabled", Default = false, Callback = function(v) Spam_On = v; notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2}) end })
 local spamRPSSlider
-spamRPSSlider = s3:AddSlider("SpamRate", {
-    Title = "Rate",
-    Default = 10,
-    Min = 1,
+spamRPSSlider = s3:AddSlider("SpamRPS", {
+    Title = "RPS",
+    Default = 100,
+    Min = 5,
     Max = 1000,
     Rounding = 0,
     Callback = function(v)
         local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
-        SpamRate = snapped
-        SpamInterval = 1 / snapped
+        SpamRPS = snapped
+        SpamInt = 1 / snapped
         if spamRPSSlider and spamRPSSlider.Value ~= snapped then
             task.defer(function()
                 pcall(function() spamRPSSlider:SetValue(snapped) end)
@@ -1617,15 +1545,15 @@ spamRPSSlider = s3:AddSlider("SpamRate", {
         end
     end,
 })
-s3:AddToggle("RespectDetections", { Title = "Respect Detections", Default = true, Callback = function(v) RespectDetections = v end })
-s3:AddToggle("SpamAnimationFix", { Title = "Anim Fix", Default = true, Callback = function(v) SpamAnimationFix = v end })
-s3:AddKeybind("SpamKey", { Title = "Keybind", Default = "X", Callback = function() if Options.SpamToggle then Options.SpamToggle:SetValue(not SpamEnabled) else SpamEnabled = not SpamEnabled end end, ChangedCallback = function() end })
+s3:AddToggle("SpamDet", { Title = "Respect Detections", Default = true, Callback = function(v) SpamDetect = v end })
+s3:AddToggle("AnimFixSpam", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_Spam = v end })
+s3:AddKeybind("SpamKey", { Title = "Keybind", Default = "E", Callback = function() if Options.SpamToggle then Options.SpamToggle:SetValue(not Spam_On) else Spam_On = not Spam_On end end, ChangedCallback = function() end })
 
 -- TRIGGER TAB
 local s4 = Tabs.Trigger:AddSection("Triggerbot")
-s4:AddToggle("TriggerToggle", { Title = "Trigger Enabled", Default = false, Callback = function(v) TriggerEnabled = v; notify({Title = "TB", Content = v and "On" or "Off", Duration = 2}) end })
-s4:AddToggle("TriggerAnimationFix", { Title = "Anim Fix", Default = true, Callback = function(v) TriggerAnimationFix = v end })
-s4:AddKeybind("TriggerKey", { Title = "Keybind", Default = "Z", Callback = function() if Options.TriggerToggle then Options.TriggerToggle:SetValue(not TriggerEnabled) end end, ChangedCallback = function() end })
+s4:AddToggle("TBToggle", { Title = "Enabled", Default = false, Callback = function(v) TB_On = v; notify({Title = "TB", Content = v and "On" or "Off", Duration = 2}) end })
+s4:AddToggle("AnimFixTB", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_TB = v end })
+s4:AddKeybind("TBKey", { Title = "Keybind", Default = "R", Callback = function() if Options.TBToggle then Options.TBToggle:SetValue(not TB_On) end end, ChangedCallback = function() end })
 
 -- SKINS TAB
 local s5 = Tabs.Skins:AddSection("Sword Changer")
@@ -1647,10 +1575,10 @@ end })
 
 -- LOCK TAB
 local s6 = Tabs.Lock:AddSection("Parry Lock")
-s6:AddToggle("LockToggle", { Title = "Lock Enabled", Default = false, Callback = function(v) LockEnabled = v; notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2}) end })
+s6:AddToggle("LockToggle", { Title = "Enabled", Default = false, Callback = function(v) LockEnabled = v; notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2}) end })
 s6:AddDropdown("LockTarget", { Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v) LockTarget = pLookup[v] or "None"; refreshHL() end })
 s6:AddKeybind("CursorKey", { Title = "Cursor Lock", Default = "T", Callback = function() local t = closestToCursor(); if t then LockTarget = t; syncLockDD(); notify({Title = "Lock", Content = t, Duration = 2}) end end, ChangedCallback = function() end })
-s6:AddKeybind("LockKey", { Title = "Toggle Key", Default = "LeftAlt", Callback = function() if Options.LockToggle then Options.LockToggle:SetValue(not LockEnabled) end end, ChangedCallback = function() end })
+s6:AddKeybind("LockKey", { Title = "Toggle Key", Default = "L", Callback = function() if Options.LockToggle then Options.LockToggle:SetValue(not LockEnabled) end end, ChangedCallback = function() end })
 s6:AddButton({ Title = "Refresh List", Callback = function() syncLockDD() end })
 
 local s6h = Tabs.Lock:AddSection("Highlight")
