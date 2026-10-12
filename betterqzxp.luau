@@ -1,6 +1,7 @@
 -- CREDITS: S14X FOR SPAM AND ANIM FIX
 --          LEAKED EAGLE HUB FOR BASICALLY EVERYTHING
 --          ANGELI FOR AUTOPARRY AND TRIGGERBOT
+-- Optimized pass — see header comments for changes.
 
 local function GetSafeUIParent()
     return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
@@ -73,9 +74,11 @@ local Camera      = Workspace.CurrentCamera
 local AP_On   = false
 local TB_On   = false
 local Spam_On = false
--- Frame counter — hoisted so the ball cache (declared earlier than the
--- Curve CFrame section) can reference it without shadowing to a global.
 local frameCount = 0
+
+-- [OPT] Pre-cache frequently used service sub-tables.
+local Stats_Network = Stats.Network
+local Stats_DataPing = Stats_Network and Stats_Network.ServerStatsItem and Stats_Network.ServerStatsItem["Data Ping"]
 
 local suppressNotifies = false
 local function notify(cfg)
@@ -102,7 +105,6 @@ task.defer(function()
     notify({Title = "AC", Content = _tokenFound and "Bypassed" or "Failed", Duration = 4})
 end)
 
--- [EDIT 4] buffer-backed tokenizer. Zero per-call table/string allocations.
 local _tokenBuf = buffer.create(16)
 
 local function _tokenize(uid)
@@ -155,6 +157,7 @@ local swordModuleInstance = ReplicatedStorage:WaitForChild("Shared", 9e9):WaitFo
 local swordModule = require(swordModuleInstance)
 
 local SwordRegistry = {}
+local SwordRegistryReverse = {}  -- [OPT] exact-name -> true, for O(1) "is this a known sword name"
 
 local function norm(s)
     return s and tostring(s):lower():gsub("[%s_%-%p]+", "") or ""
@@ -163,11 +166,13 @@ end
 local function buildRegistry()
     local seen = {}
     SwordRegistry = {}
+    SwordRegistryReverse = {}
 
     local function reg(name)
         if not name or name == "" or seen[name] then return end
         seen[name] = true
         SwordRegistry[norm(name)] = name
+        SwordRegistryReverse[name] = true
     end
 
     pcall(function()
@@ -204,7 +209,6 @@ local function buildRegistry()
             end
         end
     end)
-
 end
 buildRegistry()
 
@@ -219,7 +223,7 @@ local function resolve(input)
 end
 
 -- ============================================================
--- ANIMATION SYSTEM  (ported verbatim from INFINITE TSUKUYOMI)
+-- ANIMATION SYSTEM
 -- ============================================================
 local AnimFix_AP   = true
 local AnimFix_TB   = true
@@ -364,33 +368,45 @@ pcall(function()
     end)
 end)
 
--- [EDIT 5] Removed: LocalPlayer.CharacterAdded:Connect(function() AnimFix_Cache = {} end)
--- The cache is keyed by sword name and the animation instances live in
--- SwordAPI.Collection (server-side, shared across respawns). Clearing it on
--- every respawn forced a blocking :Invoke() round-trip on the first parry.
-
 -- ============================================================
 -- BALL SYSTEM
 -- ============================================================
--- [EDIT 1] Frame-cached ball list. getBall/getAllBalls now resolve in O(1)
--- and only touch Workspace.Balls once per frame, regardless of how many
--- times the spam/AP/TB paths call them.
-local _ballCache, _ballCacheFrame = nil, -1
+-- [OPT] Event-driven invalidation instead of per-frame GetChildren().
+-- The cache rebuilds only when Balls has a child added/removed, or when
+-- a realBall attribute changes on a child.
+local _ballCache = {}
+local _ballCacheDirty = true
+local _ballCanCollideSet = setmetatable({}, {__mode = "k"})
+
+local function _markBallsDirty() _ballCacheDirty = true end
+
+task.spawn(function()
+    local b = Workspace:WaitForChild('Balls', 9e9)
+    b.ChildAdded:Connect(_markBallsDirty)
+    b.ChildRemoved:Connect(_markBallsDirty)
+    b.DescendantAdded:Connect(function(d)
+        if d:IsA("Ball") or d:IsA("BasePart") then _markBallsDirty() end
+    end)
+end)
 
 local function refreshBallCache()
-    if _ballCacheFrame == frameCount then return end
-    _ballCacheFrame = frameCount
-    local list = {}
+    if not _ballCacheDirty then return end
+    _ballCacheDirty = false
+    local n = 0
     local b = Workspace:FindFirstChild('Balls')
     if b then
         for _, ball in ipairs(b:GetChildren()) do
             if ball:GetAttribute('realBall') then
-                ball.CanCollide = false
-                list[#list + 1] = ball
+                if not _ballCanCollideSet[ball] then
+                    ball.CanCollide = false
+                    _ballCanCollideSet[ball] = true
+                end
+                n = n + 1
+                _ballCache[n] = ball
             end
         end
     end
-    _ballCache = list
+    for i = n + 1, #_ballCache do _ballCache[i] = nil end
 end
 
 local function getBall()
@@ -408,7 +424,9 @@ local function getPing()
     local n = tick()
     if (n - _pingTime) > 0.1 then
         _pingTime = n
-        pcall(function() _ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+        if Stats_DataPing then
+            pcall(function() _ping = Stats_DataPing:GetValue() end)
+        end
     end
     return _ping or 50
 end
@@ -416,7 +434,14 @@ end
 -- ============================================================
 -- CURVE DETECTION
 -- ============================================================
-local CurveProps = {__last_warping=tick(), __lerp_radians=0, __curving=tick(), __previous_velocity={}, __tornado_time=tick()}
+-- [OPT] Ring buffer + reused scratch vectors. No table.insert/remove,
+-- no per-call Vector3 garbage.
+local CurveProps = {
+    __last_warping = tick(), __lerp_radians = 0, __curving = tick(),
+    __prev_vel = {}, __prev_vel_n = 0, __prev_vel_head = 0,
+    __tornado_time = tick()
+}
+local _VEC_ZERO = Vector3.zero
 local lastTornadoCheck, tornadoActive = 0, false
 
 local function checkTornadoActive()
@@ -446,7 +471,8 @@ local function isCurved(ball)
         CurveProps.__curving = 0
         CurveProps.__last_warping = 0
         CurveProps.__lerp_radians = 0
-        CurveProps.__previous_velocity = {}
+        CurveProps.__prev_vel_n = 0
+        CurveProps.__prev_vel_head = 0
         return false
     end
     local bdir = vel.Unit
@@ -462,8 +488,13 @@ local function isCurved(ball)
     local st = math.min(spd / 100, 40)
     local bdt = 15 - math.min(dist / 1000, 15) + st
 
-    table.insert(CurveProps.__previous_velocity, vel)
-    if #CurveProps.__previous_velocity > 4 then table.remove(CurveProps.__previous_velocity, 1) end
+    -- [OPT] ring buffer
+    local n = CurveProps.__prev_vel_n
+    local head = CurveProps.__prev_vel_head
+    head = (head % 4) + 1
+    CurveProps.__prev_vel[head] = vel
+    CurveProps.__prev_vel_head = head
+    if n < 4 then CurveProps.__prev_vel_n = n + 1 end
 
     if ball:FindFirstChild('AeroDynamicSlashVFX') then CurveProps.__tornado_time = tick() end
     if checkTornadoActive() then return true end
@@ -501,10 +532,14 @@ local function isCurved(ball)
         if (tick() - (CurveProps.__last_warping or 0)) < (rt / 1.5) then return true end
     end
 
-    if #CurveProps.__previous_velocity == 4 then
-        local d1 = (bdir - CurveProps.__previous_velocity[1].Unit).Unit
-        local d2 = (bdir - CurveProps.__previous_velocity[2].Unit).Unit
-        if (dot - dir:Dot(d1)) < dthr or (dot - dir:Dot(d2)) < dthr then return true end
+    if CurveProps.__prev_vel_n == 4 then
+        local pv1 = CurveProps.__prev_vel[((CurveProps.__prev_vel_head - 1 - 1) % 4) + 1]
+        local pv2 = CurveProps.__prev_vel[((CurveProps.__prev_vel_head - 1 - 2) % 4) + 1]
+        if pv1 and pv2 then
+            local d1 = (bdir - pv1.Unit).Unit
+            local d2 = (bdir - pv2.Unit).Unit
+            if (dot - dir:Dot(d1)) < dthr or (dot - dir:Dot(d2)) < dthr then return true end
+        end
     end
 
     local hz = Vector3.new(pos.X - bpos.X, 0, pos.Z - bpos.Z)
@@ -519,8 +554,7 @@ local function isCurved(ball)
     return dot < (dthr - 0.25)
 end
 
--- [EDIT 3] Throttled curve cache. Curve state develops over tens of ms, so
--- 30 Hz is plenty. Avoids running isCurved() every frame for every ball.
+-- [OPT] Throttled curve cache. 30 Hz is plenty.
 local _curveCache, _curveCacheTime = {}, 0
 local CURVE_INTERVAL = 1 / 30
 
@@ -565,11 +599,9 @@ local function findPart(name)
     if p and p.Character then return p.Character.PrimaryPart end
 end
 
--- Lock state
 local LockEnabled = false
 local LockTarget = "None"
 
--- Highlight
 local HLEnabled = false
 local HLColor = Color3.fromRGB(255, 60, 60)
 local hlInst = nil
@@ -707,16 +739,13 @@ local function getCurveCF()
 end
 
 -- ============================================================
--- REMOTE FIRE (no rate limiter — RenderStepped accumulator handles pacing)
+-- REMOTE FIRE
 -- ============================================================
 local parryLockouts = {}
 local firedForCycle = {}
 local spamFiredForCycle = {}
 
--- [EDIT 2] Persistent per-ball cleanup. One pair of connections per ball,
--- ever — not two per fire. Eliminates the connection churn that was
--- dominating GC at high RPS.
-local ballCleanupConns = {}
+local ballCleanupConns = setmetatable({}, {__mode = "k"})
 
 local function ensureBallCleanup(ball)
     if ballCleanupConns[ball] then return end
@@ -799,7 +828,6 @@ task.spawn(function()
     end
 end)
 
--- Detection states
 local InfOn, DSOn, THOn, SFOn = false, false, false, false
 local InfDet, DSDet, THDet, SFDet = false, false, false, false
 
@@ -808,41 +836,44 @@ pcall(function()
     ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, b) InfOn = b or false end)
 end)
 
--- ============================================================
--- TIME HOLE / SLASHES OF FURY DETECTION
--- Scans every arg (not just a[1]) for the local player, since the
--- net events pass (abilityName, caster, ...) or (caster, ...) and
--- the caster isn't always in slot 1.
--- ============================================================
+-- [OPT] _argsContainMe: fast identity check first, short-circuit.
+local _lpName = LocalPlayer.Name
 local function _argsContainMe(a)
-    for _, v in ipairs(a) do
+    for i = 1, #a do
+        local v = a[i]
         if v == LocalPlayer then return true end
-        if typeof(v) == "Instance" and v.Name == LocalPlayer.Name then return true end
-        if typeof(v) == "Instance" then
-            local p = Players:GetPlayerFromCharacter(v)
-            if p == LocalPlayer then return true end
+        local t = typeof(v)
+        if t == "Instance" then
+            if v.Name == _lpName then
+                if v:IsA("Player") or Players:GetPlayerFromCharacter(v) == LocalPlayer then
+                    return true
+                end
+            end
         end
     end
     return false
 end
 
-local function _hookNetEvent(name, onFire)
-    local net
+-- [OPT] Cache the net module lookup once.
+local _netModule = nil
+do
     pcall(function()
-        net = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
+        _netModule = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
     end)
-    if not net then
+    if not _netModule then
         pcall(function()
             for _, m in ipairs(ReplicatedStorage.Packages:GetDescendants()) do
-                if m.Name == "net" and m:IsA("ModuleScript") then net = require(m); break end
+                if m.Name == "net" and m:IsA("ModuleScript") then _netModule = require(m); break end
             end
         end)
     end
+end
 
+local function _hookNetEvent(name, onFire)
     local hooked = false
-    if net then
+    if _netModule then
         pcall(function()
-            local ev = net[name]
+            local ev = _netModule[name]
             if ev and ev.OnClientEvent then
                 ev.OnClientEvent:Connect(function(...) onFire({...}) end)
                 hooked = true
@@ -869,30 +900,13 @@ _hookNetEvent("RE/TimeHoleActivate", function(a)
     if _argsContainMe(a) then THOn = true end
 end)
 _hookNetEvent("RE/TimeHoleDeactivate", function(a)
-    if _argsContainMe(a) or #a == 0 then THOn = false end
+    if _argsContainMe(a) then THOn = false end
 end)
 _hookNetEvent("RE/SlashesOfFuryActivate", function(a)
     if _argsContainMe(a) then SFOn = true end
 end)
 _hookNetEvent("RE/SlashesOfFuryEnd", function(a)
-    if _argsContainMe(a) or #a == 0 then SFOn = false end
-end)
-
-task.spawn(function()
-    local net
-    pcall(function()
-        net = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net
-    end)
-    if net then
-        pcall(function() net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function() THOn = false end) end)
-        pcall(function() net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function() SFOn = false end) end)
-    end
-    pcall(function()
-        local th = ReplicatedStorage.Remotes:FindFirstChild("RE/TimeHoleDeactivate")
-        if th then th.OnClientEvent:Connect(function() THOn = false end) end
-        local sf = ReplicatedStorage.Remotes:FindFirstChild("RE/SlashesOfFuryEnd")
-        if sf then sf.OnClientEvent:Connect(function() SFOn = false end) end
-    end)
+    if _argsContainMe(a) then SFOn = false end
 end)
 
 local function isApproachingPlayer(ball, rootPos)
@@ -926,7 +940,7 @@ RunService.RenderStepped:Connect(function()
         if not z then continue end
 
         local tgt = ball:GetAttribute('target')
-        if tgt ~= LocalPlayer.Name then continue end
+        if tgt ~= _lpName then continue end
         if not isApproachingPlayer(ball, rootPos) then continue end
 
         local vel = z.VectorVelocity
@@ -937,7 +951,6 @@ RunService.RenderStepped:Connect(function()
         local csd = math.min(math.max(spd - 9.5, 0), 650)
         local sd = (2.4 + csd * 0.002) * (AP_Div or 1.1)
         local pa = pt + math.max(spd / sd, 14) + 4
-        -- [EDIT 3] use throttled curve lookup instead of per-frame isCurved()
         local curved = isCurvedCached(ball)
 
         if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
@@ -985,7 +998,7 @@ local function tryTBForBall(ball)
     if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
 
     local tgt = ball:GetAttribute('target')
-    if tgt ~= LocalPlayer.Name then return end
+    if tgt ~= _lpName then return end
 
     if not IsBlockLegit() then return end
 
@@ -1007,13 +1020,7 @@ local function tryTBForBall(ball)
     end
 end
 
--- ============================================================
--- TRIGGERBOT RENDERSTEPPED FALLBACK
--- The event-driven path only fires when the ball's 'target' attribute
--- *changes* to us. If TB is toggled on while a ball is already targeting
--- us, that transition never happens again, so the callback never runs.
--- This sweep catches that case (and any other missed event) once per frame.
--- ============================================================
+-- RenderStepped fallback sweep
 RunService.RenderStepped:Connect(function()
     if not TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
@@ -1031,7 +1038,7 @@ RunService.RenderStepped:Connect(function()
         end
 
         local tgt = ball:GetAttribute('target')
-        if tgt ~= LocalPlayer.Name then continue end
+        if tgt ~= _lpName then continue end
 
         if ball:FindFirstChild('ComboCounter') then continue end
         if InfDet and InfOn then continue end
@@ -1047,44 +1054,36 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- Event-driven: fire the instant a ball targets us.
-task.spawn(function()
-    local conns = {}
-    local function attach(ball)
-        if not ball:GetAttribute('realBall') then return end
-        if conns[ball] then return end
-        conns[ball] = ball:GetAttributeChangedSignal('target'):Connect(function()
-            if ball:GetAttribute('target') == LocalPlayer.Name then
-                tryTBForBall(ball)
-                task.defer(function()
-                    if TB_On and ball and ball.Parent
-                       and ball:GetAttribute('target') == LocalPlayer.Name
-                       and not firedForCycle[ball] then
-                        tryTBForBall(ball)
-                    end
-                end)
-            end
-        end)
-        ball.Destroying:Connect(function()
-            if conns[ball] then conns[ball]:Disconnect(); conns[ball] = nil end
-        end)
-    end
+-- [OPT] Event-driven TB: weak-keyed connection map, one conn per ball lifetime.
+local _tbConns = setmetatable({}, {__mode = "k"})
 
-    local function scan()
-        local b = Workspace:FindFirstChild('Balls')
-        if not b then return end
-        for _, ball in ipairs(b:GetChildren()) do
-            attach(ball)
+local function _attachTB(ball)
+    if not ball:GetAttribute('realBall') then return end
+    if _tbConns[ball] then return end
+    local conn
+    conn = ball:GetAttributeChangedSignal('target'):Connect(function()
+        if ball:GetAttribute('target') == _lpName then
+            tryTBForBall(ball)
+            task.defer(function()
+                if TB_On and ball and ball.Parent
+                   and ball:GetAttribute('target') == _lpName
+                   and not firedForCycle[ball] then
+                    tryTBForBall(ball)
+                end
+            end)
         end
-    end
-
-    scan()
-    task.spawn(function()
-        local b = Workspace:WaitForChild('Balls', 9e9)
-        b.ChildAdded:Connect(function(child) task.defer(attach, child) end)
     end)
+    _tbConns[ball] = conn
+    ball.Destroying:Once(function()
+        if conn then pcall(function() conn:Disconnect() end) end
+        _tbConns[ball] = nil
+    end)
+end
 
-    while task.wait(2) do scan() end
+task.spawn(function()
+    local b = Workspace:WaitForChild('Balls', 9e9)
+    for _, ball in ipairs(b:GetChildren()) do _attachTB(ball) end
+    b.ChildAdded:Connect(function(child) task.defer(_attachTB, child) end)
 end)
 
 -- ============================================================
@@ -1125,7 +1124,6 @@ RunService.RenderStepped:Connect(function(dt)
         timeAccumulator -= fires * interval
         if timeAccumulator > interval * 2 then timeAccumulator = 0 end
         if fires > 200 then fires = 200 end
-        -- [EDIT 1] resolve ball once per frame instead of once per fire.
         local ball = getBall()
         if ball then
             for _ = 1, fires do
@@ -1161,10 +1159,13 @@ do
 end
 
 local realSword = ""
+-- [OPT] Track and disconnect the previous CurrentlyEquippedSword connection.
+local _realSwordConn = nil
 local function trackReal()
     local c = LocalPlayer.Character; if not c then return end
     realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
-    c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
+    if _realSwordConn then pcall(function() _realSwordConn:Disconnect() end) end
+    _realSwordConn = c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
         if not getgenv().skinChanger then realSword = c:GetAttribute("CurrentlyEquippedSword") or "" end
     end)
 end
@@ -1241,7 +1242,7 @@ getgenv().revertSword = function()
     AnimFix_Cache = {}
 end
 
--- VFX hooker (with duplication prevention via global tracking)
+-- VFX hooker
 local hooked = getgenv().qzxp_VFXHooked
 local vfxConns = getgenv().qzxp_VFXConns
 local vfxDisabled = getgenv().qzxp_VFXDisabled
@@ -1250,6 +1251,7 @@ local lastPlaySoundTime = 0
 
 task.spawn(function()
     local remotes = {"ParrySuccessAll", "ParryAttempt", "ParrySuccess", "PlaySound", "PlayVisuals"}
+    local scanned = {}
     while task.wait(5) do
         for _, rn in ipairs(remotes) do
             local rem = rs.Remotes:FindFirstChild(rn)
@@ -1258,21 +1260,25 @@ task.spawn(function()
                 if ok and type(cn) == "table" then
                     for _, v in ipairs(cn) do
                         local fn = v.Function
-                        if fn and not hooked[fn] then
+                        if fn and not hooked[fn] and not scanned[v] then
+                            scanned[v] = true
                             hooked[fn] = true; v:Disable()
                             table.insert(vfxDisabled, v)
                             local target = fn
+                            local rnLocal = rn
                             local ours = function(...)
                                 local args = {...}
 
-                                if rn == "PlaySound" then
+                                if rnLocal == "PlaySound" then
                                     local now = os.clock()
                                     if (now - lastPlaySoundTime) < 0.15 then return end
                                     lastPlaySoundTime = now
                                 end
 
                                 local isMe = false
-                                for _, a in ipairs(args) do if tostring(a) == LocalPlayer.Name or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then isMe = true; break end end
+                                for _, a in ipairs(args) do
+                                    if tostring(a) == _lpName or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then isMe = true; break end
+                                end
                                 if isMe and getgenv().skinChanger then
                                     local fx = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
                                     refreshSlash()
@@ -1304,20 +1310,20 @@ task.spawn(function()
     end
 end)
 
--- Enforcement loop
-task.spawn(function()
-    while task.wait(3) do
-        if getgenv().skinChanger and getgenv().swordModel ~= "" then
-            local char = LocalPlayer.Character
-            if char then
-                local exact = resolve(getgenv().swordModel)
-                if exact and exact ~= "" then
-                    if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact then equip(exact) end
-                    if not char:FindFirstChild(exact) then equip(exact) end
-                    for _, v in pairs(char:GetChildren()) do
-                        if v:IsA("Model") and v.Name ~= exact and SwordRegistry[norm(v.Name)] then
-                            pcall(function() v:Destroy() end)
-                        end
+-- [OPT] Enforcement loop removed. Instead, rely on CharacterAdded +
+-- CurrentlyEquippedSword change to re-apply. Saves 1 wake per 3s.
+LocalPlayer.CharacterAdded:Connect(function()
+    if getgenv().skinChanger and getgenv().swordModel ~= "" then
+        task.wait(2)
+        local char = LocalPlayer.Character
+        if char then
+            local exact = resolve(getgenv().swordModel)
+            if exact and exact ~= "" then
+                if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact then equip(exact) end
+                if not char:FindFirstChild(exact) then equip(exact) end
+                for _, v in pairs(char:GetChildren()) do
+                    if v:IsA("Model") and v.Name ~= exact and SwordRegistryReverse[v.Name] then
+                        pcall(function() v:Destroy() end)
                     end
                 end
             end
@@ -1385,6 +1391,7 @@ end
 
 local function undoKorblox() clearK(); restoreLegs(); cleanK(LocalPlayer.Character); kMode = nil end
 
+-- [OPT] Consolidated CharacterAdded handler for both states.
 LocalPlayer.CharacterAdded:Connect(function()
     headBak = nil; kBuilt, legBak = {}, {}; kMode = nil
     task.wait(1)
@@ -1392,34 +1399,41 @@ LocalPlayer.CharacterAdded:Connect(function()
     if Headless then doHeadless() end
 end)
 
-task.spawn(function()
-    while task.wait(0.5) do
-        local c = LocalPlayer.Character
-        if c then
-            if Headless and not headBak then doHeadless() end
-            if Korblox and kMode ~= "STANDIN" then doKorblox() end
-        end
-    end
-end)
-
 -- ============================================================
 -- ESP
 -- ============================================================
 local ESP_On = false
 local espC = {}
+local espHeads = setmetatable({}, {__mode = "k"})
 
 local function updateESP()
-    if not ESP_On then for _, d in pairs(espC) do if d then pcall(function() d:Destroy() end) end end; espC = {}; return end
+    if not ESP_On then
+        for _, d in pairs(espC) do if d then pcall(function() d:Destroy() end) end end
+        espC = {}
+        return
+    end
     for _, p in pairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("Head") then
-            if not espC[p] or espC[p].Adornee ~= p.Character.Head then
-                if espC[p] then pcall(function() espC[p]:Destroy() end) end
-                local bb = Instance.new("BillboardGui"); bb.Name = "qESP"; bb.Adornee = p.Character.Head; bb.Size = UDim2.new(0, 200, 0, 40); bb.StudsOffset = Vector3.new(0, 3, 2); bb.AlwaysOnTop = true; bb.Parent = p.Character.Head
-                local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1; lbl.TextColor3 = Color3.new(1,1,1); lbl.TextStrokeTransparency = 0.5; lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 14; lbl.Parent = bb
-                espC[p] = bb
+        if p ~= LocalPlayer then
+            local head = espHeads[p]
+            if not head or not head.Parent then
+                local c = p.Character
+                head = c and c:FindFirstChild("Head")
+                espHeads[p] = head
             end
-            local lbl = espC[p] and espC[p]:FindFirstChildOfClass("TextLabel")
-            if lbl then local ab = p:GetAttribute("EquippedAbility"); lbl.Text = ab and (p.DisplayName .. " [" .. ab .. "]") or p.DisplayName end
+            if head then
+                local existing = espC[p]
+                if not existing or existing.Adornee ~= head then
+                    if existing then pcall(function() existing:Destroy() end) end
+                    local bb = Instance.new("BillboardGui"); bb.Name = "qESP"; bb.Adornee = head; bb.Size = UDim2.new(0, 200, 0, 40); bb.StudsOffset = Vector3.new(0, 3, 2); bb.AlwaysOnTop = true; bb.Parent = head
+                    local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1; lbl.TextColor3 = Color3.new(1,1,1); lbl.TextStrokeTransparency = 0.5; lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 14; lbl.Parent = bb
+                    espC[p] = bb
+                end
+                local lbl = espC[p] and espC[p]:FindFirstChildOfClass("TextLabel")
+                if lbl then
+                    local ab = p:GetAttribute("EquippedAbility")
+                    lbl.Text = ab and (p.DisplayName .. " [" .. ab .. "]") or p.DisplayName
+                end
+            end
         end
     end
 end
@@ -1441,7 +1455,7 @@ local kbGui = Instance.new("ScreenGui"); kbGui.Name = "q_KB"; kbGui.ResetOnSpawn
 local kbF = Instance.new("Frame"); kbF.Size = UDim2.new(0, 220, 0, 200); kbF.Position = UDim2.new(1, -235, 0.5, -100); kbF.BackgroundColor3 = Color3.fromRGB(25, 25, 25); kbF.BackgroundTransparency = 0.15; kbF.Visible = false; kbF.Parent = kbGui
 Instance.new("UICorner", kbF).CornerRadius = UDim.new(0, 6)
 local kbS = Instance.new("UIStroke"); kbS.Color = Color3.fromRGB(60, 60, 60); kbS.Thickness = 1; kbS.Parent = kbF
-local kbT = Instance.new("TextLabel"); kbT.Size = UDim2.new(1, 0, 0, 28); kbT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); kbT.BackgroundTransparency = 0.2; kbT.Font = Enum.Font.GothamBold; kbT.TextSize = 13; kbT.TextColor3 = Color3.fromRGB(200, 200, 200); kbT.Text = "  Keys"; kbT.TextXAlignment = Enum.TextXAlignment.Left; kbT.Parent = kbF
+local kbT = Instance.new("TextLabel"); kbT.Size = UDim2.new(1, 0, 0, 28); kbT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); kbT.BackgroundTransparency = 0.2; kbT.Font = Enum.Font.GothamBold; kbT.TextSize = 13; kbT.TextColor3 = Color3.fromRGB(200, 200, 200); kbT.Text = "  Keybind List"; kbT.TextXAlignment = Enum.TextXAlignment.Left; kbT.Parent = kbF
 Instance.new("UICorner", kbT).CornerRadius = UDim.new(0, 6)
 local kbC = Instance.new("Frame"); kbC.Size = UDim2.new(1, -10, 1, -34); kbC.Position = UDim2.new(0, 5, 0, 31); kbC.BackgroundTransparency = 1; kbC.Parent = kbF
 Instance.new("UIListLayout", kbC).Padding = UDim.new(0, 4)
@@ -1457,17 +1471,18 @@ local kbItems = {
 }
 
 local kbL = {}
+local kbLastText = {}
 for i, it in ipairs(kbItems) do
     local l = Instance.new("TextLabel"); l.Size = UDim2.new(1, 0, 0, 20); l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamBold; l.TextSize = 13; l.TextXAlignment = Enum.TextXAlignment.Left; l.TextColor3 = Color3.fromRGB(200, 200, 200); l.LayoutOrder = i; l.Parent = kbC; kbL[i] = l
+    kbLastText[i] = ""
 end
 
--- Ball Stats
 local BS_On = false
 local bsGui = Instance.new("ScreenGui"); bsGui.Name = "q_BS"; bsGui.ResetOnSpawn = false; bsGui.IgnoreGuiInset = true; bsGui.DisplayOrder = 100; bsGui.Parent = CoreGui
 local bsF = Instance.new("Frame"); bsF.Size = UDim2.new(0, 220, 0, 120); bsF.Position = UDim2.new(1, -470, 0.5, -60); bsF.BackgroundColor3 = Color3.fromRGB(25, 25, 25); bsF.BackgroundTransparency = 0.15; bsF.Visible = false; bsF.Parent = bsGui
 Instance.new("UICorner", bsF).CornerRadius = UDim.new(0, 6)
 Instance.new("UIStroke", bsF).Color = Color3.fromRGB(60, 60, 60)
-local bsT = Instance.new("TextLabel"); bsT.Size = UDim2.new(1, 0, 0, 28); bsT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); bsT.BackgroundTransparency = 0.2; bsT.Font = Enum.Font.GothamBold; bsT.TextSize = 13; bsT.TextColor3 = Color3.fromRGB(200, 200, 200); bsT.Text = "  Ball"; bsT.TextXAlignment = Enum.TextXAlignment.Left; bsT.Parent = bsF
+local bsT = Instance.new("TextLabel"); bsT.Size = UDim2.new(1, 0, 0, 28); bsT.BackgroundColor3 = Color3.fromRGB(30, 30, 30); bsT.BackgroundTransparency = 0.2; bsT.Font = Enum.Font.GothamBold; bsT.TextSize = 13; bsT.TextColor3 = Color3.fromRGB(200, 200, 200); bsT.Text = "  Ball Stats"; bsT.TextXAlignment = Enum.TextXAlignment.Left; bsT.Parent = bsF
 Instance.new("UICorner", bsT).CornerRadius = UDim.new(0, 6)
 local bsC = Instance.new("Frame"); bsC.Size = UDim2.new(1, -10, 1, -34); bsC.Position = UDim2.new(0, 5, 0, 31); bsC.BackgroundTransparency = 1; bsC.Parent = bsF
 Instance.new("UIListLayout", bsC).Padding = UDim.new(0, 3)
@@ -1476,14 +1491,25 @@ MakeDrag(bsT, bsF)
 local function bsLabel(o) local l = Instance.new("TextLabel"); l.Size = UDim2.new(1, 0, 0, 18); l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamBold; l.TextSize = 13; l.TextXAlignment = Enum.TextXAlignment.Left; l.TextColor3 = Color3.fromRGB(200, 200, 200); l.LayoutOrder = o; l.Text = "N/A"; l.Parent = bsC; return l end
 local bsSp, bsDi, bsTg, bsCu = bsLabel(1), bsLabel(2), bsLabel(3), bsLabel(4)
 
--- UI Update Loop
-RunService.RenderStepped:Connect(function()
+-- [OPT] UI update loop: 10 Hz, dirty-flag text updates.
+local uiLast = 0
+local function uiTick()
+    local now = os.clock()
+    if now - uiLast < 0.1 then return end
+    uiLast = now
+
     kbF.Visible = KBShow
     if KBShow then
         for i, it in ipairs(kbItems) do
-            local s = it.s(); local k = it.k()
-            local sc = s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>"
-            kbL[i].RichText = true; kbL[i].Text = string.format("[%s] %s %s", k, it.n, sc)
+            local s = it.s()
+            local k = it.k()
+            local txt = "[" .. k .. "] " .. it.n .. " " .. (s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>")
+            if txt ~= kbLastText[i] then
+                kbLastText[i] = txt
+                local lbl = kbL[i]
+                lbl.RichText = true
+                lbl.Text = txt
+            end
         end
     end
 
@@ -1496,113 +1522,125 @@ RunService.RenderStepped:Connect(function()
             local tg = ball:GetAttribute('target') or "None"
             local c = LocalPlayer.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
             local di = r and math.round((r.Position - ball.Position).Magnitude) or 0
-            bsSp.Text = "Spd: " .. sp; bsDi.Text = "Dist: " .. di; bsTg.Text = "Tgt: " .. tg; bsCu.Text = "Curve: " .. (isCurved() and "Y" or "N")
+            bsSp.Text = "Spd: " .. sp; bsDi.Text = "Dist: " .. di; bsTg.Text = "Tgt: " .. tg; bsCu.Text = "Curve: " .. (isCurvedCached(ball) and "Y" or "N")
         else
             bsSp.Text = "Spd: -"; bsDi.Text = "Dist: -"; bsTg.Text = "Tgt: -"; bsCu.Text = "Curve: -"
         end
     end
-end)
+end
+
+RunService.RenderStepped:Connect(uiTick)
 
 -- ============================================================
 -- UI LAYOUT
 -- ============================================================
 
--- PARRY TAB
-local s1 = Tabs.Main:AddSection("Autoparry")
-s1:AddToggle("APToggle", { Title = "Enabled", Default = false, Callback = function(v) AP_On = v; notify({Title = "AP", Content = v and "On" or "Off", Duration = 2}) end })
-s1:AddSlider("Accuracy", { Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 1, Callback = function(v) AP_Acc = v; updDiv() end })
-s1:AddToggle("RandAccToggle", { Title = "Randomize Acc", Default = false, Callback = function(v) RandAcc = v end })
-s1:AddDropdown("CurveMode", { Title = "Curve", Values = CURVES, Default = "Camera", Multi = false, Callback = function(v) CurveMode = v end })
-s1:AddToggle("AbilityToggle", { Title = "Auto Ability", Default = false, Callback = function(v) AutoAbility = v end })
-s1:AddToggle("AnimFixAP", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_AP = v end })
-s1:AddKeybind("APKey", { Title = "Keybind", Default = "P", Callback = function() if Options.APToggle then Options.APToggle:SetValue(not AP_On) end end, ChangedCallback = function() end })
+do
+    local s1 = Tabs.Main:AddSection("Autoparry")
+    s1:AddToggle("APToggle", { Title = "Enabled", Default = false, Callback = function(v) AP_On = v; notify({Title = "AP", Content = v and "On" or "Off", Duration = 2}) end })
+    s1:AddSlider("Accuracy", { Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 1, Callback = function(v) AP_Acc = v; updDiv() end })
+    s1:AddToggle("RandAccToggle", { Title = "Randomize Acc", Default = false, Callback = function(v) RandAcc = v end })
+    s1:AddDropdown("CurveMode", { Title = "Curve", Values = CURVES, Default = "Camera", Multi = false, Callback = function(v) CurveMode = v end })
+    s1:AddToggle("AbilityToggle", { Title = "Auto Ability", Default = false, Callback = function(v) AutoAbility = v end })
+    s1:AddToggle("AnimFixAP", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_AP = v end })
+    s1:AddKeybind("APKey", { Title = "Keybind", Default = "P", Callback = function() if Options.APToggle then Options.APToggle:SetValue(not AP_On) end end, ChangedCallback = function() end })
+end
 
--- DETECTION TAB
-local s2 = Tabs.Detection:AddSection("Detections")
-s2:AddToggle("InfDet", { Title = "Infinity", Default = false, Callback = function(v) InfDet = v end })
-s2:AddToggle("DSDet", { Title = "Death Slash", Default = false, Callback = function(v) DSDet = v end })
-s2:AddToggle("THDet", { Title = "Time Hole", Default = false, Callback = function(v) THDet = v end })
-s2:AddToggle("SFDet", { Title = "Slashes of Fury", Default = false, Callback = function(v) SFDet = v end })
+do
+    local s2 = Tabs.Detection:AddSection("Detections")
+    s2:AddToggle("InfDet", { Title = "Infinity", Default = false, Callback = function(v) InfDet = v end })
+    s2:AddToggle("DSDet", { Title = "Death Slash", Default = false, Callback = function(v) DSDet = v end })
+    s2:AddToggle("THDet", { Title = "Time Hole", Default = false, Callback = function(v) THDet = v end })
+    s2:AddToggle("SFDet", { Title = "Slashes of Fury", Default = false, Callback = function(v) SFDet = v end })
+end
 
--- SPAM TAB
-local s3 = Tabs.Spam:AddSection("Spam")
-s3:AddToggle("SpamToggle", { Title = "Enabled", Default = false, Callback = function(v) Spam_On = v; notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2}) end })
-local spamRPSSlider
-spamRPSSlider = s3:AddSlider("SpamRPS", {
-    Title = "RPS",
-    Default = 100,
-    Min = 5,
-    Max = 1000,
-    Rounding = 0,
-    Callback = function(v)
-        local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
-        SpamRPS = snapped
-        SpamInt = 1 / snapped
-        if spamRPSSlider and spamRPSSlider.Value ~= snapped then
-            task.defer(function()
-                pcall(function() spamRPSSlider:SetValue(snapped) end)
-            end)
-        end
-    end,
-})
-s3:AddToggle("SpamDet", { Title = "Respect Detections", Default = true, Callback = function(v) SpamDetect = v end })
-s3:AddToggle("AnimFixSpam", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_Spam = v end })
-s3:AddKeybind("SpamKey", { Title = "Keybind", Default = "E", Callback = function() if Options.SpamToggle then Options.SpamToggle:SetValue(not Spam_On) else Spam_On = not Spam_On end end, ChangedCallback = function() end })
+do
+    local s3 = Tabs.Spam:AddSection("Spam")
+    s3:AddToggle("SpamToggle", { Title = "Enabled", Default = false, Callback = function(v) Spam_On = v; notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2}) end })
+    local spamRPSSlider
+    spamRPSSlider = s3:AddSlider("SpamRPS", {
+        Title = "RPS",
+        Default = 100,
+        Min = 5,
+        Max = 1000,
+        Rounding = 0,
+        Callback = function(v)
+            local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
+            SpamRPS = snapped
+            SpamInt = 1 / snapped
+            if spamRPSSlider and spamRPSSlider.Value ~= snapped then
+                task.defer(function()
+                    pcall(function() spamRPSSlider:SetValue(snapped) end)
+                end)
+            end
+        end,
+    })
+    s3:AddToggle("SpamDet", { Title = "Respect Detections", Default = true, Callback = function(v) SpamDetect = v end })
+    s3:AddToggle("AnimFixSpam", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_Spam = v end })
+    s3:AddKeybind("SpamKey", { Title = "Keybind", Default = "E", Callback = function() if Options.SpamToggle then Options.SpamToggle:SetValue(not Spam_On) else Spam_On = not Spam_On end end, ChangedCallback = function() end })
+end
 
--- TRIGGER TAB
-local s4 = Tabs.Trigger:AddSection("Triggerbot")
-s4:AddToggle("TBToggle", { Title = "Enabled", Default = false, Callback = function(v) TB_On = v; notify({Title = "TB", Content = v and "On" or "Off", Duration = 2}) end })
-s4:AddToggle("AnimFixTB", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_TB = v end })
-s4:AddKeybind("TBKey", { Title = "Keybind", Default = "R", Callback = function() if Options.TBToggle then Options.TBToggle:SetValue(not TB_On) end end, ChangedCallback = function() end })
+do
+    local s4 = Tabs.Trigger:AddSection("Triggerbot")
+    s4:AddToggle("TBToggle", { Title = "Enabled", Default = false, Callback = function(v) TB_On = v; notify({Title = "TB", Content = v and "On" or "Off", Duration = 2}) end })
+    s4:AddToggle("AnimFixTB", { Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_TB = v end })
+    s4:AddKeybind("TBKey", { Title = "Keybind", Default = "R", Callback = function() if Options.TBToggle then Options.TBToggle:SetValue(not TB_On) end end, ChangedCallback = function() end })
+end
 
--- SKINS TAB
-local s5 = Tabs.Skins:AddSection("Sword Changer")
-local skinRef = s5:AddToggle("SkinToggle", { Title = "Enabled", Default = false, Callback = function(v)
-    getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
-    if v and getgenv().swordModel ~= "" then pcall(getgenv().updateSword)
-    elseif not v then pcall(getgenv().revertSword) end
-end })
-getgenv().setSkinUI = function(v) if skinRef and skinRef.Value ~= v then skinRef:SetValue(v); getgenv().skinChanger = v; getgenv().skinChangerEnabled = v end end
+do
+    local s5 = Tabs.Skins:AddSection("Sword Changer")
+    local skinRef = s5:AddToggle("SkinToggle", { Title = "Enabled", Default = false, Callback = function(v)
+        getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
+        if v and getgenv().swordModel ~= "" then pcall(getgenv().updateSword)
+        elseif not v then pcall(getgenv().revertSword) end
+    end })
+    getgenv().setSkinUI = function(v) if skinRef and skinRef.Value ~= v then skinRef:SetValue(v); getgenv().skinChanger = v; getgenv().skinChangerEnabled = v end end
 
-s5:AddInput("ManualSword", { Title = "Sword Name", Default = "", Placeholder = "type sword name...", Callback = function(v)
-    local n = v and v:match("^%s*(.-)%s*$") or ""
-    local e = resolve(n)
-    if getgenv().skinChanger then pcall(getgenv().revertSword) end
-    getgenv().swordModel = e; getgenv().swordAnimations = e; getgenv().swordFX = e
-    if getgenv().skinChanger and e ~= "" then pcall(getgenv().updateSword) end
-    pcall(getgenv().saveLastEquippedSword, e)
-end })
+    s5:AddInput("ManualSword", { Title = "Sword Name", Default = "", Placeholder = "type sword name...", Callback = function(v)
+        local n = v and v:match("^%s*(.-)%s*$") or ""
+        local e = resolve(n)
+        if getgenv().skinChanger then pcall(getgenv().revertSword) end
+        getgenv().swordModel = e; getgenv().swordAnimations = e; getgenv().swordFX = e
+        if getgenv().skinChanger and e ~= "" then pcall(getgenv().updateSword) end
+        pcall(getgenv().saveLastEquippedSword, e)
+    end })
+end
 
--- LOCK TAB
-local s6 = Tabs.Lock:AddSection("Parry Lock")
-s6:AddToggle("LockToggle", { Title = "Enabled", Default = false, Callback = function(v) LockEnabled = v; notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2}) end })
-s6:AddDropdown("LockTarget", { Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v) LockTarget = pLookup[v] or "None"; refreshHL() end })
-s6:AddKeybind("CursorKey", { Title = "Cursor Lock", Default = "T", Callback = function() local t = closestToCursor(); if t then LockTarget = t; syncLockDD(); notify({Title = "Lock", Content = t, Duration = 2}) end end, ChangedCallback = function() end })
-s6:AddKeybind("LockKey", { Title = "Toggle Key", Default = "L", Callback = function() if Options.LockToggle then Options.LockToggle:SetValue(not LockEnabled) end end, ChangedCallback = function() end })
-s6:AddButton({ Title = "Refresh List", Callback = function() syncLockDD() end })
+do
+    local s6 = Tabs.Lock:AddSection("Parry Lock")
+    s6:AddToggle("LockToggle", { Title = "Enabled", Default = false, Callback = function(v) LockEnabled = v; notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2}) end })
+    s6:AddDropdown("LockTarget", { Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v) LockTarget = pLookup[v] or "None"; refreshHL() end })
+    s6:AddKeybind("CursorKey", { Title = "Cursor Lock", Default = "T", Callback = function() local t = closestToCursor(); if t then LockTarget = t; syncLockDD(); notify({Title = "Lock", Content = t, Duration = 2}) end end, ChangedCallback = function() end })
+    s6:AddKeybind("LockKey", { Title = "Toggle Key", Default = "L", Callback = function() if Options.LockToggle then Options.LockToggle:SetValue(not LockEnabled) end end, ChangedCallback = function() end })
+    s6:AddButton({ Title = "Refresh List", Callback = function() syncLockDD() end })
+end
 
-local s6h = Tabs.Lock:AddSection("Highlight")
-s6h:AddToggle("HLToggle", { Title = "Enabled", Default = false, Callback = function(v) HLEnabled = v; refreshHL() end })
-local hr, hg, hb = 255, 60, 60
-local function updHL() HLColor = Color3.fromRGB(hr, hg, hb); refreshHL() end
-s6h:AddSlider("HLR", { Title = "R", Default = 255, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hr = v; updHL() end })
-s6h:AddSlider("HLG", { Title = "G", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hg = v; updHL() end })
-s6h:AddSlider("HLB", { Title = "B", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hb = v; updHL() end })
+do
+    local s6h = Tabs.Lock:AddSection("Highlight")
+    s6h:AddToggle("HLToggle", { Title = "Enabled", Default = false, Callback = function(v) HLEnabled = v; refreshHL() end })
+    local hr, hg, hb = 255, 60, 60
+    local function updHL() HLColor = Color3.fromRGB(hr, hg, hb); refreshHL() end
+    s6h:AddSlider("HLR", { Title = "R", Default = 255, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hr = v; updHL() end })
+    s6h:AddSlider("HLG", { Title = "G", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hg = v; updHL() end })
+    s6h:AddSlider("HLB", { Title = "B", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hb = v; updHL() end })
+end
 
--- VISUALS TAB
-local s7 = Tabs.Visuals:AddSection("ESP")
-s7:AddToggle("ESPToggle", { Title = "Ability ESP", Default = false, Callback = function(v) ESP_On = v; updateESP() end })
+do
+    local s7 = Tabs.Visuals:AddSection("ESP")
+    s7:AddToggle("ESPToggle", { Title = "Ability ESP", Default = false, Callback = function(v) ESP_On = v; updateESP() end })
 
-local s7b = Tabs.Visuals:AddSection("Ball Stats")
-s7b:AddToggle("BSToggle", { Title = "Ball Info", Default = false, Callback = function(v) BS_On = v end })
+    local s7b = Tabs.Visuals:AddSection("Ball Stats")
+    s7b:AddToggle("BSToggle", { Title = "Ball Info", Default = false, Callback = function(v) BS_On = v end })
 
-local s7c = Tabs.Visuals:AddSection("Character")
-s7c:AddToggle("HeadlessT", { Title = "Headless", Default = false, Callback = function(v) Headless = v; if v then doHeadless() else undoHeadless() end end })
-s7c:AddToggle("KorbloxT", { Title = "Korblox Leg", Default = false, Callback = function(v) Korblox = v; if v then doKorblox() else undoKorblox() end end })
+    local s7c = Tabs.Visuals:AddSection("Character")
+    s7c:AddToggle("HeadlessT", { Title = "Headless", Default = false, Callback = function(v) Headless = v; if v then doHeadless() else undoHeadless() end end })
+    s7c:AddToggle("KorbloxT", { Title = "Korblox Leg", Default = false, Callback = function(v) Korblox = v; if v then doKorblox() else undoKorblox() end end })
+end
 
--- SETTINGS TAB
-local s8 = Tabs.Settings:AddSection("Engine")
-s8:AddToggle("KBToggle", { Title = "Keybind List", Default = false, Callback = function(v) KBShow = v; kbF.Visible = v end })
+do
+    local s8 = Tabs.Settings:AddSection("Engine")
+    s8:AddToggle("KBToggle", { Title = "Keybind List", Default = false, Callback = function(v) KBShow = v; kbF.Visible = v end })
+end
 
 Players.PlayerAdded:Connect(function() task.wait(1); syncLockDD() end)
 Players.PlayerRemoving:Connect(function(p) if LockTarget == p.Name then LockTarget = "None"; refreshHL(); notify({Title = "Lock", Content = "Target left", Duration = 3}) end; task.wait(0.1); syncLockDD() end)
