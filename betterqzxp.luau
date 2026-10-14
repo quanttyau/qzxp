@@ -1450,23 +1450,26 @@ addRenderHandler(function()
         if not isApproachingPlayer(ball, rootPos) then continue end
         local vel = z.VectorVelocity
         local dist = (rootPos - ball.Position).Magnitude
-        local spd = vel.Magnitude
+        local spd = math.max(vel.Magnitude, 1)
         local ping = getPing()
         local curved = isCurvedCached(ball)
 
-        -- TTI: real-world seconds until impact.
-        local tti = dist / math.max(spd, 1)
-        -- Subtract round-trip network time (one-way each direction) + 30ms server tick cushion.
-        local effective_tti = tti - (ping / 1000) - 0.03
+        -- Distance-based trigger threshold.
+        --   Higher accuracy → smaller trigger distance (fire later, cleaner).
+        --   Lower  accuracy → larger  trigger distance (fire earlier, safer).
+        --   Faster ball / higher ping → larger threshold (both steal reaction time).
+        --   Curved balls get extra margin because the velocity vector lies.
+        --
+        -- Tunables:
+        --   0.18  = base reaction window in seconds (bigger = fire earlier)
+        --   1.75  = accuracy spread (bigger = accuracy slider matters more)
+        --   0.5   = studs added per ms of ping
+        --   1.3   = curve multiplier
+        local acc_scale = 2.5 - ((AP_Acc or 50) - 1) * (1.75 / 99)
+        local trigger_dist = spd * 0.18 * acc_scale + ping * 0.5
+        if curved then trigger_dist = trigger_dist * 1.3 end
+        if trigger_dist < 18 then trigger_dist = 18 end
 
-        -- Base reaction window: 0.20s (tight) to 0.35s (loose).
-        -- Matches the old formula's aggressiveness at mid accuracy.
-        local reaction = 0.20 + ((AP_Acc or 50) - 1) * (0.15 / 99)
-
-        -- Curved balls need MORE margin, not less — velocity vector lies about landing point.
-        if curved then reaction = reaction * 1.25 end
-
-        local threat_dist = math.max(spd * (reaction + ping/1000 + 0.03), 18)
         if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
         if curved and dist > 18 then continue end
         if ball:FindFirstChild('ComboCounter') then continue end
@@ -1475,7 +1478,7 @@ addRenderHandler(function()
         if DSDet and DSOn then continue end
         if THDet and THOn then continue end
         if SFDet and SFOn then continue end
-        if effective_tti <= reaction and dist <= threat_dist then
+        if dist <= trigger_dist then
             if AutoAbility then
                 pcall(function()
                     local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
