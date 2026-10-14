@@ -67,8 +67,8 @@ local UITheme = {
     Bg = Color3.fromRGB(10, 10, 12), Sidebar = Color3.fromRGB(11, 11, 13),
     Panel = Color3.fromRGB(13, 13, 15), Row = Color3.fromRGB(12, 12, 14),
     Border = Color3.fromRGB(30, 30, 34), BorderDim = Color3.fromRGB(20, 20, 23),
-    Text = Color3.fromRGB(235, 235, 240), TextDim = Color3.fromRGB(150, 150, 158),
-    TextMute = Color3.fromRGB(88, 88, 96), White = Color3.fromRGB(255, 255, 255),
+    Text = Color3.fromRGB(255, 255, 255), TextDim = Color3.fromRGB(205, 205, 212),
+    TextMute = Color3.fromRGB(150, 150, 158), White = Color3.fromRGB(255, 255, 255),
     Black = Color3.fromRGB(0, 0, 0), Off = Color3.fromRGB(42, 42, 48),
     Hover = Color3.fromRGB(20, 20, 24),
     GradTop = Color3.fromRGB(14, 14, 17), GradBot = Color3.fromRGB(9, 9, 11),
@@ -340,12 +340,14 @@ function Section:AddKeybind(id, opts)
 end
 function Section:AddInput(id, opts)
     local row = self:_row(36); self:_label(row, opts.Title or id)
-    local box = mk("TextBox", {Size = UDim2.new(0.5, -14, 0, 26), Position = UDim2.new(0.5, 0, 0.5, -13),
-        BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, Font = FONT, TextSize = 12, TextColor3 = UITheme.Text,
+    local bg = mk("Frame", {Size = UDim2.new(0.5, -14, 0, 26), Position = UDim2.new(0.5, 0, 0.5, -13),
+        BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, ClipsDescendants = true}, row)
+    addCorner(bg, 7); addStroke(bg, UITheme.Border, 1, 0.25); addGrad(bg, UITheme.BtnTop, UITheme.BtnBot, 90)
+    local box = mk("TextBox", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
+        Font = FONT, TextSize = 12, TextColor3 = Color3.fromRGB(255, 255, 255),
         TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false,
         PlaceholderText = opts.Placeholder or "", PlaceholderColor3 = UITheme.TextMute,
-        Text = tostring(opts.Default or ""), ClipsDescendants = true}, row)
-    addCorner(box, 7); addStroke(box, UITheme.Border, 1, 0.25); addGrad(box, UITheme.BtnTop, UITheme.BtnBot, 90)
+        Text = tostring(opts.Default or "")}, bg)
     mk("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, box)
     local obj = {Value = tostring(opts.Default or "")}
     box.FocusLost:Connect(function(enter)
@@ -360,20 +362,22 @@ function Section:AddInput(id, opts)
 end
 function Section:AddButton(opts)
     local row = self:_row(40)
-    local btn = mk("TextButton", {Size = UDim2.new(1, -20, 0, 28), Position = UDim2.new(0, 10, 0.5, -14),
-        BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, Font = FONT, TextSize = 12, TextColor3 = UITheme.Text,
-        Text = opts.Title or "Button", AutoButtonColor = false, ClipsDescendants = true}, row)
-    addCorner(btn, 7); addStroke(btn, UITheme.Border, 1, 0.25); addGrad(btn, UITheme.BtnTop, UITheme.BtnBot, 90)
+    local bg = mk("Frame", {Size = UDim2.new(1, -20, 0, 28), Position = UDim2.new(0, 10, 0.5, -14),
+        BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, ClipsDescendants = true}, row)
+    addCorner(bg, 7); addStroke(bg, UITheme.Border, 1, 0.25); addGrad(bg, UITheme.BtnTop, UITheme.BtnBot, 90)
     local hl = mk("Frame", {Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.White,
-        BackgroundTransparency = 0.9, BorderSizePixel = 0}, btn)
+        BackgroundTransparency = 0.9, BorderSizePixel = 0}, bg)
+    local btn = mk("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
+        Font = FONT, TextSize = 12, TextColor3 = Color3.fromRGB(255, 255, 255),
+        Text = opts.Title or "Button", AutoButtonColor = false}, bg)
     local TS = game:GetService("TweenService")
     local TI = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     btn.MouseEnter:Connect(function()
-        TS:Create(btn, TI, {BackgroundColor3 = UITheme.Hover}):Play()
+        TS:Create(bg, TI, {BackgroundColor3 = UITheme.Hover}):Play()
         TS:Create(hl, TI, {BackgroundTransparency = 0.75}):Play()
     end)
     btn.MouseLeave:Connect(function()
-        TS:Create(btn, TI, {BackgroundColor3 = UITheme.Panel}):Play()
+        TS:Create(bg, TI, {BackgroundColor3 = UITheme.Panel}):Play()
         TS:Create(hl, TI, {BackgroundTransparency = 0.9}):Play()
     end)
     btn.MouseButton1Click:Connect(function() if opts.Callback then pcall(opts.Callback) end end)
@@ -1342,6 +1346,20 @@ end
 -- ============================================================
 local AP_Acc, AP_Div = 50, 1.1
 local RandAcc, AutoAbility = false, false
+
+-- Shared parry-range calculation. Used by both the AP engine and the
+-- range visualizer so the drawn ring always matches what AP actually uses.
+local AP_TRIGGER_BASE       = 0.18
+local AP_TRIGGER_SPREAD     = 1.75
+local AP_TRIGGER_PING_K     = 0.5
+local AP_TRIGGER_CURVE_MULT = 1.3
+local function computeTriggerDist(spd, ping, curved, acc)
+    local acc_scale = 2.5 - ((acc or 50) - 1) * (AP_TRIGGER_SPREAD / 99)
+    local td = math.max(spd, 1) * AP_TRIGGER_BASE * acc_scale + (ping or 0) * AP_TRIGGER_PING_K
+    if curved then td = td * AP_TRIGGER_CURVE_MULT end
+    if td < 18 then td = 18 end
+    return td
+end
 local function updDiv() AP_Div = 0.7 + (AP_Acc - 1) * (0.9 / 99) end
 updDiv()
 
@@ -1454,21 +1472,8 @@ addRenderHandler(function()
         local ping = getPing()
         local curved = isCurvedCached(ball)
 
-        -- Distance-based trigger threshold.
-        --   Higher accuracy → smaller trigger distance (fire later, cleaner).
-        --   Lower  accuracy → larger  trigger distance (fire earlier, safer).
-        --   Faster ball / higher ping → larger threshold (both steal reaction time).
-        --   Curved balls get extra margin because the velocity vector lies.
-        --
-        -- Tunables:
-        --   0.18  = base reaction window in seconds (bigger = fire earlier)
-        --   1.75  = accuracy spread (bigger = accuracy slider matters more)
-        --   0.5   = studs added per ms of ping
-        --   1.3   = curve multiplier
-        local acc_scale = 2.5 - ((AP_Acc or 50) - 1) * (1.75 / 99)
-        local trigger_dist = spd * 0.18 * acc_scale + ping * 0.5
-        if curved then trigger_dist = trigger_dist * 1.3 end
-        if trigger_dist < 18 then trigger_dist = 18 end
+        -- Distance-based trigger threshold (shared with the range visualizer).
+        local trigger_dist = computeTriggerDist(spd, ping, curved, AP_Acc)
 
         if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
         if curved and dist > 18 then continue end
@@ -1503,6 +1508,86 @@ addRenderHandler(function()
         end
     end
 end, 2)
+
+-- ============================================================
+-- PARRY RANGE VISUALIZER
+-- ============================================================
+-- Collapsed into a single table to keep the enclosing function
+-- under Luau's 200-register ceiling. Table methods do not consume
+-- a local register slot, only the `PRV` binding does.
+local PRV = {
+    On           = false,
+    Model        = nil,
+    Segments     = {},
+    SEG_COUNT    = 48,
+    COLOR        = Color3.fromRGB(255, 255, 255),
+    TRANSPARENCY = 0.35,
+}
+
+function PRV.Destroy()
+    if PRV.Model then pcall(function() PRV.Model:Destroy() end) end
+    PRV.Model = nil
+    PRV.Segments = {}
+end
+
+function PRV.Ensure()
+    if PRV.Model then return end
+    local m = Instance.new("Model")
+    m.Name = "qzxp_ParryRange"
+    m.Parent = Workspace
+    PRV.Model = m
+    for i = 1, PRV.SEG_COUNT do
+        local p = Instance.new("Part")
+        p.Name = "Seg" .. i
+        p.Anchored = true
+        p.CanCollide = false
+        p.CanQuery = false
+        p.CanTouch = false
+        p.CastShadow = false
+        p.Material = Enum.Material.Neon
+        p.Color = PRV.COLOR
+        p.Transparency = PRV.TRANSPARENCY
+        p.TopSurface = Enum.SurfaceType.Smooth
+        p.BottomSurface = Enum.SurfaceType.Smooth
+        p.Size = Vector3.new(0.2, 0.08, 1)
+        p.Parent = m
+        PRV.Segments[i] = p
+    end
+end
+
+function PRV.Draw(center, radius)
+    PRV.Ensure()
+    if not PRV.Model or #PRV.Segments == 0 then return end
+    local thickness = math.clamp(radius * 0.02, 0.15, 0.6)
+    local segLen = (2 * math.pi * radius) / PRV.SEG_COUNT * 1.12
+    local y = center.Y - 2.5
+    for i = 1, PRV.SEG_COUNT do
+        local phi = (i - 1) / PRV.SEG_COUNT * math.pi * 2
+        local x = center.X + math.cos(phi) * radius
+        local z = center.Z + math.sin(phi) * radius
+        local seg = PRV.Segments[i]
+        seg.Size = Vector3.new(thickness, 0.08, segLen)
+        seg.CFrame = CFrame.new(x, y, z) * CFrame.Angles(0, -phi, 0)
+    end
+end
+
+addRenderHandler(function()
+    if not PRV.On then
+        if PRV.Model then PRV.Destroy() end
+        return
+    end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local ball = getBall()
+    local z = ball and ball.Parent and ball:FindFirstChild("zoomies")
+    if not root or not z then
+        if PRV.Model then PRV.Model.Parent = nil end
+        return
+    end
+    local radius = computeTriggerDist(z.VectorVelocity.Magnitude, getPing(), isCurvedCached(ball), AP_Acc)
+    PRV.Draw(root.Position, radius)
+    if PRV.Model and PRV.Model.Parent ~= Workspace then PRV.Model.Parent = Workspace end
+end, 6)
 
 -- Triggerbot
 local function tryTBForBall(ball)
@@ -2168,6 +2253,11 @@ do
     s7:AddToggle("ESPToggle", {Title = "Ability ESP", Default = false, Callback = function(v) ESP_On = v; updateESP() end})
     local s7b = Tabs.Visuals:AddSection("Ball Stats")
     s7b:AddToggle("BSToggle", {Title = "Ball Info", Default = false, Callback = function(v) BS_On = v end})
+    local s7p = Tabs.Visuals:AddSection("Parry Range")
+    s7p:AddToggle("PRVToggle", {Title = "Range Ring", Default = false, Callback = function(v)
+        PRV.On = v
+        if not v then PRV.Destroy() end
+    end})
     local s7c = Tabs.Visuals:AddSection("Character")
     s7c:AddToggle("HeadlessT", {Title = "Headless", Default = false, Callback = function(v) Headless = v; if v then doHeadless() else undoHeadless() end end})
     s7c:AddToggle("KorbloxT", {Title = "Korblox Leg", Default = false, Callback = function(v) Korblox = v; if v then doKorblox() else undoKorblox() end end})
@@ -2239,6 +2329,9 @@ getgenv().qzxp_Cleanup = function()
             pcall(getgenv().qzxp_StopRender)
             getgenv().qzxp_StopRender = nil
         end
+
+        -- Parry range visualizer
+        pcall(function() if PRV and PRV.Destroy then PRV.Destroy() end end)
 
         -- Destroy our ScreenGuis
         local cg = GetSafeUIParent()
