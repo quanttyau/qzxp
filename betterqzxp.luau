@@ -62,23 +62,40 @@ task.spawn(function()
 -- ============================================================
 local _UIS = game:GetService("UserInputService")
 local _HS  = game:GetService("HttpService")
+local _TS  = game:GetService("TweenService")
 
 local UITheme = {
-    Bg = Color3.fromRGB(10, 10, 12), Sidebar = Color3.fromRGB(11, 11, 13),
-    Panel = Color3.fromRGB(13, 13, 15), Row = Color3.fromRGB(12, 12, 14),
-    Border = Color3.fromRGB(30, 30, 34), BorderDim = Color3.fromRGB(20, 20, 23),
-    Text = Color3.fromRGB(255, 255, 255), TextDim = Color3.fromRGB(205, 205, 212),
-    TextMute = Color3.fromRGB(150, 150, 158), White = Color3.fromRGB(255, 255, 255),
-    Black = Color3.fromRGB(0, 0, 0), Off = Color3.fromRGB(42, 42, 48),
-    Hover = Color3.fromRGB(20, 20, 24),
-    GradTop = Color3.fromRGB(14, 14, 17), GradBot = Color3.fromRGB(9, 9, 11),
-    RowTop = Color3.fromRGB(15, 15, 18), RowBot = Color3.fromRGB(11, 11, 13),
-    BtnTop = Color3.fromRGB(19, 19, 22), BtnBot = Color3.fromRGB(13, 13, 15),
-    KnobTop = Color3.fromRGB(255, 255, 255), KnobBot = Color3.fromRGB(210, 210, 218),
-    OffTop = Color3.fromRGB(46, 46, 52), OffBot = Color3.fromRGB(32, 32, 37),
+    Bg = Color3.fromRGB(15, 15, 18),
+    Sidebar = Color3.fromRGB(11, 11, 14),
+    Panel = Color3.fromRGB(22, 22, 27),
+    Row = Color3.fromRGB(26, 26, 31),
+    Border = Color3.fromRGB(46, 46, 56),
+    BorderDim = Color3.fromRGB(32, 32, 39),
+    Text = Color3.fromRGB(242, 242, 248),
+    TextDim = Color3.fromRGB(182, 182, 194),
+    TextMute = Color3.fromRGB(126, 126, 138),
+    White = Color3.fromRGB(255, 255, 255),
+    Black = Color3.fromRGB(0, 0, 0),
+    Off = Color3.fromRGB(52, 52, 60),
+    Hover = Color3.fromRGB(34, 34, 40),
+    GradTop = Color3.fromRGB(22, 22, 27),
+    GradBot = Color3.fromRGB(13, 13, 16),
+    RowTop = Color3.fromRGB(29, 29, 35),
+    RowBot = Color3.fromRGB(21, 21, 25),
+    BtnTop = Color3.fromRGB(34, 34, 41),
+    BtnBot = Color3.fromRGB(23, 23, 28),
+    KnobTop = Color3.fromRGB(255, 255, 255),
+    KnobBot = Color3.fromRGB(222, 222, 230),
+    OffTop = Color3.fromRGB(58, 58, 68),
+    OffBot = Color3.fromRGB(42, 42, 50),
 }
-local FONT  = Enum.Font.Gotham
-local FONTM = Enum.Font.Code
+local FONT  = Enum.Font.GothamMedium
+local FONTB = Enum.Font.GothamBold
+local FONTM = Enum.Font.RobotoMono
+
+local TI_FAST = TweenInfo.new(0.14, Enum.EasingStyle.Quad,  Enum.EasingDirection.Out)
+local TI_MED  = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local function tween(o, ti, p) _TS:Create(o, ti, p):Play() end
 
 local function mk(c, p, par)
     local o = Instance.new(c)
@@ -116,8 +133,8 @@ local _nGui, _nHolder, _nCount = nil, nil, 0
 local function ensureNotify()
     if _nGui and _nGui.Parent then return end
     _nGui = mk("ScreenGui", {Name = "qzxp_Notify", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 300}, GetSafeUIParent())
-    _nHolder = mk("Frame", {Size = UDim2.new(0, 280, 1, -24), Position = UDim2.new(1, -292, 0, 12), BackgroundTransparency = 1}, _nGui)
-    mk("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Top}, _nHolder)
+    _nHolder = mk("Frame", {Size = UDim2.new(0, 300, 1, -24), Position = UDim2.new(1, -312, 0, 12), BackgroundTransparency = 1}, _nGui)
+    mk("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Top}, _nHolder)
 end
 function Fluent:Notify(opts)
     if not opts then return end
@@ -126,14 +143,14 @@ function Fluent:Notify(opts)
     local title = tostring(opts.Title or "Notice")
     local content = tostring(opts.Content or "")
     local dur = tonumber(opts.Duration) or 4
-    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, 52), BackgroundColor3 = UITheme.Panel,
+    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = UITheme.Panel,
         BorderSizePixel = 0, LayoutOrder = _nCount, ClipsDescendants = true}, _nHolder)
-    addCorner(card, 8); addStroke(card, UITheme.Border, 1, 0.3); addGrad(card, UITheme.RowTop, UITheme.RowBot, 90)
+    addCorner(card, 10); addStroke(card, UITheme.Border, 1, 0.45); addGrad(card, UITheme.RowTop, UITheme.RowBot, 90)
     mk("Frame", {Size = UDim2.new(0, 3, 1, 0), BackgroundColor3 = UITheme.White, BorderSizePixel = 0}, card)
-    mk("TextLabel", {Size = UDim2.new(1, -20, 0, 16), Position = UDim2.new(0, 14, 0, 8),
-        BackgroundTransparency = 1, Font = FONT, TextSize = 13, TextColor3 = UITheme.Text,
+    mk("TextLabel", {Size = UDim2.new(1, -24, 0, 18), Position = UDim2.new(0, 16, 0, 8),
+        BackgroundTransparency = 1, Font = FONTB, TextSize = 13, TextColor3 = UITheme.Text,
         TextXAlignment = Enum.TextXAlignment.Left, Text = title}, card)
-    mk("TextLabel", {Size = UDim2.new(1, -20, 0, 16), Position = UDim2.new(0, 14, 0, 27),
+    mk("TextLabel", {Size = UDim2.new(1, -24, 0, 18), Position = UDim2.new(0, 16, 0, 28),
         BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = UITheme.TextDim,
         TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Text = content}, card)
     task.delay(dur, function() if card and card.Parent then pcall(function() card:Destroy() end) end end)
@@ -150,39 +167,38 @@ end
 Section = {}; Section.__index = Section
 function Section:_row(h)
     self._rowN += 1
-    local row = mk("Frame", {Size = UDim2.new(1, 0, 0, h or 34), BackgroundColor3 = UITheme.Row,
+    local row = mk("Frame", {Size = UDim2.new(1, 0, 0, h or 36), BackgroundColor3 = UITheme.Row,
         BorderSizePixel = 0, LayoutOrder = self._rowN}, self._wrap)
     mk("Frame", {Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 0),
-        BackgroundColor3 = UITheme.BorderDim, BackgroundTransparency = 0.35, BorderSizePixel = 0}, row)
+        BackgroundColor3 = UITheme.BorderDim, BackgroundTransparency = 0.55, BorderSizePixel = 0}, row)
     return row
 end
 function Section:_label(row, text)
-    return mk("TextLabel", {Size = UDim2.new(0.5, -14, 1, 0), Position = UDim2.new(0, 14, 0, 0),
+    return mk("TextLabel", {Size = UDim2.new(0.5, -16, 1, 0), Position = UDim2.new(0, 16, 0, 0),
         BackgroundTransparency = 1, Font = FONT, TextSize = 13, TextColor3 = UITheme.Text,
         TextXAlignment = Enum.TextXAlignment.Left, Text = tostring(text or "")}, row)
 end
 function Section:AddToggle(id, opts)
-    local row = self:_row(34); self:_label(row, opts.Title or id)
-    local switch = mk("Frame", {Size = UDim2.new(0, 38, 0, 20), Position = UDim2.new(1, -52, 0.5, -10),
+    local row = self:_row(38); self:_label(row, opts.Title or id)
+    local switch = mk("Frame", {Size = UDim2.new(0, 40, 0, 22), Position = UDim2.new(1, -56, 0.5, -11),
         BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, ClipsDescendants = true}, row)
-    addCorner(switch, 10); addStroke(switch, UITheme.Border, 1, 0.35)
+    addCorner(switch, 11); addStroke(switch, UITheme.Border, 1, 0.35)
     local trackGrad = addGrad(switch, UITheme.OffTop, UITheme.OffBot, 90)
-    local knob = mk("Frame", {Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(0, 2, 0.5, -8),
+    local knob = mk("Frame", {Size = UDim2.new(0, 18, 0, 18), Position = UDim2.new(0, 2, 0.5, -9),
         BackgroundColor3 = UITheme.Text, BorderSizePixel = 0}, switch)
-    addCorner(knob, 8); local knobGrad = addGrad(knob, UITheme.KnobTop, UITheme.KnobBot, 90)
+    addCorner(knob, 9); local knobGrad = addGrad(knob, UITheme.KnobTop, UITheme.KnobBot, 90)
+    addStroke(knob, UITheme.Border, 1, 0.45)
     local click = mk("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = ""}, switch)
-    local TS = game:GetService("TweenService")
-    local TI = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
     local obj = {Value = not not opts.Default}
     local function apply(on, animate)
-        local knobPos = on and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+        local knobPos = on and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
         trackGrad.Color = ColorSequence.new({
             ColorSequenceKeypoint.new(0, on and UITheme.White or UITheme.OffTop),
-            ColorSequenceKeypoint.new(1, on and Color3.fromRGB(200, 200, 212) or UITheme.OffBot)})
+            ColorSequenceKeypoint.new(1, on and Color3.fromRGB(205, 205, 215) or UITheme.OffBot)})
         knobGrad.Color = ColorSequence.new({
             ColorSequenceKeypoint.new(0, on and Color3.fromRGB(255, 255, 255) or UITheme.KnobTop),
-            ColorSequenceKeypoint.new(1, on and Color3.fromRGB(220, 220, 228) or UITheme.KnobBot)})
-        if animate then TS:Create(knob, TI, {Position = knobPos}):Play() else knob.Position = knobPos end
+            ColorSequenceKeypoint.new(1, on and Color3.fromRGB(226, 226, 234) or UITheme.KnobBot)})
+        if animate then tween(knob, TI_MED, {Position = knobPos}) else knob.Position = knobPos end
     end
     local function set(v, animate)
         v = not not v; if obj.Value == v then return end
@@ -194,21 +210,21 @@ function Section:AddToggle(id, opts)
     apply(obj.Value, false); Options[id] = obj; return obj
 end
 function Section:AddSlider(id, opts)
-    local row = self:_row(46)
-    mk("TextLabel", {Size = UDim2.new(0.6, -14, 0, 16), Position = UDim2.new(0, 14, 0, 6),
+    local row = self:_row(50)
+    mk("TextLabel", {Size = UDim2.new(0.6, -16, 0, 16), Position = UDim2.new(0, 16, 0, 9),
         BackgroundTransparency = 1, Font = FONT, TextSize = 13, TextColor3 = UITheme.Text,
         TextXAlignment = Enum.TextXAlignment.Left, Text = tostring(opts.Title or id)}, row)
-    local valLbl = mk("TextLabel", {Size = UDim2.new(0.4, -14, 0, 16), Position = UDim2.new(0.6, 0, 0, 6),
+    local valLbl = mk("TextLabel", {Size = UDim2.new(0.4, -16, 0, 16), Position = UDim2.new(0.6, 0, 0, 9),
         BackgroundTransparency = 1, Font = FONTM, TextSize = 12, TextColor3 = UITheme.TextDim,
         TextXAlignment = Enum.TextXAlignment.Right, Text = "0"}, row)
-    local bar = mk("Frame", {Size = UDim2.new(1, -28, 0, 6), Position = UDim2.new(0, 14, 0, 30),
+    local bar = mk("Frame", {Size = UDim2.new(1, -32, 0, 6), Position = UDim2.new(0, 16, 0, 34),
         BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, ClipsDescendants = false}, row)
-    addCorner(bar, 3); addStroke(bar, UITheme.Border, 1, 0.4); addGrad(bar, UITheme.OffTop, UITheme.OffBot, 90)
+    addCorner(bar, 3); addStroke(bar, UITheme.Border, 1, 0.55); addGrad(bar, UITheme.OffTop, UITheme.OffBot, 90)
     local fill = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = UITheme.White, BorderSizePixel = 0}, bar)
-    addCorner(fill, 3); addGrad(fill, UITheme.White, Color3.fromRGB(190, 190, 200), 0)
-    local knob = mk("Frame", {Size = UDim2.new(0, 14, 0, 14), AnchorPoint = Vector2.new(0.5, 0.5),
+    addCorner(fill, 3); addGrad(fill, UITheme.White, Color3.fromRGB(200, 200, 210), 0)
+    local knob = mk("Frame", {Size = UDim2.new(0, 16, 0, 16), AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = UITheme.White, BorderSizePixel = 0, ZIndex = 2}, bar)
-    addCorner(knob, 7); addGrad(knob, UITheme.KnobTop, UITheme.KnobBot, 90); addStroke(knob, UITheme.Border, 1, 0.25)
+    addCorner(knob, 8); addGrad(knob, UITheme.KnobTop, UITheme.KnobBot, 90); addStroke(knob, UITheme.Border, 1, 0.3)
     local minV, maxV = opts.Min or 0, opts.Max or 100
     local round = opts.Rounding or 0
     local obj = {Value = opts.Default or minV}
@@ -249,15 +265,17 @@ function Section:AddSlider(id, opts)
     update(); Options[id] = obj; return obj
 end
 function Section:AddDropdown(id, opts)
-    local row = self:_row(36); self:_label(row, opts.Title or id)
-    local btn = mk("TextButton", {Size = UDim2.new(0.5, -14, 0, 26), Position = UDim2.new(0.5, 0, 0.5, -13),
+    local row = self:_row(40); self:_label(row, opts.Title or id)
+    local btn = mk("TextButton", {Size = UDim2.new(0.5, -16, 0, 28), Position = UDim2.new(0.5, 0, 0.5, -14),
         BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, Text = "", AutoButtonColor = false, ClipsDescendants = true}, row)
-    addCorner(btn, 7); addStroke(btn, UITheme.Border, 1, 0.25); addGrad(btn, UITheme.BtnTop, UITheme.BtnBot, 90)
-    local lbl = mk("TextLabel", {Size = UDim2.new(1, -22, 1, 0), Position = UDim2.new(0, 8, 0, 0),
+    addCorner(btn, 8); addStroke(btn, UITheme.Border, 1, 0.3); addGrad(btn, UITheme.BtnTop, UITheme.BtnBot, 90)
+    local lbl = mk("TextLabel", {Size = UDim2.new(1, -24, 1, 0), Position = UDim2.new(0, 10, 0, 0),
         BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = UITheme.Text,
         TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Text = ""}, btn)
-    mk("TextLabel", {Size = UDim2.new(0, 16, 1, 0), Position = UDim2.new(1, -18, 0, 0),
+    mk("TextLabel", {Size = UDim2.new(0, 16, 1, 0), Position = UDim2.new(1, -20, 0, 0),
         BackgroundTransparency = 1, Font = FONT, TextSize = 10, TextColor3 = UITheme.TextDim, Text = "v"}, btn)
+    btn.MouseEnter:Connect(function() tween(btn, TI_FAST, {BackgroundColor3 = UITheme.Hover}) end)
+    btn.MouseLeave:Connect(function() tween(btn, TI_FAST, {BackgroundColor3 = UITheme.Panel}) end)
     local values = opts.Values or {}
     local multi = opts.Multi or false
     local sel = {}
@@ -275,19 +293,21 @@ function Section:AddDropdown(id, opts)
     btn.MouseButton1Click:Connect(function()
         if _openDropdown then closeDropdown() return end
         local abs = btn.AbsolutePosition; local sz = btn.AbsoluteSize
-        local h = math.min(#values * 24 + 4, 180)
-        local panel = mk("ScrollingFrame", {Position = UDim2.fromOffset(abs.X, abs.Y + sz.Y + 2),
+        local h = math.min(#values * 26 + 6, 190)
+        local panel = mk("ScrollingFrame", {Position = UDim2.fromOffset(abs.X, abs.Y + sz.Y + 4),
             Size = UDim2.fromOffset(sz.X, h), BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0,
             ScrollBarThickness = 3, ScrollBarImageColor3 = UITheme.Off,
-            CanvasSize = UDim2.new(0, 0, 0, #values * 24), ZIndex = 250, ClipsDescendants = true}, self._tab._window._gui)
-        addCorner(panel, 7); addStroke(panel, UITheme.Border, 1, 0.25); addGrad(panel, UITheme.BtnTop, UITheme.BtnBot, 90)
+            CanvasSize = UDim2.new(0, 0, 0, #values * 26), ZIndex = 250, ClipsDescendants = true}, self._tab._window._gui)
+        addCorner(panel, 9); addStroke(panel, UITheme.Border, 1, 0.3); addGrad(panel, UITheme.BtnTop, UITheme.BtnBot, 90)
         mk("UIListLayout", {Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder}, panel)
+        mk("UIPadding", {PaddingTop = UDim.new(0, 3), PaddingBottom = UDim.new(0, 3)}, panel)
         _openDropdown = panel
         for i, v in ipairs(values) do
-            local item = mk("TextButton", {Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = UITheme.Panel,
+            local item = mk("TextButton", {Size = UDim2.new(1, -6, 0, 24), BackgroundColor3 = UITheme.Panel,
                 BackgroundTransparency = 1, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
                 LayoutOrder = i, ZIndex = 251}, panel)
-            mk("TextLabel", {Size = UDim2.new(1, -12, 1, 0), Position = UDim2.new(0, 8, 0, 0),
+            addCorner(item, 6)
+            mk("TextLabel", {Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 10, 0, 0),
                 BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = UITheme.Text,
                 TextXAlignment = Enum.TextXAlignment.Left, Text = tostring(v), ZIndex = 252}, item)
             item.MouseEnter:Connect(function() item.BackgroundTransparency = 0; item.BackgroundColor3 = UITheme.Hover end)
@@ -308,10 +328,10 @@ function Section:AddDropdown(id, opts)
     Options[id] = obj; return obj
 end
 function Section:AddKeybind(id, opts)
-    local row = self:_row(36); self:_label(row, opts.Title or id)
-    local btn = mk("TextButton", {Size = UDim2.new(0, 100, 0, 26), Position = UDim2.new(1, -114, 0.5, -13),
+    local row = self:_row(38); self:_label(row, opts.Title or id)
+    local btn = mk("TextButton", {Size = UDim2.new(0, 104, 0, 28), Position = UDim2.new(1, -120, 0.5, -14),
         BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, Text = "", AutoButtonColor = false, ClipsDescendants = true}, row)
-    addCorner(btn, 7); addStroke(btn, UITheme.Border, 1, 0.25); addGrad(btn, UITheme.BtnTop, UITheme.BtnBot, 90)
+    addCorner(btn, 8); addStroke(btn, UITheme.Border, 1, 0.3); addGrad(btn, UITheme.BtnTop, UITheme.BtnBot, 90)
     local lbl = mk("TextLabel", {Size = UDim2.new(1, -8, 1, 0), Position = UDim2.new(0, 4, 0, 0),
         BackgroundTransparency = 1, Font = FONTM, TextSize = 12, TextColor3 = UITheme.Text,
         TextXAlignment = Enum.TextXAlignment.Center, Text = ""}, btn)
@@ -339,16 +359,16 @@ function Section:AddKeybind(id, opts)
     Options[id] = obj; return obj
 end
 function Section:AddInput(id, opts)
-    local row = self:_row(36); self:_label(row, opts.Title or id)
-    local bg = mk("Frame", {Size = UDim2.new(0.5, -14, 0, 26), Position = UDim2.new(0.5, 0, 0.5, -13),
+    local row = self:_row(40); self:_label(row, opts.Title or id)
+    local bg = mk("Frame", {Size = UDim2.new(0.5, -16, 0, 28), Position = UDim2.new(0.5, 0, 0.5, -14),
         BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, ClipsDescendants = true}, row)
-    addCorner(bg, 7); addStroke(bg, UITheme.Border, 1, 0.25); addGrad(bg, UITheme.BtnTop, UITheme.BtnBot, 90)
+    addCorner(bg, 8); addStroke(bg, UITheme.Border, 1, 0.3); addGrad(bg, UITheme.BtnTop, UITheme.BtnBot, 90)
     local box = mk("TextBox", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
         Font = FONT, TextSize = 12, TextColor3 = Color3.fromRGB(255, 255, 255),
         TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false,
         PlaceholderText = opts.Placeholder or "", PlaceholderColor3 = UITheme.TextMute,
         Text = tostring(opts.Default or "")}, bg)
-    mk("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, box)
+    mk("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)}, box)
     local obj = {Value = tostring(opts.Default or "")}
     box.FocusLost:Connect(function(enter)
         obj.Value = box.Text
@@ -361,24 +381,20 @@ function Section:AddInput(id, opts)
     Options[id] = obj; return obj
 end
 function Section:AddButton(opts)
-    local row = self:_row(40)
-    local bg = mk("Frame", {Size = UDim2.new(1, -20, 0, 28), Position = UDim2.new(0, 10, 0.5, -14),
+    local row = self:_row(44)
+    local bg = mk("Frame", {Size = UDim2.new(1, -22, 0, 30), Position = UDim2.new(0, 11, 0.5, -15),
         BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, ClipsDescendants = true}, row)
-    addCorner(bg, 7); addStroke(bg, UITheme.Border, 1, 0.25); addGrad(bg, UITheme.BtnTop, UITheme.BtnBot, 90)
-    local hl = mk("Frame", {Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.White,
-        BackgroundTransparency = 0.9, BorderSizePixel = 0}, bg)
+    addCorner(bg, 8); addStroke(bg, UITheme.Border, 1, 0.3); addGrad(bg, UITheme.BtnTop, UITheme.BtnBot, 90)
+    mk("Frame", {Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.White,
+        BackgroundTransparency = 0.88, BorderSizePixel = 0}, bg)
     local btn = mk("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
         Font = FONT, TextSize = 12, TextColor3 = Color3.fromRGB(255, 255, 255),
         Text = opts.Title or "Button", AutoButtonColor = false}, bg)
-    local TS = game:GetService("TweenService")
-    local TI = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     btn.MouseEnter:Connect(function()
-        TS:Create(bg, TI, {BackgroundColor3 = UITheme.Hover}):Play()
-        TS:Create(hl, TI, {BackgroundTransparency = 0.75}):Play()
+        tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Hover})
     end)
     btn.MouseLeave:Connect(function()
-        TS:Create(bg, TI, {BackgroundColor3 = UITheme.Panel}):Play()
-        TS:Create(hl, TI, {BackgroundTransparency = 0.9}):Play()
+        tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Panel})
     end)
     btn.MouseButton1Click:Connect(function() if opts.Callback then pcall(opts.Callback) end end)
     return btn
@@ -389,9 +405,9 @@ function Tab:AddSection(title)
     local index = #self._sections + 1
     local wrap = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0,
         LayoutOrder = index, AutomaticSize = Enum.AutomaticSize.Y, ClipsDescendants = true}, self._page)
-    addStroke(wrap, UITheme.Border, 1, 0.3); addCorner(wrap, 9); addGrad(wrap, UITheme.RowTop, UITheme.RowBot, 90)
+    addStroke(wrap, UITheme.Border, 1, 0.35); addCorner(wrap, 11); addGrad(wrap, UITheme.RowTop, UITheme.RowBot, 90)
     mk("UIListLayout", {Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder}, wrap)
-    mk("TextLabel", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Font = FONT, TextSize = 11,
+    mk("TextLabel", {Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, Font = FONTB, TextSize = 11,
         TextColor3 = UITheme.TextMute, TextXAlignment = Enum.TextXAlignment.Left,
         Text = "  " .. string.upper(title or "SECTION"), LayoutOrder = 0}, wrap)
     local sec = setmetatable({_wrap = wrap, _tab = self, _rowN = 0}, Section)
@@ -420,15 +436,16 @@ end
 function Window:AddTab(opts)
     local title = opts.Title or "Tab"
     local index = #self._tabs + 1
-    local btn = mk("TextButton", {Size = UDim2.new(0, 126, 0, 32), Position = UDim2.new(0, 7, 0, 8 + (index - 1) * 36),
+    local btn = mk("TextButton", {Size = UDim2.new(0, 126, 0, 34), Position = UDim2.new(0, 7, 0, 8 + (index - 1) * 38),
         BackgroundColor3 = UITheme.Hover, BackgroundTransparency = 1, BorderSizePixel = 0, Text = "",
         AutoButtonColor = false, ClipsDescendants = true}, self._sidebar)
-    addCorner(btn, 7); addGrad(btn, UITheme.RowTop, UITheme.RowBot, 90)
-    local lbl = mk("TextLabel", {Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 16, 0, 0),
+    addCorner(btn, 8); addGrad(btn, UITheme.RowTop, UITheme.RowBot, 90)
+    local lbl = mk("TextLabel", {Size = UDim2.new(1, -22, 1, 0), Position = UDim2.new(0, 18, 0, 0),
         BackgroundTransparency = 1, Font = FONT, TextSize = 13, TextColor3 = UITheme.TextDim,
         TextXAlignment = Enum.TextXAlignment.Left, Text = title}, btn)
-    local ind = mk("Frame", {Size = UDim2.new(0, 2, 0, 14), Position = UDim2.new(0, 0, 0.5, -7),
+    local ind = mk("Frame", {Size = UDim2.new(0, 2, 0, 16), Position = UDim2.new(0, 0, 0.5, -8),
         BackgroundColor3 = UITheme.White, BorderSizePixel = 0, Visible = false}, btn)
+    addCorner(ind, 1)
     local page = mk("ScrollingFrame", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
         BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = UITheme.Off,
         CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false}, self._content)
@@ -438,10 +455,8 @@ function Window:AddTab(opts)
     local tab = setmetatable({_btn = btn, _label = lbl, _indicator = ind, _page = page,
         _window = self, _sections = {}, Title = title}, Tab)
     self._tabs[index] = tab
-    local TS = game:GetService("TweenService")
-    local TI = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-    btn.MouseEnter:Connect(function() if self._active ~= index then TS:Create(btn, TI, {BackgroundTransparency = 0.25}):Play() end end)
-    btn.MouseLeave:Connect(function() if self._active ~= index then TS:Create(btn, TI, {BackgroundTransparency = 1}):Play() end end)
+    btn.MouseEnter:Connect(function() if self._active ~= index then tween(btn, TI_FAST, {BackgroundTransparency = 0.25}) end end)
+    btn.MouseLeave:Connect(function() if self._active ~= index then tween(btn, TI_FAST, {BackgroundTransparency = 1}) end end)
     btn.MouseButton1Click:Connect(function() self:SelectTab(index); closeDropdown() end)
     return tab
 end
@@ -453,24 +468,27 @@ function Fluent:CreateWindow(opts)
     local gui = mk("ScreenGui", {Name = "qzxp_UI", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 50}, GetSafeUIParent())
     local main = mk("Frame", {Name = "Main", Size = size, Position = UDim2.new(0.5, -wOff/2, 0.5, -hOff/2),
         BackgroundColor3 = UITheme.Bg, BorderSizePixel = 0, Active = true, ClipsDescendants = true}, gui)
-    addCorner(main, 12); addStroke(main, UITheme.Border, 1, 0.25); addGrad(main, UITheme.GradTop, UITheme.GradBot, 90)
-    local titleBar = mk("Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, main)
+    addCorner(main, 14); addStroke(main, UITheme.Border, 1, 0.3); addGrad(main, UITheme.GradTop, UITheme.GradBot, 90)
+    local titleBar = mk("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, main)
+    addCorner(titleBar, 14)
+    local titleBarMask = mk("Frame", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 1, -14),
+        BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, titleBar)
     addGrad(titleBar, UITheme.RowTop, UITheme.Bg, 90)
-    local dot = mk("Frame", {Size = UDim2.new(0, 6, 0, 6), Position = UDim2.new(0, 14, 0.5, -3),
+    local dot = mk("Frame", {Size = UDim2.new(0, 6, 0, 6), Position = UDim2.new(0, 16, 0.5, -3),
         BackgroundColor3 = UITheme.White, BorderSizePixel = 0}, titleBar)
     addCorner(dot, 3)
-    mk("TextLabel", {Size = UDim2.new(0, 300, 1, 0), Position = UDim2.new(0, 26, 0, 0), BackgroundTransparency = 1,
-        Font = FONT, TextSize = 13, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+    mk("TextLabel", {Size = UDim2.new(0, 300, 1, 0), Position = UDim2.new(0, 30, 0, 0), BackgroundTransparency = 1,
+        Font = FONTB, TextSize = 13, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
         Text = opts.Title or "Window"}, titleBar)
-    local closeBtn = mk("TextButton", {Size = UDim2.new(0, 26, 0, 26), Position = UDim2.new(1, -34, 0.5, -13),
-        BackgroundTransparency = 1, Font = FONT, TextSize = 13, TextColor3 = UITheme.TextDim, Text = "x", AutoButtonColor = false}, titleBar)
+    local closeBtn = mk("TextButton", {Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(1, -36, 0.5, -14),
+        BackgroundTransparency = 1, Font = FONTB, TextSize = 14, TextColor3 = UITheme.TextDim, Text = "×", AutoButtonColor = false}, titleBar)
     closeBtn.MouseEnter:Connect(function() closeBtn.TextColor3 = UITheme.White end)
     closeBtn.MouseLeave:Connect(function() closeBtn.TextColor3 = UITheme.TextDim end)
     closeBtn.MouseButton1Click:Connect(function() gui.Enabled = false end)
-    local sidebar = mk("Frame", {Size = UDim2.new(0, 140, 1, -34), Position = UDim2.new(0, 0, 0, 34),
+    local sidebar = mk("Frame", {Size = UDim2.new(0, 140, 1, -38), Position = UDim2.new(0, 0, 0, 38),
         BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, main)
-    addGrad(sidebar, Color3.fromRGB(13, 13, 16), Color3.fromRGB(8, 8, 10), 90)
-    local content = mk("Frame", {Size = UDim2.new(1, -140, 1, -34), Position = UDim2.new(0, 140, 0, 34),
+    addGrad(sidebar, Color3.fromRGB(13, 13, 17), Color3.fromRGB(8, 8, 10), 90)
+    local content = mk("Frame", {Size = UDim2.new(1, -140, 1, -38), Position = UDim2.new(0, 140, 0, 38),
         BackgroundColor3 = UITheme.Bg, BackgroundTransparency = 1, BorderSizePixel = 0}, main)
     local window = setmetatable({_gui = gui, _main = main, _sidebar = sidebar, _content = content, _tabs = {}, _active = nil}, Window)
     local dragging, dragStart, startPos
@@ -1449,62 +1467,116 @@ addRenderHandler(function()
     _frameBlockOk = nil
 end, 1)
 
+-- ============================================================
+-- AUTOPARRY — event-driven arming, range-gated firing
+-- ============================================================
+-- Two-stage "triggerbot" behaviour:
+--   Stage 1 (event-driven): ball acquires us as target  -> AP arms on that ball.
+--   Stage 2 (render tick on armed balls only): ball enters parry range
+--           (computeTriggerDist, unchanged) -> fire.
+local _apArmed = setmetatable({}, {__mode = "k"})
+local _apConns = setmetatable({}, {__mode = "k"})
+
+local function tryAPForBall(ball)
+    if not AP_On or TB_On then return end
+    if not ball or not ball.Parent then return end
+    if not _apArmed[ball] then return end
+    if firedForCycle[ball] then return end
+    if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
+    if ball:GetAttribute('target') ~= _lpName then _apArmed[ball] = nil; return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then return end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or root:FindFirstChild('SingularityCape') then return end
+
+    local z = ball:FindFirstChild('zoomies')
+    if not z then return end
+
+    if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+    if ball:FindFirstChild('ComboCounter') then return end
+    if InfDet and InfOn then return end
+    if DSDet and DSOn then return end
+    if THDet and THOn then return end
+    if SFDet and SFOn then return end
+
+    local vel = z.VectorVelocity
+    local dist = (root.Position - ball.Position).Magnitude
+    local spd = math.max(vel.Magnitude, 1)
+    local ping = getPing()
+    local curved = isCurvedCached(ball)
+
+    if not isApproachingPlayer(ball, root.Position) then return end
+    if curved and dist > 18 then return end
+
+    -- Second triggerbot: range gate using the unchanged formula.
+    local trigger_dist = computeTriggerDist(spd, ping, curved, AP_Acc)
+    if dist > trigger_dist then return end
+
+    if AutoAbility then
+        pcall(function()
+            local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
+            if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
+                local ab = char.Abilities
+                if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
+                   (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
+                   (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
+                   (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
+                   (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
+                   (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
+                    ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
+                end
+            end
+        end)
+    end
+
+    local fired = fireRemote(ball)
+    if fired then
+        _apLastFire = os.clock()
+        _apArmed[ball] = nil
+        if AnimFix_AP then PlaySingleParryAnimation() end
+    end
+end
+
+local function _attachAP(ball)
+    if not ball:GetAttribute('realBall') then return end
+    if _apConns[ball] then return end
+    local conn
+    conn = ball:GetAttributeChangedSignal('target'):Connect(function()
+        if ball:GetAttribute('target') == _lpName then
+            _apArmed[ball] = true
+            task.defer(function() if AP_On and not TB_On then tryAPForBall(ball) end end)
+        else
+            _apArmed[ball] = nil
+        end
+    end)
+    _apConns[ball] = conn
+    if ball:GetAttribute('target') == _lpName then _apArmed[ball] = true end
+    ball.Destroying:Once(function()
+        if conn then pcall(function() conn:Disconnect() end) end
+        _apConns[ball] = nil
+        _apArmed[ball] = nil
+    end)
+end
+
+spawnTracked(function()
+    local b = Workspace:WaitForChild('Balls', 9e9)
+    for _, ball in ipairs(b:GetChildren()) do _attachAP(ball) end
+    b.ChildAdded:Connect(function(child) task.defer(_attachAP, child) end)
+end)
+
+-- Only walks balls that have us as target. Much lighter than the old
+-- "loop every ball every frame" approach.
 addRenderHandler(function()
     if not AP_On or TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    local balls = getAllBalls()
-    local rootPos = root.Position
-    for _, ball in pairs(balls) do
-        if not ball then continue end
-        if firedForCycle[ball] then continue end
-        if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then continue end
-        local z = ball:FindFirstChild('zoomies'); if not z then continue end
-        local tgt = ball:GetAttribute('target')
-        if tgt ~= _lpName then continue end
-        if not isApproachingPlayer(ball, rootPos) then continue end
-        local vel = z.VectorVelocity
-        local dist = (rootPos - ball.Position).Magnitude
-        local spd = math.max(vel.Magnitude, 1)
-        local ping = getPing()
-        local curved = isCurvedCached(ball)
-
-        -- Distance-based trigger threshold (shared with the range visualizer).
-        local trigger_dist = computeTriggerDist(spd, ping, curved, AP_Acc)
-
-        if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
-        if curved and dist > 18 then continue end
-        if ball:FindFirstChild('ComboCounter') then continue end
-        if root:FindFirstChild('SingularityCape') then continue end
-        if InfDet and InfOn then continue end
-        if DSDet and DSOn then continue end
-        if THDet and THOn then continue end
-        if SFDet and SFOn then continue end
-        if dist <= trigger_dist then
-            if AutoAbility then
-                pcall(function()
-                    local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
-                    if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
-                        local ab = char.Abilities
-                        if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
-                           (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
-                           (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
-                           (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
-                           (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
-                           (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
-                            ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
-                        end
-                    end
-                end)
-            end
-            local fired = fireRemote(ball)
-            if fired then
-                _apLastFire = os.clock()
-                if AnimFix_AP then PlaySingleParryAnimation() end
-            end
+    for ball in pairs(_apArmed) do
+        if ball and ball.Parent then
+            tryAPForBall(ball)
+        else
+            _apArmed[ball] = nil
         end
     end
 end, 2)
@@ -2057,7 +2129,7 @@ local KBShow = false
 local BS_On = false
 local kbF, bsF
 
-do
+;(function()
 local function MakeDrag(handle, frame)
     local drag, di, ds, sp = false, nil, nil, nil
     handle.InputBegan:Connect(function(i)
@@ -2153,7 +2225,7 @@ addRenderHandler(function()
         end
     end
 end, 5)
-end -- kb/bs scope
+end)() -- kb/bs scope
 
 -- ============================================================
 -- UI LAYOUT
