@@ -936,11 +936,23 @@ local function _markBallsDirty() _ballCacheDirty = true end
 
 spawnTracked(function()
     local b = Workspace:WaitForChild('Balls', 9e9)
-    b.ChildAdded:Connect(_markBallsDirty)
+    local function hookRealBall(child)
+        if child and child:IsA("Instance") then
+            child:GetAttributeChangedSignal('realBall'):Connect(_markBallsDirty)
+        end
+    end
+    b.ChildAdded:Connect(function(child)
+        _markBallsDirty()
+        hookRealBall(child)
+    end)
     b.ChildRemoved:Connect(_markBallsDirty)
     b.DescendantAdded:Connect(function(d)
-        if d:IsA("Ball") or d:IsA("BasePart") then _markBallsDirty() end
+        if d:IsA("Ball") or d:IsA("BasePart") then
+            _markBallsDirty()
+            hookRealBall(d)
+        end
     end)
+    for _, child in ipairs(b:GetChildren()) do hookRealBall(child) end
 end)
 
 local function refreshBallCache()
@@ -960,7 +972,15 @@ local function refreshBallCache()
     end
     for i = n + 1, #_ballCache do _ballCache[i] = nil end
 end
-local function getBall() refreshBallCache(); return _ballCache[1] end
+local function getBall()
+    refreshBallCache()
+    local me = LocalPlayer.Name
+    for i = 1, #_ballCache do
+        local b = _ballCache[i]
+        if b:GetAttribute('target') == me then return b end
+    end
+    return _ballCache[1]
+end
 local function getAllBalls() refreshBallCache(); return _ballCache end
 
 -- ============================================================
@@ -1021,9 +1041,19 @@ local function checkTornadoActive()
     return false
 end
 
+local _lastCurveBall = nil
 local function isCurved(ball)
     ball = ball or getBall()
     if not ball then return false end
+    if ball ~= _lastCurveBall then
+        _lastCurveBall = ball
+        CurveProps.__prev_vel_n = 0
+        CurveProps.__prev_vel_head = 0
+        CurveProps.__curving = tick()
+        CurveProps.__last_warping = tick()
+        CurveProps.__lerp_radians = 0
+        CurveProps.__tornado_time = tick()
+    end
     local z = ball:FindFirstChild("zoomies")
     if not z then return false end
     local vel = z.VectorVelocity
@@ -1244,13 +1274,16 @@ local function IsBlockLegit()
     return true
 end
 
-local function getCurveCF()
-    if cachedCF and frameCount == lastCFCalcFrame then return cachedCF end
+local _cachedCFBall = nil
+local function getCurveCF(ballArg)
+    if cachedCF and frameCount == lastCFCalcFrame and _cachedCFBall == ballArg then return cachedCF end
     lastCFCalcFrame = frameCount
+    _cachedCFBall = ballArg
     local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     local rp = root and root.Position or Camera.CFrame.Position
-    local tp, ball = nil, getBall()
+    local ball = ballArg or getBall()
     if ball then trackBall(ball) end
+    local tp = nil
     if LockEnabled and LockTarget ~= "None" then tp = findPart(LockTarget) end
     if not tp and Sender.last then tp = findPart(Sender.last) end
     if not tp then
@@ -1322,7 +1355,7 @@ end
 
 local function fireRemote(ball)
     if not _remote or not _args or not _tokenFound then return false end
-    local rcf = getCurveCF()
+    local rcf = getCurveCF(ball)
     if _frameEdFrame ~= frameCount then
         _frameEdFrame = frameCount
         local ed = {}
@@ -1367,16 +1400,16 @@ local RandAcc, AutoAbility = false, false
 
 -- Shared parry-range calculation. Used by both the AP engine and the
 -- range visualizer so the drawn ring always matches what AP actually uses.
-local AP_TRIGGER_BASE       = 0.18
-local AP_TRIGGER_SPREAD     = 1.75
-local AP_TRIGGER_PING_K     = 0.5
-local AP_TRIGGER_CURVE_MULT = 1.3
+--
+-- Time-to-impact formulation. Equivalent trigger condition:
+--   tti           = dist / max(spd, 1)
+--   effective_tti = tti - ping/1000 - 0.03
+--   fire when effective_tti <= reaction
+-- The returned value is the distance at which that condition becomes true.
 local function computeTriggerDist(spd, ping, curved, acc)
-    local acc_scale = 2.5 - ((acc or 50) - 1) * (AP_TRIGGER_SPREAD / 99)
-    local td = math.max(spd, 1) * AP_TRIGGER_BASE * acc_scale + (ping or 0) * AP_TRIGGER_PING_K
-    if curved then td = td * AP_TRIGGER_CURVE_MULT end
-    if td < 18 then td = 18 end
-    return td
+    local reaction = 0.20 + ((acc or 50) - 1) * (0.15 / 99)
+    if curved then reaction = reaction * 1.25 end
+    return math.max(spd * (reaction + (ping or 0) / 1000 + 0.03), 18)
 end
 local function updDiv() AP_Div = 0.7 + (AP_Acc - 1) * (0.9 / 99) end
 updDiv()
@@ -1540,8 +1573,20 @@ local function tryAPForBall(ball)
 end
 
 local function _attachAP(ball)
-    if not ball:GetAttribute('realBall') then return end
-    if _apConns[ball] then return end
+    if not ball or _apConns[ball] then return end
+    if not ball:GetAttribute('realBall') then
+        local waitConn
+        waitConn = ball:GetAttributeChangedSignal('realBall'):Connect(function()
+            if ball:GetAttribute('realBall') then
+                if waitConn then pcall(function() waitConn:Disconnect() end) end
+                _attachAP(ball)
+            end
+        end)
+        ball.Destroying:Once(function()
+            if waitConn then pcall(function() waitConn:Disconnect() end) end
+        end)
+        return
+    end
     local conn
     conn = ball:GetAttributeChangedSignal('target'):Connect(function()
         if ball:GetAttribute('target') == _lpName then
@@ -1568,10 +1613,26 @@ end)
 
 -- Only walks balls that have us as target. Much lighter than the old
 -- "loop every ball every frame" approach.
+local _apScanN = 0
 addRenderHandler(function()
     if not AP_On or TB_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
+    _apScanN += 1
+    if _apScanN >= 15 then
+        _apScanN = 0
+        local b = Workspace:FindFirstChild('Balls')
+        if b then
+            for _, ball in ipairs(b:GetChildren()) do
+                if ball:GetAttribute('realBall') then
+                    if not _apConns[ball] then _attachAP(ball) end
+                    if ball:GetAttribute('target') == _lpName then
+                        _apArmed[ball] = true
+                    end
+                end
+            end
+        end
+    end
     for ball in pairs(_apArmed) do
         if ball and ball.Parent then
             tryAPForBall(ball)
@@ -1711,8 +1772,20 @@ end, 3)
 
 local _tbConns = setmetatable({}, {__mode = "k"})
 local function _attachTB(ball)
-    if not ball:GetAttribute('realBall') then return end
-    if _tbConns[ball] then return end
+    if not ball or _tbConns[ball] then return end
+    if not ball:GetAttribute('realBall') then
+        local waitConn
+        waitConn = ball:GetAttributeChangedSignal('realBall'):Connect(function()
+            if ball:GetAttribute('realBall') then
+                if waitConn then pcall(function() waitConn:Disconnect() end) end
+                _attachTB(ball)
+            end
+        end)
+        ball.Destroying:Once(function()
+            if waitConn then pcall(function() waitConn:Disconnect() end) end
+        end)
+        return
+    end
     local conn
     conn = ball:GetAttributeChangedSignal('target'):Connect(function()
         if ball:GetAttribute('target') == _lpName then
@@ -2228,6 +2301,134 @@ end, 5)
 end)() -- kb/bs scope
 
 -- ============================================================
+-- STATS HUD (FPS + Ping) — draggable, matches kb/bs styling
+-- ============================================================
+local Stats_ShowFPS = false
+local Stats_ShowPing = false
+
+;(function()
+local function MakeDrag(handle, frame)
+    local drag, di, ds, sp = false, nil, nil, nil
+    handle.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            drag = true; ds = i.Position; sp = frame.Position
+            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
+        end
+    end)
+    handle.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then di = i end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if i == di and drag and ds then
+            local d = i.Position - ds
+            frame.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+        end
+    end)
+end
+
+local statsGui = Instance.new("ScreenGui")
+statsGui.Name = "qzxp_Stats"
+statsGui.ResetOnSpawn = false
+statsGui.IgnoreGuiInset = true
+statsGui.DisplayOrder = 100
+statsGui.Parent = CoreGui
+
+-- Same visual language as kbF / bsF, and positioned in the same column:
+-- sits just below the keybind list (which is at 0.5, -100 with height 200).
+local statsF = Instance.new("Frame")
+statsF.Size = UDim2.new(0, 220, 0, 78)
+statsF.Position = UDim2.new(1, -235, 0.5, 108)
+statsF.BackgroundColor3 = Color3.fromRGB(17, 17, 19)
+statsF.Visible = false
+statsF.Parent = statsGui
+statsF.ClipsDescendants = true
+Instance.new("UICorner", statsF).CornerRadius = UDim.new(0, 10)
+
+local statsG = Instance.new("UIGradient")
+statsG.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(22, 22, 26)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 10, 12)),
+})
+statsG.Rotation = 90
+statsG.Parent = statsF
+
+local statsS = Instance.new("UIStroke")
+statsS.Color = Color3.fromRGB(58, 58, 66)
+statsS.Transparency = 0.25
+statsS.Parent = statsF
+
+local statsT = Instance.new("TextLabel")
+statsT.Size = UDim2.new(1, 0, 0, 28)
+statsT.BackgroundColor3 = Color3.fromRGB(30, 30, 34)
+statsT.BackgroundTransparency = 0.2
+statsT.Font = Enum.Font.GothamBold
+statsT.TextSize = 13
+statsT.TextColor3 = Color3.fromRGB(230, 230, 235)
+statsT.Text = "  Stats"
+statsT.TextXAlignment = Enum.TextXAlignment.Left
+statsT.Parent = statsF
+Instance.new("UICorner", statsT).CornerRadius = UDim.new(0, 8)
+
+local statsC = Instance.new("Frame")
+statsC.Size = UDim2.new(1, -10, 1, -34)
+statsC.Position = UDim2.new(0, 5, 0, 31)
+statsC.BackgroundTransparency = 1
+statsC.Parent = statsF
+Instance.new("UIListLayout", statsC).Padding = UDim.new(0, 3)
+
+MakeDrag(statsT, statsF)
+
+local function mkStatLabel(order)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, 0, 0, 18)
+    l.BackgroundTransparency = 1
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 13
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextColor3 = Color3.fromRGB(200, 200, 200)
+    l.LayoutOrder = order
+    l.Text = "N/A"
+    l.Parent = statsC
+    return l
+end
+
+local fpsLbl  = mkStatLabel(1)
+local pingLbl = mkStatLabel(2)
+
+local _fpsAvg = 60
+local _statsLast = 0
+local _lastFpsTxt  = ""
+local _lastPingTxt = ""
+
+addRenderHandler(function(dt)
+    if dt and dt > 0 then
+        _fpsAvg = _fpsAvg * 0.9 + (1 / dt) * 0.1
+    end
+    local now = os.clock()
+    if now - _statsLast < 0.15 then return end
+    _statsLast = now
+
+    statsF.Visible = Stats_ShowFPS or Stats_ShowPing
+    fpsLbl.Visible  = Stats_ShowFPS
+    pingLbl.Visible = Stats_ShowPing
+
+    if Stats_ShowFPS then
+        local t = string.format("FPS: %d", math.floor(_fpsAvg + 0.5))
+        if t ~= _lastFpsTxt then _lastFpsTxt = t; fpsLbl.Text = t end
+    end
+    if Stats_ShowPing then
+        local p = 0
+        if Stats_DataPing then
+            local ok, v = pcall(function() return Stats_DataPing:GetValue() end)
+            if ok and type(v) == "number" then p = v end
+        end
+        local t = string.format("Ping: %d ms", math.floor(p + 0.5))
+        if t ~= _lastPingTxt then _lastPingTxt = t; pingLbl.Text = t end
+    end
+end, 8)
+end)()
+
+-- ============================================================
 -- UI LAYOUT
 -- ============================================================
 do
@@ -2333,6 +2534,12 @@ do
     local s7c = Tabs.Visuals:AddSection("Character")
     s7c:AddToggle("HeadlessT", {Title = "Headless", Default = false, Callback = function(v) Headless = v; if v then doHeadless() else undoHeadless() end end})
     s7c:AddToggle("KorbloxT", {Title = "Korblox Leg", Default = false, Callback = function(v) Korblox = v; if v then doKorblox() else undoKorblox() end end})
+
+    local s7s = Tabs.Visuals:AddSection("Stats HUD")
+    s7s:AddToggle("ShowFPSToggle", {Title = "Show FPS", Default = false,
+        Callback = function(v) Stats_ShowFPS = v end})
+    s7s:AddToggle("ShowPingToggle", {Title = "Show Ping", Default = false,
+        Callback = function(v) Stats_ShowPing = v end})
 end
 do
     local s8 = Tabs.Settings:AddSection("Engine")
@@ -2341,6 +2548,88 @@ do
         local w = Fluent.Window
         if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
     end, ChangedCallback = function() end})
+end
+
+-- ============================================================
+-- FPS CAP — realtime, uncap toggle + 15..360 slider
+-- ============================================================
+do
+    local fpsSection = Tabs.Settings:AddSection("Performance")
+
+    local FPSUncapped = false
+    local FPSCap      = 240
+
+    -- Resolve the setter once. Prefer setfpscap (executor-provided); fall
+    -- back to the internal Roblox FFlag path if it isn't there.
+    local _setFPS = nil
+    do
+        if type(setfpscap) == "function" then
+            _setFPS = setfpscap
+        else
+            -- Try the internal RenderStepped-based cap. Wrapped because it
+            -- is not guaranteed to exist across executor builds.
+            pcall(function()
+                local ok, fn = pcall(function()
+                    return game:GetService("RunService").RenderStepped
+                end)
+                -- If setfpscap is unavailable there is no reliable fallback;
+                -- leave _setFPS nil and applyFPS will be a no-op.
+                if not ok then return end
+            end)
+        end
+    end
+
+    local function applyFPS()
+        if type(_setFPS) ~= "function" then return end
+        pcall(function()
+            if FPSUncapped then
+                _setFPS(1000)          -- effectively uncapped
+            else
+                _setFPS(FPSCap)
+            end
+        end)
+    end
+
+    local uncapToggle
+    local fpsSlider
+    local function refreshSliderVisual()
+        -- No enable/disable API on the custom slider, so we just reflect
+        -- the effective value in the header label via the value text. The
+        -- callback still runs; it's just ignored while uncapped.
+        if not fpsSlider then return end
+    end
+
+    uncapToggle = fpsSection:AddToggle("FPSUncap", {
+        Title = "Uncap FPS",
+        Default = false,
+        Callback = function(v)
+            FPSUncapped = v
+            refreshSliderVisual()
+            applyFPS()
+        end,
+    })
+
+    fpsSlider = fpsSection:AddSlider("FPSCap", {
+        Title = "FPS Cap",
+        Default = 240,
+        Min = 15,
+        Max = 360,
+        Rounding = 0,
+        Callback = function(v)
+            FPSCap = math.clamp(math.floor(v + 0.5), 15, 360)
+            -- Realtime: fires on every slider tick while dragging.
+            if not FPSUncapped then applyFPS() end
+        end,
+    })
+
+    -- Initial application. Deferred so the UI is fully built first.
+    task.defer(function()
+        if _setFPS == nil then
+            Fluent:Notify({Title = "FPS", Content = "setfpscap unavailable on this executor", Duration = 4})
+            return
+        end
+        applyFPS()
+    end)
 end
 
 Players.PlayerAdded:Connect(function() task.wait(1); syncLockDD() end)
