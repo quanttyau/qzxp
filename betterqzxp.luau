@@ -811,37 +811,17 @@ local function resolve(input)
 end
 
 -- ============================================================
--- ANIMATION SYSTEM  (Eagle Hub playback model ported)
+-- ANIMATION SYSTEM
 -- ============================================================
--- Ported from EAGLE Hub X:
---   * Sword_CP bypass flag, set by ParrySuccessAll, honoured by every
---     play path so the animation after a real parry plays instantly.
---   * Sword_Spped drives both playback speed and the cooldown gate
---     (cooldown = Sword_Spped - 0.8, so default 0.2s).
---   * Stop/Play read PlayFadeTime / PlayWeight / PlaySpeed /
---     StopFadeTime attributes off the track.
---   * Animation source honours the skin changer's
---     getgenv().swordAnimations / swordModel overrides.
---
--- Register note: all mutable state lives on a single `AnimSt` table
--- so this whole closure only pays one register slot for animation
--- state instead of five.
 local AnimFix_AP, AnimFix_TB, AnimFix_Spam = true, true, true
-local ANIM_FAIL = false  -- sentinel: "tried this sword, no animation"
-
-local AnimSt = {
-    cache       = {},     -- [swordName] -> Animation | ANIM_FAIL
-    Grab_Parry  = nil,    -- last track we played (kept for parity / future reuse)
-    LastPlayedd = 0,      -- os.clock() of last PlayGrabParry
-    Sword_Spped = 1,      -- speed knob; cooldown = Sword_Spped - 0.8
-    Sword_CP    = false,  -- bypass; ParrySuccessAll flips this true
-}
+local AnimFix_Cache = {}
+local ANIM_FAIL = false  -- [FIX 2] sentinel for "tried, failed"
 
 local function GetParryAnimation(swordName)
     if not swordName or swordName == "" then
         return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
     end
-    local cached = AnimSt.cache[swordName]
+    local cached = AnimFix_Cache[swordName]
     if cached ~= nil then
         if cached == ANIM_FAIL then
             return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
@@ -852,99 +832,56 @@ local function GetParryAnimation(swordName)
         return ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(swordName)
     end)
     if not ok or not swordData or type(swordData) ~= "table" or not swordData.AnimationType then
-        AnimSt.cache[swordName] = ANIM_FAIL
+        AnimFix_Cache[swordName] = ANIM_FAIL
         return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
     end
     for _, obj in pairs(SwordAPI.Collection:GetChildren()) do
         if obj.Name == swordData.AnimationType then
             local anim = obj:FindFirstChild("GrabParry") or obj:FindFirstChild("Grab")
-            if anim then AnimSt.cache[swordName] = anim return anim end
+            if anim then AnimFix_Cache[swordName] = anim return anim end
         end
     end
-    AnimSt.cache[swordName] = ANIM_FAIL
+    AnimFix_Cache[swordName] = ANIM_FAIL
     return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
 end
 
--- [Eagle Hub] Stop a track using its StopFadeTime attribute.
-local function GrabParryStop(track)
-    if not track then return end
-    pcall(function()
-        track:Stop(track:GetAttribute("StopFadeTime") or 0.1)
-    end)
-end
-
--- [Eagle Hub] Play a track using its PlayFadeTime / PlayWeight / PlaySpeed attrs.
-local function GrabParryPlay(track)
-    if not track then return end
-    pcall(function()
-        track:Play(
-            track:GetAttribute("PlayFadeTime") or 0,
-            track:GetAttribute("PlayWeight")   or 1,
-            track:GetAttribute("PlaySpeed")    or 1
-        )
-    end)
-end
-
--- [Eagle Hub port] Unified parry animation player.
--- Cooldown = Sword_Spped - 0.8 (default 0.2s). Bypassed once by Sword_CP,
--- which ParrySuccessAll sets, so the frame after a real parry replays
--- instantly instead of waiting on the cooldown.
-local function PlayGrabParry()
-    if not ((os.clock() - AnimSt.LastPlayedd) >= (AnimSt.Sword_Spped - 0.8) or AnimSt.Sword_CP) then
-        return
-    end
-    AnimSt.LastPlayedd = os.clock()
-    AnimSt.Sword_CP = false
-
-    local char = LocalPlayer.Character;      if not char then return end
-    local humanoid = char:FindFirstChildOfClass("Humanoid");   if not humanoid then return end
+local function PlayParryAnimation()
+    local char = LocalPlayer.Character; if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
     local animator = humanoid:FindFirstChildOfClass("Animator"); if not animator then return end
-
-    -- Resolve animation source, honouring skin-changer overrides.
-    local currentSword
-    if getgenv().skinChanger then
-        local a = getgenv().swordAnimations
-        local m = getgenv().swordModel
-        currentSword = (type(a) == "string" and a ~= "" and a)
-                    or (type(m) == "string" and m ~= "" and m)
-                    or char:GetAttribute("CurrentlyEquippedSword")
-    else
-        currentSword = char:GetAttribute("CurrentlyEquippedSword")
-    end
-
-    local animation = GetParryAnimation(currentSword); if not animation then return end
-
-    -- Kill any live Grab/GrabParry/Success tracks before relaunching.
+    local animation = GetParryAnimation(char:GetAttribute("CurrentlyEquippedSword")); if not animation then return end
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
         if track.Name == "GrabParry" or track.Name == "Grab" then
-            pcall(function() track.TimePosition = 0 end)
-            GrabParryStop(track)
+            pcall(function() track.TimePosition = 0 end); pcall(function() track:Stop(0.1) end)
         elseif track.Name == "SuccessParry" or track.Name == "Success" then
-            GrabParryStop(track)
+            pcall(function() track:Stop(0.1) end)
         end
     end
-
     local ok, newTrack = pcall(function() return animator:LoadAnimation(animation) end)
     if ok and newTrack then
-        AnimSt.Grab_Parry = newTrack
-        GrabParryPlay(newTrack)
+        pcall(function()
+            newTrack:Play(newTrack:GetAttribute("PlayFadeTime") or 0,
+                newTrack:GetAttribute("PlayWeight") or 1, newTrack:GetAttribute("PlaySpeed") or 1)
+        end)
     end
 end
 
--- qzxp-facing wrappers. Both now funnel through PlayGrabParry's own throttle.
+local SingleAnimLast = 0
 local function PlaySingleParryAnimation()
-    PlayGrabParry()
+    if os.clock() - SingleAnimLast < 0.1 then return end
+    SingleAnimLast = os.clock()
+    PlayParryAnimation()
 end
 
-local SpamAnimRate, SpamAnimLastPlayed = 140, 0
+local SpamAnimRate, SpamAnimLastPlayed, SpamAnimBypass = 140, 0, false
 local SpamAnimDelayLimit, SpamAnimSpammingMode, SpamAnimParries = 0, false, 0
 
 local function SpamParryAnimation()
     if os.clock() - SpamAnimDelayLimit >= (1 / SpamAnimRate) then
         SpamAnimDelayLimit = os.clock()
-        if (os.clock() - SpamAnimLastPlayed) >= 0.1 or AnimSt.Sword_CP or SpamAnimSpammingMode then
-            SpamAnimLastPlayed = os.clock()
-            PlayGrabParry()
+        if (os.clock() - SpamAnimLastPlayed) >= 0.1 or SpamAnimBypass or SpamAnimSpammingMode then
+            SpamAnimLastPlayed = os.clock(); SpamAnimBypass = false
+            PlayParryAnimation()
         end
     end
 end
@@ -960,14 +897,13 @@ local function _shouldTouchParryAnim()
     if AP_On and AnimFix_AP then return (os.clock() - _apLastFire) < 0.5 end
     return false
 end
-
 local function StopParryGrabTracks()
     local char = LocalPlayer.Character; if not char then return end
     local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
     local animator = humanoid:FindFirstChildOfClass("Animator"); if not animator then return end
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
         if track.Name == "GrabParry" or track.Name == "Grab" then
-            GrabParryStop(track)
+            pcall(function() track:Stop(0.1) end)
         end
     end
 end
@@ -978,15 +914,13 @@ pcall(function()
             SpamAnimParries += 1
             task.delay(0.05, function() if SpamAnimParries > 0 then SpamAnimParries -= 1 end end)
         end
-        AnimSt.Sword_CP = true   -- [Eagle Hub] arm bypass for the next play
+        SpamAnimBypass = true
         if not _shouldTouchParryAnim() then return end
         StopParryGrabTracks()
     end)
 end)
-
 pcall(function()
     ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function()
-        AnimSt.Sword_CP = true   -- [Eagle Hub] arm bypass for the next play
         if not _shouldTouchParryAnim() then return end
         StopParryGrabTracks()
     end)
@@ -1932,8 +1866,6 @@ addRenderHandler(function(dt)
     if timeAccumulator >= interval then
         local fires = math.floor(timeAccumulator / interval)
         timeAccumulator -= fires * interval
-        if timeAccumulator > interval * 2 then timeAccumulator = 0 end
-        if fires > 200 then fires = 200 end
         local ball = getBall()
         if ball then
             for _ = 1, fires do fireRemote(ball) end
