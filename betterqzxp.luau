@@ -811,17 +811,37 @@ local function resolve(input)
 end
 
 -- ============================================================
--- ANIMATION SYSTEM
+-- ANIMATION SYSTEM  (Eagle Hub playback model ported)
 -- ============================================================
+-- Ported from EAGLE Hub X:
+--   * Sword_CP bypass flag, set by ParrySuccessAll, honoured by every
+--     play path so the animation after a real parry plays instantly.
+--   * Sword_Spped drives both playback speed and the cooldown gate
+--     (cooldown = Sword_Spped - 0.8, so default 0.2s).
+--   * Stop/Play read PlayFadeTime / PlayWeight / PlaySpeed /
+--     StopFadeTime attributes off the track.
+--   * Animation source honours the skin changer's
+--     getgenv().swordAnimations / swordModel overrides.
+--
+-- Register note: all mutable state lives on a single `AnimSt` table
+-- so this whole closure only pays one register slot for animation
+-- state instead of five.
 local AnimFix_AP, AnimFix_TB, AnimFix_Spam = true, true, true
-local AnimFix_Cache = {}
-local ANIM_FAIL = false  -- [FIX 2] sentinel for "tried, failed"
+local ANIM_FAIL = false  -- sentinel: "tried this sword, no animation"
+
+local AnimSt = {
+    cache       = {},     -- [swordName] -> Animation | ANIM_FAIL
+    Grab_Parry  = nil,    -- last track we played (kept for parity / future reuse)
+    LastPlayedd = 0,      -- os.clock() of last PlayGrabParry
+    Sword_Spped = 1,      -- speed knob; cooldown = Sword_Spped - 0.8
+    Sword_CP    = false,  -- bypass; ParrySuccessAll flips this true
+}
 
 local function GetParryAnimation(swordName)
     if not swordName or swordName == "" then
         return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
     end
-    local cached = AnimFix_Cache[swordName]
+    local cached = AnimSt.cache[swordName]
     if cached ~= nil then
         if cached == ANIM_FAIL then
             return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
@@ -832,56 +852,99 @@ local function GetParryAnimation(swordName)
         return ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(swordName)
     end)
     if not ok or not swordData or type(swordData) ~= "table" or not swordData.AnimationType then
-        AnimFix_Cache[swordName] = ANIM_FAIL
+        AnimSt.cache[swordName] = ANIM_FAIL
         return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
     end
     for _, obj in pairs(SwordAPI.Collection:GetChildren()) do
         if obj.Name == swordData.AnimationType then
             local anim = obj:FindFirstChild("GrabParry") or obj:FindFirstChild("Grab")
-            if anim then AnimFix_Cache[swordName] = anim return anim end
+            if anim then AnimSt.cache[swordName] = anim return anim end
         end
     end
-    AnimFix_Cache[swordName] = ANIM_FAIL
+    AnimSt.cache[swordName] = ANIM_FAIL
     return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
 end
 
-local function PlayParryAnimation()
-    local char = LocalPlayer.Character; if not char then return end
-    local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
+-- [Eagle Hub] Stop a track using its StopFadeTime attribute.
+local function GrabParryStop(track)
+    if not track then return end
+    pcall(function()
+        track:Stop(track:GetAttribute("StopFadeTime") or 0.1)
+    end)
+end
+
+-- [Eagle Hub] Play a track using its PlayFadeTime / PlayWeight / PlaySpeed attrs.
+local function GrabParryPlay(track)
+    if not track then return end
+    pcall(function()
+        track:Play(
+            track:GetAttribute("PlayFadeTime") or 0,
+            track:GetAttribute("PlayWeight")   or 1,
+            track:GetAttribute("PlaySpeed")    or 1
+        )
+    end)
+end
+
+-- [Eagle Hub port] Unified parry animation player.
+-- Cooldown = Sword_Spped - 0.8 (default 0.2s). Bypassed once by Sword_CP,
+-- which ParrySuccessAll sets, so the frame after a real parry replays
+-- instantly instead of waiting on the cooldown.
+local function PlayGrabParry()
+    if not ((os.clock() - AnimSt.LastPlayedd) >= (AnimSt.Sword_Spped - 0.8) or AnimSt.Sword_CP) then
+        return
+    end
+    AnimSt.LastPlayedd = os.clock()
+    AnimSt.Sword_CP = false
+
+    local char = LocalPlayer.Character;      if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid");   if not humanoid then return end
     local animator = humanoid:FindFirstChildOfClass("Animator"); if not animator then return end
-    local animation = GetParryAnimation(char:GetAttribute("CurrentlyEquippedSword")); if not animation then return end
+
+    -- Resolve animation source, honouring skin-changer overrides.
+    local currentSword
+    if getgenv().skinChanger then
+        local a = getgenv().swordAnimations
+        local m = getgenv().swordModel
+        currentSword = (type(a) == "string" and a ~= "" and a)
+                    or (type(m) == "string" and m ~= "" and m)
+                    or char:GetAttribute("CurrentlyEquippedSword")
+    else
+        currentSword = char:GetAttribute("CurrentlyEquippedSword")
+    end
+
+    local animation = GetParryAnimation(currentSword); if not animation then return end
+
+    -- Kill any live Grab/GrabParry/Success tracks before relaunching.
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
         if track.Name == "GrabParry" or track.Name == "Grab" then
-            pcall(function() track.TimePosition = 0 end); pcall(function() track:Stop(0.1) end)
+            pcall(function() track.TimePosition = 0 end)
+            GrabParryStop(track)
         elseif track.Name == "SuccessParry" or track.Name == "Success" then
-            pcall(function() track:Stop(0.1) end)
+            GrabParryStop(track)
         end
     end
+
     local ok, newTrack = pcall(function() return animator:LoadAnimation(animation) end)
     if ok and newTrack then
-        pcall(function()
-            newTrack:Play(newTrack:GetAttribute("PlayFadeTime") or 0,
-                newTrack:GetAttribute("PlayWeight") or 1, newTrack:GetAttribute("PlaySpeed") or 1)
-        end)
+        AnimSt.Grab_Parry = newTrack
+        GrabParryPlay(newTrack)
     end
 end
 
-local SingleAnimLast = 0
+-- qzxp-facing wrappers. Both now funnel through PlayGrabParry's own throttle.
 local function PlaySingleParryAnimation()
-    if os.clock() - SingleAnimLast < 0.1 then return end
-    SingleAnimLast = os.clock()
-    PlayParryAnimation()
+    PlayGrabParry()
 end
 
-local SpamAnimRate, SpamAnimLastPlayed, SpamAnimBypass = 140, 0, false
+local SpamAnimRate, SpamAnimLastPlayed = 140, 0
 local SpamAnimDelayLimit, SpamAnimSpammingMode, SpamAnimParries = 0, false, 0
 
 local function SpamParryAnimation()
     if os.clock() - SpamAnimDelayLimit >= (1 / SpamAnimRate) then
         SpamAnimDelayLimit = os.clock()
-        if (os.clock() - SpamAnimLastPlayed) >= 0.1 or SpamAnimBypass or SpamAnimSpammingMode then
-            SpamAnimLastPlayed = os.clock(); SpamAnimBypass = false
-            PlayParryAnimation()
+        if (os.clock() - SpamAnimLastPlayed) >= 0.1 or AnimSt.Sword_CP or SpamAnimSpammingMode then
+            SpamAnimLastPlayed = os.clock()
+            PlayGrabParry()
         end
     end
 end
@@ -897,13 +960,14 @@ local function _shouldTouchParryAnim()
     if AP_On and AnimFix_AP then return (os.clock() - _apLastFire) < 0.5 end
     return false
 end
+
 local function StopParryGrabTracks()
     local char = LocalPlayer.Character; if not char then return end
     local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
     local animator = humanoid:FindFirstChildOfClass("Animator"); if not animator then return end
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
         if track.Name == "GrabParry" or track.Name == "Grab" then
-            pcall(function() track:Stop(0.1) end)
+            GrabParryStop(track)
         end
     end
 end
@@ -914,13 +978,15 @@ pcall(function()
             SpamAnimParries += 1
             task.delay(0.05, function() if SpamAnimParries > 0 then SpamAnimParries -= 1 end end)
         end
-        SpamAnimBypass = true
+        AnimSt.Sword_CP = true   -- [Eagle Hub] arm bypass for the next play
         if not _shouldTouchParryAnim() then return end
         StopParryGrabTracks()
     end)
 end)
+
 pcall(function()
     ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function()
+        AnimSt.Sword_CP = true   -- [Eagle Hub] arm bypass for the next play
         if not _shouldTouchParryAnim() then return end
         StopParryGrabTracks()
     end)
@@ -982,6 +1048,21 @@ local function getBall()
     return _ballCache[1]
 end
 local function getAllBalls() refreshBallCache(); return _ballCache end
+-- Returns all balls currently targeting the local player. Reuses the
+-- passed table if given, so callers can keep a scratch buffer and avoid
+-- allocating every frame.
+local function getTargetingBalls(out)
+    refreshBallCache()
+    out = out or {}
+    local n = 0
+    local me = LocalPlayer.Name
+    for i = 1, #_ballCache do
+        local b = _ballCache[i]
+        if b:GetAttribute('target') == me then n = n + 1; out[n] = b end
+    end
+    for i = n + 1, #out do out[i] = nil end
+    return out
+end
 
 -- ============================================================
 -- [FIX 1] PING — rolling minimum over last N samples
@@ -1016,14 +1097,26 @@ end
 -- ============================================================
 -- CURVE DETECTION
 -- ============================================================
-local CurveProps = {
-    __last_warping = tick(), __lerp_radians = 0, __curving = tick(),
-    __prev_vel = {}, __prev_vel_n = 0, __prev_vel_head = 0,
-    __tornado_time = tick()
-}
-local lastTornadoCheck, tornadoActive = 0, false
+-- Per-ball curve state. Weak-keyed by ball so destroyed balls don't leak.
+local CurveState = setmetatable({}, {__mode = "k"})
+local function _newCurveState()
+    return {
+        __last_warping = tick(), __lerp_radians = 0, __curving = tick(),
+        __prev_vel = {}, __prev_vel_n = 0, __prev_vel_head = 0,
+        __tornado_time = tick()
+    }
+end
+local function getCurveState(ball)
+    local s = CurveState[ball]
+    if not s then s = _newCurveState(); CurveState[ball] = s end
+    return s
+end
+local function _resetCurveState(ball)
+    if ball then CurveState[ball] = _newCurveState() end
+end
 
-local function checkTornadoActive()
+local lastTornadoCheck, tornadoActive = 0, false
+local function checkTornadoActive(ball)
     local now = os.clock()
     if now - lastTornadoCheck < 0.1 then return tornadoActive end
     lastTornadoCheck = now
@@ -1032,7 +1125,8 @@ local function checkTornadoActive()
         local Tornado = Runtime:FindFirstChild('Tornado')
         if Tornado then
             local tt = Tornado:GetAttribute("TornadoTime") or 1
-            if (tick() - (CurveProps.__tornado_time or 0)) < (tt + 0.314159) then
+            local CP = getCurveState(ball)
+            if (tick() - (CP.__tornado_time or 0)) < (tt + 0.314159) then
                 tornadoActive = true; return true
             end
         end
@@ -1041,27 +1135,18 @@ local function checkTornadoActive()
     return false
 end
 
-local _lastCurveBall = nil
 local function isCurved(ball)
     ball = ball or getBall()
     if not ball then return false end
-    if ball ~= _lastCurveBall then
-        _lastCurveBall = ball
-        CurveProps.__prev_vel_n = 0
-        CurveProps.__prev_vel_head = 0
-        CurveProps.__curving = tick()
-        CurveProps.__last_warping = tick()
-        CurveProps.__lerp_radians = 0
-        CurveProps.__tornado_time = tick()
-    end
+    local CP = getCurveState(ball)
     local z = ball:FindFirstChild("zoomies")
     if not z then return false end
     local vel = z.VectorVelocity
     local spd = vel.Magnitude
     if spd < 1 then
-        CurveProps.__curving = 0; CurveProps.__last_warping = 0
-        CurveProps.__lerp_radians = 0; CurveProps.__prev_vel_n = 0
-        CurveProps.__prev_vel_head = 0
+        CP.__curving = 0; CP.__last_warping = 0
+        CP.__lerp_radians = 0; CP.__prev_vel_n = 0
+        CP.__prev_vel_head = 0
         return false
     end
     local bdir = vel.Unit
@@ -1077,13 +1162,13 @@ local function isCurved(ball)
     local st = math.min(spd / 100, 40)
     local bdt = 15 - math.min(dist / 1000, 15) + st
 
-    local head = (CurveProps.__prev_vel_head % 4) + 1
-    CurveProps.__prev_vel[head] = vel
-    CurveProps.__prev_vel_head = head
-    if CurveProps.__prev_vel_n < 4 then CurveProps.__prev_vel_n = CurveProps.__prev_vel_n + 1 end
+    local head = (CP.__prev_vel_head % 4) + 1
+    CP.__prev_vel[head] = vel
+    CP.__prev_vel_head = head
+    if CP.__prev_vel_n < 4 then CP.__prev_vel_n = CP.__prev_vel_n + 1 end
 
-    if ball:FindFirstChild('AeroDynamicSlashVFX') then CurveProps.__tornado_time = tick() end
-    if checkTornadoActive() then return true end
+    if ball:FindFirstChild('AeroDynamicSlashVFX') then CP.__tornado_time = tick() end
+    if checkTornadoActive(ball) then return true end
 
     if spd > 160 and rt > (getPing() / 10) then
         if spd < 300 then bdt = math.max(bdt - 15, 15)
@@ -1095,31 +1180,31 @@ local function isCurved(ball)
     if dist < bdt then return false end
 
     if spd < 300 then
-        if (tick() - (CurveProps.__curving or 0)) < (rt / 1.2) then return true end
+        if (tick() - (CP.__curving or 0)) < (rt / 1.2) then return true end
     elseif spd < 450 then
-        if (tick() - (CurveProps.__curving or 0)) < (rt / 1.21) then return true end
+        if (tick() - (CP.__curving or 0)) < (rt / 1.21) then return true end
     elseif spd < 600 then
-        if (tick() - (CurveProps.__curving or 0)) < (rt / 1.335) then return true end
+        if (tick() - (CP.__curving or 0)) < (rt / 1.335) then return true end
     else
-        if (tick() - (CurveProps.__curving or 0)) < (rt / 1.5) then return true end
+        if (tick() - (CP.__curving or 0)) < (rt / 1.5) then return true end
     end
 
     local dthr = 0.5 - ping
     local cd = math.clamp(dot, -1, 1)
     local rad = math.deg(math.asin(cd))
-    CurveProps.__lerp_radians = (CurveProps.__lerp_radians or 0) + (rad - (CurveProps.__lerp_radians or 0)) * 0.8
+    CP.__lerp_radians = (CP.__lerp_radians or 0) + (rad - (CP.__lerp_radians or 0)) * 0.8
 
     if spd < 300 then
-        if CurveProps.__lerp_radians < 0.02 then CurveProps.__last_warping = tick() end
-        if (tick() - (CurveProps.__last_warping or 0)) < (rt / 1.19) then return true end
+        if CP.__lerp_radians < 0.02 then CP.__last_warping = tick() end
+        if (tick() - (CP.__last_warping or 0)) < (rt / 1.19) then return true end
     else
-        if CurveProps.__lerp_radians < 0.018 then CurveProps.__last_warping = tick() end
-        if (tick() - (CurveProps.__last_warping or 0)) < (rt / 1.5) then return true end
+        if CP.__lerp_radians < 0.018 then CP.__last_warping = tick() end
+        if (tick() - (CP.__last_warping or 0)) < (rt / 1.5) then return true end
     end
 
-    if CurveProps.__prev_vel_n == 4 then
-        local pv1 = CurveProps.__prev_vel[((CurveProps.__prev_vel_head - 1 - 1) % 4) + 1]
-        local pv2 = CurveProps.__prev_vel[((CurveProps.__prev_vel_head - 1 - 2) % 4) + 1]
+    if CP.__prev_vel_n == 4 then
+        local pv1 = CP.__prev_vel[((CP.__prev_vel_head - 1 - 1) % 4) + 1]
+        local pv2 = CP.__prev_vel[((CP.__prev_vel_head - 1 - 2) % 4) + 1]
         if pv1 and pv2 then
             local d1 = (bdir - pv1.Unit).Unit
             local d2 = (bdir - pv2.Unit).Unit
@@ -1153,29 +1238,25 @@ end
 -- ============================================================
 -- [FIX 7] TARGET TRACKING — reset curve buffers on ball change
 -- ============================================================
-local Sender = {last = nil, ball = nil, conn = nil, prev = nil}
+-- Per-ball sender tracking. Weak-keyed by ball so destroyed balls don't leak.
+local Sender = setmetatable({}, {__mode = "k"})
 local function trackBall(ball)
-    if ball == Sender.ball then return end
-    if Sender.conn then pcall(function() Sender.conn:Disconnect() end) end
-    Sender.ball = ball; Sender.last = nil; Sender.prev = nil
-    -- [FIX 7] Reset velocity ring buffer + curve state so we don't carry
-    --         stale samples from the previous ball into the new one.
-    CurveProps.__prev_vel_n = 0
-    CurveProps.__prev_vel_head = 0
-    CurveProps.__curving = tick()
-    CurveProps.__last_warping = tick()
-    CurveProps.__lerp_radians = 0
-    CurveProps.__tornado_time = tick()
-    if ball then
-        Sender.prev = ball:GetAttribute("target")
-        Sender.conn = ball:GetAttributeChangedSignal('target'):Connect(function()
-            local nt = ball:GetAttribute("target")
-            if nt == LocalPlayer.Name and Sender.prev and Sender.prev ~= LocalPlayer.Name then
-                Sender.last = Sender.prev
-            end
-            Sender.prev = nt
-        end)
-    end
+    if not ball then return end
+    if Sender[ball] then return end
+    local s = {last = nil, prev = nil, conn = nil}
+    Sender[ball] = s
+    s.prev = ball:GetAttribute("target")
+    s.conn = ball:GetAttributeChangedSignal('target'):Connect(function()
+        local nt = ball:GetAttribute("target")
+        if nt == LocalPlayer.Name and s.prev and s.prev ~= LocalPlayer.Name then
+            s.last = s.prev
+        end
+        s.prev = nt
+    end)
+    ball.Destroying:Once(function()
+        if s.conn then pcall(function() s.conn:Disconnect() end) end
+        Sender[ball] = nil
+    end)
 end
 
 local function findPart(name)
@@ -1285,7 +1366,8 @@ local function getCurveCF(ballArg)
     if ball then trackBall(ball) end
     local tp = nil
     if LockEnabled and LockTarget ~= "None" then tp = findPart(LockTarget) end
-    if not tp and Sender.last then tp = findPart(Sender.last) end
+    local _s = ball and Sender[ball]
+    if not tp and _s and _s.last then tp = findPart(_s.last) end
     if not tp then
         local ml; pcall(function() ml = UserInputService:GetMouseLocation() end)
         local c = ml or Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
@@ -1510,12 +1592,13 @@ end, 1)
 local _apArmed = setmetatable({}, {__mode = "k"})
 local _apConns = setmetatable({}, {__mode = "k"})
 
-local function tryAPForBall(ball)
+local function tryAPForBall(ball, blind)
     if not AP_On or TB_On then return end
     if not ball or not ball.Parent then return end
-    if not _apArmed[ball] then return end
+    if not blind and not _apArmed[ball] then return end
     if firedForCycle[ball] then return end
-    if not Spam_On and parryLockouts[ball] and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
+    if not blind and not Spam_On and parryLockouts[ball]
+       and (os.clock() - (parryLockouts[ball] or 0)) < 0.08 then return end
     if ball:GetAttribute('target') ~= _lpName then _apArmed[ball] = nil; return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
@@ -1540,10 +1623,12 @@ local function tryAPForBall(ball)
     local ping = getPing()
     local curved = isCurvedCached(ball)
 
-    if not isApproachingPlayer(ball, root.Position) then return end
-    if curved and dist > 18 then return end
+    local AP_BLIND_RANGE = 40
+    if not (blind and dist <= AP_BLIND_RANGE) then
+        if not isApproachingPlayer(ball, root.Position) then return end
+        if curved and dist > 18 then return end
+    end
 
-    -- Second triggerbot: range gate using the unchanged formula.
     local trigger_dist = computeTriggerDist(spd, ping, curved, AP_Acc)
     if dist > trigger_dist then return end
 
@@ -1591,13 +1676,24 @@ local function _attachAP(ball)
     conn = ball:GetAttributeChangedSignal('target'):Connect(function()
         if ball:GetAttribute('target') == _lpName then
             _apArmed[ball] = true
-            task.defer(function() if AP_On and not TB_On then tryAPForBall(ball) end end)
+            firedForCycle[ball] = nil
+            parryLockouts[ball] = nil
+            _resetCurveState(ball)
+            task.defer(function()
+                if AP_On and not TB_On and ball.Parent
+                   and ball:GetAttribute('target') == _lpName then
+                    tryAPForBall(ball, true)
+                end
+            end)
         else
             _apArmed[ball] = nil
         end
     end)
     _apConns[ball] = conn
-    if ball:GetAttribute('target') == _lpName then _apArmed[ball] = true end
+    if ball:GetAttribute('target') == _lpName then
+        _apArmed[ball] = true
+        _resetCurveState(ball)
+    end
     ball.Destroying:Once(function()
         if conn then pcall(function() conn:Disconnect() end) end
         _apConns[ball] = nil
@@ -1789,6 +1885,8 @@ local function _attachTB(ball)
     local conn
     conn = ball:GetAttributeChangedSignal('target'):Connect(function()
         if ball:GetAttribute('target') == _lpName then
+            firedForCycle[ball] = nil
+            parryLockouts[ball] = nil
             tryTBForBall(ball)
             task.defer(function()
                 if TB_On and ball and ball.Parent and ball:GetAttribute('target') == _lpName and not firedForCycle[ball] then
@@ -2559,57 +2657,25 @@ do
     local FPSUncapped = false
     local FPSCap      = 240
 
-    -- Resolve the setter once. Prefer setfpscap (executor-provided); fall
-    -- back to the internal Roblox FFlag path if it isn't there.
-    local _setFPS = nil
-    do
-        if type(setfpscap) == "function" then
-            _setFPS = setfpscap
-        else
-            -- Try the internal RenderStepped-based cap. Wrapped because it
-            -- is not guaranteed to exist across executor builds.
-            pcall(function()
-                local ok, fn = pcall(function()
-                    return game:GetService("RunService").RenderStepped
-                end)
-                -- If setfpscap is unavailable there is no reliable fallback;
-                -- leave _setFPS nil and applyFPS will be a no-op.
-                if not ok then return end
-            end)
-        end
-    end
+    local _setFPS = type(setfpscap) == "function" and setfpscap or nil
 
     local function applyFPS()
         if type(_setFPS) ~= "function" then return end
         pcall(function()
-            if FPSUncapped then
-                _setFPS(1000)          -- effectively uncapped
-            else
-                _setFPS(FPSCap)
-            end
+            _setFPS(FPSUncapped and 1000 or FPSCap)
         end)
     end
 
-    local uncapToggle
-    local fpsSlider
-    local function refreshSliderVisual()
-        -- No enable/disable API on the custom slider, so we just reflect
-        -- the effective value in the header label via the value text. The
-        -- callback still runs; it's just ignored while uncapped.
-        if not fpsSlider then return end
-    end
-
-    uncapToggle = fpsSection:AddToggle("FPSUncap", {
+    fpsSection:AddToggle("FPSUncap", {
         Title = "Uncap FPS",
         Default = false,
         Callback = function(v)
             FPSUncapped = v
-            refreshSliderVisual()
             applyFPS()
         end,
     })
 
-    fpsSlider = fpsSection:AddSlider("FPSCap", {
+    fpsSection:AddSlider("FPSCap", {
         Title = "FPS Cap",
         Default = 240,
         Min = 15,
@@ -2617,12 +2683,10 @@ do
         Rounding = 0,
         Callback = function(v)
             FPSCap = math.clamp(math.floor(v + 0.5), 15, 360)
-            -- Realtime: fires on every slider tick while dragging.
             if not FPSUncapped then applyFPS() end
         end,
     })
 
-    -- Initial application. Deferred so the UI is fully built first.
     task.defer(function()
         if _setFPS == nil then
             Fluent:Notify({Title = "FPS", Content = "setfpscap unavailable on this executor", Duration = 4})
