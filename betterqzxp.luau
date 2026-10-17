@@ -34,6 +34,13 @@ local function spawnTracked(fn, ...)
 end
 getgenv().qzxp_Threads = _threads
 
+local function isApproachingPlayer(ball, rootPos)
+    local z = ball:FindFirstChild('zoomies'); if not z then return false end
+    local v = z.VectorVelocity
+    if v.Magnitude < 1 then return false end
+    return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
+end
+
 -- [FIX 3] Single RenderStepped dispatcher. Handlers run in registration order.
 local _renderHandlers = {}
 local _renderConn = nil
@@ -1565,150 +1572,170 @@ addRenderHandler(function()
 end, 1)
 
 -- ============================================================
--- AUTOPARRY — LITERAL angeli port (RenderStepped, TTI, anim fix preserved)
+-- AUTOPARRY — event-driven arming, range-gated firing
 -- ============================================================
-local _apTornadoTime = tick()
-
--- Per-ball "already parried this approach" flag. Cleared when that
--- ball's own target changes, or on respawn. Weak-keyed so destroyed
--- balls don't leak.
-local AP_Parried     = setmetatable({}, {__mode = "k"})
-local AP_TargetConns = setmetatable({}, {__mode = "k"})
-
-local function trackAPBall(ball)
-    if not ball or AP_TargetConns[ball] then return end
-    AP_TargetConns[ball] = ball:GetAttributeChangedSignal('target'):Connect(function()
-        AP_Parried[ball] = nil
-    end)
-    ball.Destroying:Once(function()
-        local c = AP_TargetConns[ball]
-        if c then pcall(function() c:Disconnect() end) end
-        AP_TargetConns[ball] = nil
-        AP_Parried[ball] = nil
-    end)
-end
-
--- Pooled / respawned balls get a fresh chance.
+-- Two-stage "triggerbot" behaviour:
+--   Stage 1 (event-driven): ball acquires us as target  -> AP arms on that ball.
+--   Stage 2 (render tick on armed balls only): ball enters parry range
+--           (computeTriggerDist, unchanged) -> fire.
+local _apArmed = setmetatable({}, {__mode = "k"})
+local _apConns = setmetatable({}, {__mode = "k"})
 table.insert(_ballRespawnHandlers, function(ball)
-    AP_Parried[ball] = nil
+    _apArmed[ball] = nil
+    if _apLocked and _apLockedBall == ball then clearAPLockout() end
 end)
 
-local function angeliFire(ball)
+local function tryAPForBall(ball, blind)
+    if not AP_On or TB_On then return end
+    if not ball or not ball.Parent then return end
+
+    -- [[ GLOBAL AP LOCKOUT ]] — skip ALL AP work while locked (angeli port).
+    if isAPLocked() then return end
+
+    if not blind and not _apArmed[ball] then return end
+    if ball:GetAttribute('target') ~= _lpName then _apArmed[ball] = nil; return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then return end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or root:FindFirstChild('SingularityCape') then return end
+
+    local z = ball:FindFirstChild('zoomies')
+    if not z then return end
+
+    if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
+    if ball:FindFirstChild('ComboCounter') then return end
+    if InfDet and InfOn then return end
+    if DSDet and DSOn then return end
+    if THDet and THOn then return end
+    if SFDet and SFOn then return end
+
+    local vel = z.VectorVelocity
+    local dist = (root.Position - ball.Position).Magnitude
+    local spd = math.max(vel.Magnitude, 1)
+    local ping = getPing()
+    local curved = isCurvedCached(ball)
+
+    local AP_BLIND_RANGE = 40
+    if not (blind and dist <= AP_BLIND_RANGE) then
+        if not isApproachingPlayer(ball, root.Position) then return end
+        if curved and dist > 18 then return end
+    end
+
+    local trigger_dist = computeTriggerDist(spd, ping, curved, AP_Acc)
+    if dist > trigger_dist then return end
+
+    if AutoAbility then
+        pcall(function()
+            local cd = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
+            if cd and cd.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
+                local ab = char.Abilities
+                if (ab:FindFirstChild("Raging Deflection") and ab["Raging Deflection"].Enabled) or
+                   (ab:FindFirstChild("Rapture") and ab["Rapture"].Enabled) or
+                   (ab:FindFirstChild("Calming Deflection") and ab["Calming Deflection"].Enabled) or
+                   (ab:FindFirstChild("Aerodynamic Slash") and ab["Aerodynamic Slash"].Enabled) or
+                   (ab:FindFirstChild("Fracture") and ab["Fracture"].Enabled) or
+                   (ab:FindFirstChild("Death Slash") and ab["Death Slash"].Enabled) then
+                    ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
+                end
+            end
+        end)
+    end
+
     local fired = fireRemote(ball)
     if fired then
         _apLastFire = os.clock()
+        _apArmed[ball] = nil
+        setAPLockout(ball)   -- [[ GLOBAL AP LOCKOUT ]] arm the gate
         if AnimFix_AP then PlaySingleParryAnimation() end
     end
 end
 
-RunService.RenderStepped:Connect(function()
-    if not AP_On or TB_On or Spam_On then return end
-
-    local char = LocalPlayer.Character
-    if not char or not char.PrimaryPart then return end
-
-    local balls    = getAllBalls()
-    local one_ball = getBall()
-
-    local training_ball = nil
-    local tbf = Workspace:FindFirstChild("TrainingBalls")
-    if tbf then
-        for _, b in ipairs(tbf:GetChildren()) do
-            if b:GetAttribute("realBall") then training_ball = b; break end
-        end
-    end
-
-    local Runtime = Workspace:FindFirstChild("Runtime")
-
-    for _, ball in ipairs(balls) do
-        if not ball or not ball.Parent then continue end
-        trackAPBall(ball)
-        if AP_Parried[ball] then continue end
-
-        local zoomies = ball:FindFirstChild('zoomies')
-        if not zoomies then continue end
-
-        local ball_target = ball:GetAttribute('target')
-        local velocity    = zoomies.VectorVelocity
-        local distance    = (char.PrimaryPart.Position - ball.Position).Magnitude
-        local speed       = velocity.Magnitude
-
-        local curved         = isCurvedCached(ball)
-        local parry_accuracy = computeTriggerDist(speed, getPing(), curved, AP_Acc)
-
-        if ball:FindFirstChild('AeroDynamicSlashVFX') then
-            ball.AeroDynamicSlashVFX:Destroy()
-            _apTornadoTime = tick()
-        end
-
-        if Runtime and Runtime:FindFirstChild('Tornado') then
-            if (tick() - _apTornadoTime) < (Runtime.Tornado:GetAttribute('TornadoTime') or 1) + 0.314159 then
-                continue
+local function _attachAP(ball)
+    if not ball or _apConns[ball] then return end
+    if not ball:GetAttribute('realBall') then
+        local waitConn
+        waitConn = ball:GetAttributeChangedSignal('realBall'):Connect(function()
+            if ball:GetAttribute('realBall') then
+                if waitConn then pcall(function() waitConn:Disconnect() end) end
+                _attachAP(ball)
             end
+        end)
+        ball.Destroying:Once(function()
+            if waitConn then pcall(function() waitConn:Disconnect() end) end
+        end)
+        return
+    end
+    local conn
+    conn = ball:GetAttributeChangedSignal('target'):Connect(function()
+        if ball:GetAttribute('target') == _lpName then
+            _apArmed[ball] = true
+            _resetCurveState(ball)
+            task.defer(function()
+                if AP_On and not TB_On and not Spam_On and ball.Parent
+                   and ball:GetAttribute('target') == _lpName then
+                    tryAPForBall(ball, true)
+                end
+            end)
+        else
+            _apArmed[ball] = nil
         end
+    end)
+    _apConns[ball] = conn
+    if ball:GetAttribute('target') == _lpName then
+        _apArmed[ball] = true
+        _resetCurveState(ball)
+    end
+    ball.Destroying:Once(function()
+        if conn then pcall(function() conn:Disconnect() end) end
+        _apConns[ball] = nil
+        _apArmed[ball] = nil
+    end)
+end
 
-        if one_ball and one_ball:GetAttribute('target') == _lpName and curved then
-            continue
-        end
+spawnTracked(function()
+    local function watchFolder(folder)
+        if not folder then return end
+        for _, ball in ipairs(folder:GetChildren()) do _attachAP(ball) end
+        folder.ChildAdded:Connect(function(child) task.defer(_attachAP, child) end)
+    end
+    watchFolder(Workspace:WaitForChild('Balls', 9e9))
+    watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
+end)
 
-        if ball:FindFirstChild('ComboCounter') then continue end
-        if char.PrimaryPart:FindFirstChild('SingularityCape') then continue end
-
-        if InfDet and InfOn then continue end
-        if DSDet and DSOn then continue end
-        if THDet and THOn then continue end
-        if SFDet and SFOn then continue end
-
-        if ball_target == _lpName and distance <= parry_accuracy then
-            if AutoAbility then
-                local AbilityCD = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
-                if AbilityCD and AbilityCD.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
-                    local abilities = char.Abilities
-                    if (abilities:FindFirstChild("Raging Deflection") and abilities["Raging Deflection"].Enabled) or
-                       (abilities:FindFirstChild("Rapture") and abilities["Rapture"].Enabled) or
-                       (abilities:FindFirstChild("Calming Deflection") and abilities["Calming Deflection"].Enabled) or
-                       (abilities:FindFirstChild("Aerodynamic Slash") and abilities["Aerodynamic Slash"].Enabled) or
-                       (abilities:FindFirstChild("Fracture") and abilities["Fracture"].Enabled) or
-                       (abilities:FindFirstChild("Death Slash") and abilities["Death Slash"].Enabled) then
-                        AP_Parried[ball] = true
-                        ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
-                        -- Was an inline task.wait(2.432) here, which froze
-                        -- the whole AP connection for 2.4s. Now non-blocking.
-                        task.spawn(function()
-                            task.wait(2.432)
-                            pcall(function()
-                                ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("DeathSlashShootActivation"):FireServer(true)
-                            end)
-                        end)
-                        continue
+-- Only walks balls that have us as target. Much lighter than the old
+-- "loop every ball every frame" approach.
+local _apScanN = 0
+addRenderHandler(function()
+    if not AP_On or TB_On or Spam_On then return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then return end
+    _apScanN += 1
+    if _apScanN >= 15 then
+        _apScanN = 0
+        local function scanFolder(folder)
+            if not folder then return end
+            for _, ball in ipairs(folder:GetChildren()) do
+                if ball:GetAttribute('realBall') then
+                    if not _apConns[ball] then _attachAP(ball) end
+                    if ball:GetAttribute('target') == _lpName then
+                        _apArmed[ball] = true
                     end
                 end
             end
-
-            angeliFire(ball)
-            AP_Parried[ball] = true
+        end
+        scanFolder(Workspace:FindFirstChild('Balls'))
+        scanFolder(Workspace:FindFirstChild('TrainingBalls'))
+    end
+    for ball in pairs(_apArmed) do
+        if ball and ball.Parent then
+            tryAPForBall(ball)
+        else
+            _apArmed[ball] = nil
         end
     end
-
-    if training_ball then
-        trackAPBall(training_ball)
-        if not AP_Parried[training_ball] then
-            local zoomies = training_ball:FindFirstChild('zoomies')
-            if zoomies then
-                local ball_target    = training_ball:GetAttribute('target')
-                local velocity       = zoomies.VectorVelocity
-                local distance       = LocalPlayer:DistanceFromCharacter(training_ball.Position)
-                local speed          = velocity.Magnitude
-                local parry_accuracy = computeTriggerDist(speed, getPing(), false, AP_Acc)
-
-                if ball_target == _lpName and distance <= parry_accuracy then
-                    angeliFire(training_ball)
-                    AP_Parried[training_ball] = true
-                end
-            end
-        end
-    end
-end)
+end, 2)
 
 end
 
@@ -1864,7 +1891,7 @@ local function _attachTB(ball)
         if ball:GetAttribute('target') == _lpName then
             tryTBForBall(ball)
             task.defer(function()
-                if TB_On and ball and ball.Parent and ball:GetAttribute('target') == _lpName then
+                if TB_On and not Spam_On and ball and ball.Parent and ball:GetAttribute('target') == _lpName then
                     tryTBForBall(ball)
                 end
             end)
