@@ -880,7 +880,7 @@ local function PlaySingleParryAnimation()
     PlayParryAnimation()
 end
 
-local SpamAnimRate, SpamAnimLastPlayed, SpamAnimBypass = 100, 0, false
+local SpamAnimRate, SpamAnimLastPlayed, SpamAnimBypass = 140, 0, false
 local SpamAnimDelayLimit, SpamAnimSpammingMode, SpamAnimParries = 0, false, 0
 local SpamAnimMatchRPS = false
 
@@ -1585,14 +1585,14 @@ table.insert(_ballRespawnHandlers, function(ball)
     if _apLocked and _apLockedBall == ball then clearAPLockout() end
 end)
 
-local function tryAPForBall(ball, blind)
+local function tryAPForBall(ball)
     if not AP_On or TB_On then return end
     if not ball or not ball.Parent then return end
 
     -- [[ GLOBAL AP LOCKOUT ]] — skip ALL AP work while locked (angeli port).
     if isAPLocked() then return end
 
-    if not blind and not _apArmed[ball] then return end
+    if not _apArmed[ball] then return end
     if ball:GetAttribute('target') ~= _lpName then _apArmed[ball] = nil; return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
@@ -1617,12 +1617,10 @@ local function tryAPForBall(ball, blind)
     local ping = getPing()
     local curved = isCurvedCached(ball)
 
-    local AP_BLIND_RANGE = 40
-    if not (blind and dist <= AP_BLIND_RANGE) then
-        if not isApproachingPlayer(ball, root.Position) then return end
-        if curved and dist > 18 then return end
-    end
-
+    -- Trigger-range is the sole distance gate. computeTriggerDist already
+    -- scales reaction by 1.25x for curved balls and adds ping compensation,
+    -- so the old hardcoded 18-stud curved cap and the velocity-direction
+    -- check were rejecting valid in-window parries. Removed.
     local trigger_dist = computeTriggerDist(spd, ping, curved, AP_Acc)
     if dist > trigger_dist then return end
 
@@ -1675,7 +1673,7 @@ local function _attachAP(ball)
             task.defer(function()
                 if AP_On and not TB_On and not Spam_On and ball.Parent
                    and ball:GetAttribute('target') == _lpName then
-                    tryAPForBall(ball, true)
+                    tryAPForBall(ball)
                 end
             end)
         else
@@ -1698,7 +1696,7 @@ spawnTracked(function()
     local function watchFolder(folder)
         if not folder then return end
         for _, ball in ipairs(folder:GetChildren()) do _attachAP(ball) end
-        folder.ChildAdded:Connect(function(child) task.defer(_attachAP, child) end)
+        folder.ChildAdded:Connect(_attachAP)
     end
     watchFolder(Workspace:WaitForChild('Balls', 9e9))
     watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
@@ -1712,7 +1710,7 @@ addRenderHandler(function()
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
     _apScanN += 1
-    if _apScanN >= 15 then
+    if _apScanN >= 8 then
         _apScanN = 0
         local function scanFolder(folder)
             if not folder then return end
