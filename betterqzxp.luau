@@ -34,6 +34,13 @@ local function spawnTracked(fn, ...)
 end
 getgenv().qzxp_Threads = _threads
 
+local function isApproachingPlayer(ball, rootPos)
+    local z = ball:FindFirstChild('zoomies'); if not z then return false end
+    local v = z.VectorVelocity
+    if v.Magnitude < 1 then return false end
+    return (rootPos - ball.Position).Unit:Dot(v.Unit) > 0.05
+end
+
 -- [FIX 3] Single RenderStepped dispatcher. Handlers run in registration order.
 local _renderHandlers = {}
 local _renderConn = nil
