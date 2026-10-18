@@ -1197,6 +1197,11 @@ local function isCurvedCached(ball)
     return result
 end
 
+local function horizDist(a, b)
+    local dx, dz = a.X - b.X, a.Z - b.Z
+    return math.sqrt(dx * dx + dz * dz)
+end
+
 -- Ray-cylinder closest-point-of-approach. Answers the question AP actually
 -- needs: "will this ball's current trajectory pass near me soon?"
 -- Robust to a ball whose velocity is momentarily tangential (mid-curve):
@@ -1208,11 +1213,28 @@ local function isApproachingPlayer(ball, playerPos, hitRadius, lookahead)
     local vel = z.VectorVelocity
     local spd = vel.Magnitude
     if spd < 5 then return false end
-    local toPlayer = playerPos - ball.Position
-    local t = toPlayer:Dot(vel) / (spd * spd)
+
+    local bpos = ball.Position
+    local velH = Vector3.new(vel.X, 0, vel.Z)
+    local spdH = velH.Magnitude
+
+    -- Nearly-straight-down drop: horizontal projection is degenerate.
+    -- Fall back to full 3D so we don't wrongly reject an overhead ball.
+    if spdH < 1 then
+        local toPlayer = playerPos - bpos
+        local t = toPlayer:Dot(vel) / (spd * spd)
+        if t < 0 or t > (lookahead or 0.4) then return false end
+        local closest = bpos + vel * t
+        return (closest - playerPos).Magnitude <= (hitRadius or 8)
+    end
+
+    local toH = Vector3.new(playerPos.X - bpos.X, 0, playerPos.Z - bpos.Z)
+    local t = toH:Dot(velH) / (spdH * spdH)
     if t < 0 or t > (lookahead or 0.4) then return false end
-    local closest = ball.Position + vel * t
-    return (closest - playerPos).Magnitude <= (hitRadius or 8)
+
+    local cx = bpos.X + velH.X * t
+    local cz = bpos.Z + velH.Z * t
+    return horizDist(Vector3.new(cx, 0, cz), playerPos) <= (hitRadius or 8)
 end
 
 -- ============================================================
@@ -1495,9 +1517,9 @@ local RandAcc, AutoAbility = false, false
 --   fire when effective_tti <= reaction
 -- The returned value is the distance at which that condition becomes true.
 local function computeTriggerDist(spd, ping, curved, acc)
-    local reaction = 0.20 + ((acc or 50) - 1) * (0.15 / 99)
+    local reaction = 0.10 + ((acc or 50) - 1) * (0.08 / 99)
     if curved then reaction = reaction * 1.25 end
-    return math.max(spd * (reaction + (ping or 0) / 1000 + 0.03), 18)
+    return math.max(spd * (reaction + (ping or 0) / 1000 + 0.03), 14)
 end
 local function updDiv() AP_Div = 0.7 + (AP_Acc - 1) * (0.9 / 99) end
 updDiv()
@@ -1647,7 +1669,7 @@ RunService.RenderStepped:Connect(function()
 
         local ball_target = ball:GetAttribute('target')
         local velocity    = zoomies.VectorVelocity
-        local distance    = (char.PrimaryPart.Position - ball.Position).Magnitude
+        local distance    = horizDist(char.PrimaryPart.Position, ball.Position)
         local speed       = velocity.Magnitude
 
         local curved         = isCurvedCached(ball)
@@ -1718,7 +1740,7 @@ RunService.RenderStepped:Connect(function()
             if zoomies then
                 local ball_target    = training_ball:GetAttribute('target')
                 local velocity       = zoomies.VectorVelocity
-                local distance       = LocalPlayer:DistanceFromCharacter(training_ball.Position)
+                local distance       = horizDist(char.PrimaryPart.Position, training_ball.Position)
                 local speed          = velocity.Magnitude
                 local parry_accuracy = computeTriggerDist(speed, getPing(), false, AP_Acc)
 
@@ -2527,6 +2549,7 @@ end)()
 -- ============================================================
 -- UI LAYOUT
 -- ============================================================
+;(function()
 do
     local s1 = Tabs.Main:AddSection("Autoparry")
     s1:AddToggle("APToggle", {Title = "Enabled", Default = false, Callback = function(v) AP_On = v; notify({Title = "AP", Content = v and "On" or "Off", Duration = 2}) end})
@@ -2654,10 +2677,12 @@ do
         if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
     end, ChangedCallback = function() end})
 end
+end)() -- UI LAYOUT scope
 
 -- ============================================================
 -- FPS CAP — realtime, uncap toggle + 15..360 slider
 -- ============================================================
+;(function()
 do
     local fpsSection = Tabs.Settings:AddSection("Performance")
 
@@ -2702,6 +2727,7 @@ do
         applyFPS()
     end)
 end
+end)()
 
 Players.PlayerAdded:Connect(function() task.wait(1); syncLockDD() end)
 Players.PlayerRemoving:Connect(function(p)
