@@ -1605,155 +1605,362 @@ addRenderHandler(function()
 end, 1)
 
 -- ============================================================
--- AUTOPARRY — LITERAL angeli port (RenderStepped, TTI, anim fix preserved)
+-- AUTOPARRY — ported from oxy
+--   · target-based CFrame (aims at picked mouse-target, not the ball's sender)
+--   · ball position prediction via URE/ReplicateBallPosition
+--   · global 1s debounce after any successful AP fire
+--   · accuracy formula: (slider-1) * 0.015151...
 -- ============================================================
-local _apTornadoTime = tick()
+local _apState = {
+    AerodynamicTime = tick(),
+    LastWarping     = tick(),
+    LerpRadians     = 0,
+    Curving         = tick(),
+}
 
--- Per-ball "already parried this approach" flag. Cleared when that
--- ball's own target changes, or on respawn. Weak-keyed so destroyed
--- balls don't leak.
-local AP_Parried     = setmetatable({}, {__mode = "k"})
-local AP_TargetConns = setmetatable({}, {__mode = "k"})
-
-local function trackAPBall(ball)
-    if not ball or AP_TargetConns[ball] then return end
-    AP_TargetConns[ball] = ball:GetAttributeChangedSignal('target'):Connect(function()
-        AP_Parried[ball] = nil
-    end)
-    ball.Destroying:Once(function()
-        local c = AP_TargetConns[ball]
-        if c then pcall(function() c:Disconnect() end) end
-        AP_TargetConns[ball] = nil
-        AP_Parried[ball] = nil
-    end)
-end
-
--- Pooled / respawned balls get a fresh chance.
-table.insert(_ballRespawnHandlers, function(ball)
-    AP_Parried[ball] = nil
-end)
-
-local function angeliFire(ball)
-    local fired = fireRemote(ball)
-    if fired then
-        _apLastFire = os.clock()
-        if AnimFix_AP then PlaySingleParryAnimation() end
+-- ---- ball position prediction (URE/ReplicateBallPosition) ----
+local _apPositions  = {}
+local _apReplicator = nil
+do
+    local net = ReplicatedStorage:FindFirstChild("Packages")
+        and ReplicatedStorage.Packages:FindFirstChild("_Index")
+        and ReplicatedStorage.Packages._Index:FindFirstChild("sleitnick_net@0.1.0")
+        and ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"]:FindFirstChild("net")
+    if net then
+        for _, child in net:GetChildren() do
+            if child:IsA("UnreliableRemoteEvent") and child.Name ~= "URE/ReplicateBallPosition" then
+                _apReplicator = child
+                break
+            end
+        end
     end
 end
+if _apReplicator then
+    _apReplicator.OnClientEvent:Connect(function(ball, pos)
+        if ball and ball.Parent == Workspace:FindFirstChild("Balls")
+           and ball:GetAttribute("realBall") == true then
+            _apPositions[ball] = pos
+        end
+    end)
+end
 
-RunService.RenderStepped:Connect(function()
+local function apFirstBall()
+    local all = getAllBalls()
+    return all[1]
+end
+local function apPosition(ball)
+    local b = ball or apFirstBall()
+    if b then return _apPositions[b] or b.Position end
+    return Vector3.zero
+end
+
+-- ---- target picking (ported from oxy tbl27) ----
+local _apTarget = { current = nil, visited = {} }
+
+local function apPickRandom()
+    local list = {}
+    local af = Workspace:FindFirstChild("Alive")
+    if af then
+        for _, m in ipairs(af:GetChildren()) do
+            if m.Name ~= _lpName and m.PrimaryPart then table.insert(list, m) end
+        end
+    end
+    if #list == 0 then _apTarget.current = nil; return end
+    if #list == 1 then _apTarget.current = list[1]; return end
+    local candidates = {}
+    for _, m in ipairs(list) do
+        if not _apTarget.visited[m.Name] then table.insert(candidates, m) end
+    end
+    if #candidates == 0 then
+        _apTarget.visited = {}
+        for _, m in ipairs(list) do
+            if not _apTarget.current or m.Name ~= _apTarget.current.Name then
+                table.insert(candidates, m)
+            end
+        end
+        if #candidates == 0 then candidates = list end
+    end
+    local picked = candidates[math.random(1, #candidates)]
+    _apTarget.visited[picked.Name] = true
+    _apTarget.current = picked
+end
+
+local function apByMouse()
+    local list = {}
+    local af = Workspace:FindFirstChild("Alive")
+    if af then
+        for _, m in ipairs(af:GetChildren()) do
+            if m.Name ~= _lpName and m.PrimaryPart then table.insert(list, m) end
+        end
+    end
+    if #list == 0 then _apTarget.current = nil; return nil end
+    local cam = Workspace.CurrentCamera
+    local cf = cam.CFrame
+    local origin = cf.Position
+    local look   = cf.LookVector
+    local dir
+    if UserInputService.MouseEnabled then
+        local ml = UserInputService:GetMouseLocation()
+        dir = cam:ScreenPointToRay(ml.X, ml.Y).Direction
+    else
+        local vp = cam.ViewportSize
+        dir = cam:ViewportPointToRay(vp.X * 0.5, vp.Y * 0.5).Direction
+    end
+    local bestScore, bestModel = -math.huge, nil
+    for _, m in ipairs(list) do
+        local delta = m.PrimaryPart.Position - origin
+        if delta.Magnitude > 0 then
+            local unit = delta.Unit
+            if look:Dot(unit) > 0 then
+                local score = dir:Dot(unit)
+                if bestScore < score then bestScore = score; bestModel = m end
+            end
+        end
+    end
+    bestModel = bestModel or list[1]
+    _apTarget.current = bestModel
+    return bestModel
+end
+
+-- ---- CFrame build (ported from oxy tbl28.get_cframe, extended to
+--      cover qzxp's wider set of curve modes) ----
+local function apGetCurveCF()
+    local cam  = Workspace.CurrentCamera
+    local cf   = cam.CFrame
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return cf end
+    local tp        = _apTarget.current and _apTarget.current.PrimaryPart
+    local targetPos = tp and tp.Position or (root.Position + cf.LookVector * 1000)
+    local delta     = targetPos - root.Position
+    local unit      = delta.Magnitude > 0.001 and delta.Unit or root.CFrame.LookVector
+    local method    = tostring(CurveMode or "Camera"):lower()
+
+    if method == "dot" then
+        return CFrame.lookAt(root.Position, targetPos + Vector3.new(0, 1.75, 0))
+    elseif method == "backwards" then
+        return CFrame.new(root.Position, root.Position + -unit * 1000)
+    elseif method == "slow" then
+        return CFrame.new(root.Position, root.Position + Vector3.new(0, -350, 0))
+    elseif method == "random" then
+        return CFrame.new(root.Position, targetPos + Vector3.new(
+            math.random(-1000, 1000), math.random(-350, 1000), math.random(-1000, 1000)))
+    elseif method == "nearest" then
+        return CFrame.new(root.Position, targetPos)
+    elseif method == "accel" then
+        return CFrame.new(root.Position, targetPos + Vector3.new(0, 5, 0))
+    elseif method == "high" then
+        return CFrame.new(root.Position, targetPos + Vector3.new(0, 9e18, 0))
+    elseif method == "normal" then
+        return CFrame.new(root.Position, root.Position + root.CFrame.LookVector * 1000)
+    elseif method == "speed" then
+        return CFrame.new(root.Position, root.Position + root.CFrame.UpVector * 100)
+    elseif method == "down" then
+        return CFrame.new(root.Position, root.Position + Vector3.new(0, -9e9, 0))
+    elseif method == "left" then
+        return CFrame.new(root.Position, root.Position - root.CFrame.RightVector * 9e9)
+    elseif method == "right" then
+        return CFrame.new(root.Position, root.Position + root.CFrame.RightVector * 9e9)
+    end
+    return cf
+end
+
+-- ---- fire (ported from oxy tbl30.fire, wired to qzxp's
+--      captured remote + _tokenize) ----
+local function apFire()
+    apByMouse()
+    local cam = Workspace.CurrentCamera
+    local rcf = apGetCurveCF()
+    local targetPart = _apTarget.current and _apTarget.current.PrimaryPart
+    local mp
+    if targetPart then
+        local sp = cam:WorldToViewportPoint(targetPart.Position)
+        mp = { sp.X, sp.Y }
+    elseif UserInputService.MouseEnabled then
+        local ml = UserInputService:GetMouseLocation()
+        mp = { ml.X, ml.Y }
+    else
+        local vp = cam.ViewportSize
+        mp = { vp.X * 0.5, vp.Y * 0.5 }
+    end
+    local ed = {}
+    local af = Workspace:FindFirstChild("Alive")
+    if af then
+        for _, m in ipairs(af:GetChildren()) do
+            local pp = m.PrimaryPart
+            if pp then
+                local sp = cam:WorldToScreenPoint(pp.Position)
+                if sp and sp.Z > 0 then ed[m.Name] = sp end
+            end
+        end
+    end
+    if not _remote or not _args or not _tokenFound then return false end
+    local ok = pcall(function()
+        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]),
+            0.5, rcf, ed, mp, false)
+    end)
+    return ok
+end
+
+-- ---- curve detection (ported from oxy tbl23.curved) ----
+local function apCurved(ball)
+    local b = ball or apFirstBall()
+    if not b then return false end
+    local z = b:FindFirstChild("zoomies")
+    if not z then return false end
+    local char = LocalPlayer.Character
+    if not char or not char.PrimaryPart then return false end
+    local now  = tick()
+    local ping = getPing()
+    local vel  = z.VectorVelocity
+    local spd  = vel.Magnitude
+    if spd < 1 then return false end
+    local unit  = vel.Unit
+    local pos   = char.PrimaryPart.Position
+    local bPos  = apPosition(b)
+    local unit2 = (pos - bPos).Unit
+    local dot   = unit2:Dot(unit)
+    local v90   = math.min(spd / 100, 40)
+    local n31   = dot - unit2:Dot((unit - vel).Unit)
+    local dist  = (pos - bPos).Magnitude
+    local n32   = 0.5 - ping / 1000
+    local n33   = dist / spd - ping / 1000
+    local n34   = 15 - math.min(dist / 1000, 15) + v90
+    _apState.LerpRadians = _apState.LerpRadians
+        + (math.rad(math.asin(math.clamp(dot, -1, 1))) - _apState.LerpRadians) * 0.8
+
+    if spd > 100 and n33 > ping / 10 then
+        n34 = math.max(n34 - 15, 15)
+    end
+    if dist < n34 then return false end
+    if n31 < n32 then return true end
+    if _apState.LerpRadians < 0.018 then
+        _apState.LastWarping = now
+    end
+    if now - _apState.LastWarping < n33 / 1.5 then return true end
+    if now - _apState.Curving    < n33 / 1.5 then return true end
+    return dot < n32
+end
+
+-- slider 1..100 -> 0..1.5 (matches oxy's tbl31.accuracy)
+local function apAccuracy()
+    return (AP_Acc - 1) * 0.015151515151515152
+end
+
+-- ---- 1s debounce after any successful fire ----
+local _apDebounce = false
+local _apUntilAt  = 0
+
+-- ---- the check (ported from oxy tbl31.check) ----
+local function apCheck()
     if not AP_On or TB_On or Spam_On then return end
-
     local char = LocalPlayer.Character
     if not char or not char.PrimaryPart then return end
 
-    local balls = getAllBalls()
+    local now = tick()
+    if _apDebounce or now < _apUntilAt then return end
 
-    local training_ball = nil
-    local tbf = Workspace:FindFirstChild("TrainingBalls")
-    if tbf then
-        for _, b in ipairs(tbf:GetChildren()) do
-            if b:GetAttribute("realBall") then training_ball = b; break end
-        end
-    end
+    local pos       = char.PrimaryPart.Position
+    local pingDist  = math.clamp(getPing() / 100, 5, 17)
+    local allBalls  = getAllBalls()
+    local firstBall = allBalls[1]
+    local firstTarget = firstBall and firstBall:GetAttribute("target")
+    local runtime   = Workspace:FindFirstChild("Runtime")
+    local tornado   = runtime and runtime:FindFirstChild("Tornado")
+    local tornadoT  = tornado and (tornado:GetAttribute("TornadoTime") or 1)
 
-    local Runtime = Workspace:FindFirstChild("Runtime")
+    for _, ball in ipairs(allBalls) do
+        local z = ball:FindFirstChild("zoomies")
+        if z then
+            local target = ball:GetAttribute("target")
+            local spd    = z.VectorVelocity.Magnitude
+            local dist   = (pos - apPosition(ball)).Magnitude
+            local acc    = apAccuracy()
+            local n31    = (2.4 + math.min(math.max(spd - 9.5, 0), 650) * 0.002) * acc
 
-    for _, ball in ipairs(balls) do
-        if not ball or not ball.Parent then continue end
-        trackAPBall(ball)
-        if AP_Parried[ball] then continue end
-
-        local zoomies = ball:FindFirstChild('zoomies')
-        if not zoomies then continue end
-
-        local ball_target = ball:GetAttribute('target')
-        local velocity    = zoomies.VectorVelocity
-        local distance    = horizDist(char.PrimaryPart.Position, ball.Position)
-        local speed       = velocity.Magnitude
-
-        local curved         = isCurvedCached(ball)
-        local parry_accuracy = computeTriggerDist(speed, getPing(), curved, AP_Acc)
-
-        if ball:FindFirstChild('AeroDynamicSlashVFX') then
-            ball.AeroDynamicSlashVFX:Destroy()
-            _apTornadoTime = tick()
-        end
-
-        if Runtime and Runtime:FindFirstChild('Tornado') then
-            if (tick() - _apTornadoTime) < (Runtime.Tornado:GetAttribute('TornadoTime') or 1) + 0.314159 then
-                continue
+            if ball:FindFirstChild("AeroDynamicSlashVFX") then
+                ball.AeroDynamicSlashVFX:Destroy()
+                _apState.AerodynamicTime = now
             end
-        end
 
-        -- Only skip if the ball's trajectory will genuinely MISS us. A ball
-        -- that was curved around the sender but is still aimed at us gets
-        -- parried normally — this is what the old one_ball check was wrongly
-        -- rejecting.
-        if curved and not isApproachingPlayer(ball, char.PrimaryPart.Position, 8, 0.4) then
-            continue
-        end
+            if tornado and now - _apState.AerodynamicTime < tornadoT + 0.314159 then
+                return
+            end
 
-        if ball:FindFirstChild('ComboCounter') then continue end
-        if char.PrimaryPart:FindFirstChild('SingularityCape') then continue end
+            if firstTarget == _lpName and apCurved(ball) then
+                return
+            end
 
-        if InfDet and InfOn then continue end
-        if DSDet and DSOn then continue end
-        if THDet and THOn then continue end
-        if SFDet and SFOn then continue end
-
-        if ball_target == _lpName and distance <= parry_accuracy then
-            if AutoAbility then
-                local AbilityCD = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
-                if AbilityCD and AbilityCD.Offset.Y == 0.5 and char:FindFirstChild("Abilities") then
-                    local abilities = char.Abilities
-                    if (abilities:FindFirstChild("Raging Deflection") and abilities["Raging Deflection"].Enabled) or
-                       (abilities:FindFirstChild("Rapture") and abilities["Rapture"].Enabled) or
-                       (abilities:FindFirstChild("Calming Deflection") and abilities["Calming Deflection"].Enabled) or
-                       (abilities:FindFirstChild("Aerodynamic Slash") and abilities["Aerodynamic Slash"].Enabled) or
-                       (abilities:FindFirstChild("Fracture") and abilities["Fracture"].Enabled) or
-                       (abilities:FindFirstChild("Death Slash") and abilities["Death Slash"].Enabled) then
-                        AP_Parried[ball] = true
-                        ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
-                        -- Was an inline task.wait(2.432) here, which froze
-                        -- the whole AP connection for 2.4s. Now non-blocking.
-                        task.spawn(function()
-                            task.wait(2.432)
-                            pcall(function()
-                                ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("DeathSlashShootActivation"):FireServer(true)
-                            end)
-                        end)
-                        continue
-                    end
+            if target == _lpName
+               and dist <= pingDist + math.max(spd / n31, 9.5) then
+                if apFire() then
+                    _apLastFire = os.clock()
+                    if AnimFix_AP then PlaySingleParryAnimation() end
                 end
-            end
-
-            angeliFire(ball)
-            AP_Parried[ball] = true
-        end
-    end
-
-    if training_ball then
-        trackAPBall(training_ball)
-        if not AP_Parried[training_ball] then
-            local zoomies = training_ball:FindFirstChild('zoomies')
-            if zoomies then
-                local ball_target    = training_ball:GetAttribute('target')
-                local velocity       = zoomies.VectorVelocity
-                local distance       = horizDist(char.PrimaryPart.Position, training_ball.Position)
-                local speed          = velocity.Magnitude
-                local parry_accuracy = computeTriggerDist(speed, getPing(), false, AP_Acc)
-
-                if ball_target == _lpName and distance <= parry_accuracy then
-                    angeliFire(training_ball)
-                    AP_Parried[training_ball] = true
-                end
+                _apDebounce = true
+                _apUntilAt  = now + 1
             end
         end
     end
+end
+
+-- ---- reset debounce on ball state changes ----
+do
+    local function watchBalls(folder)
+        if not folder then return end
+        for _, ball in ipairs(folder:GetChildren()) do
+            ball:GetAttributeChangedSignal("target"):Connect(function()
+                _apDebounce = false
+                _apUntilAt  = 0
+            end)
+        end
+        folder.ChildAdded:Connect(function(ball)
+            _apDebounce = false
+            _apUntilAt  = 0
+            ball:GetAttributeChangedSignal("target"):Connect(function()
+                _apDebounce = false
+                _apUntilAt  = 0
+            end)
+        end)
+        folder.ChildRemoved:Connect(function()
+            _apDebounce = false
+            _apUntilAt  = 0
+            _apTarget.current = nil
+            _apTarget.visited = {}
+        end)
+    end
+    watchBalls(Workspace:FindFirstChild("Balls"))
+    watchBalls(Workspace:FindFirstChild("TrainingBalls"))
+end
+
+-- ---- ParrySuccessAll hook: seed Curving state (ported from oxy) ----
+pcall(function()
+    ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(_, hitPart)
+        local char = LocalPlayer.Character
+        if not char or not char.PrimaryPart then return end
+        local ball = apFirstBall()
+        if not ball then return end
+        local z = ball:FindFirstChild("zoomies")
+        if not z then return end
+        local spd = z.VectorVelocity.Magnitude
+        if spd < 1 then return end
+        local dist = (char.PrimaryPart.Position - apPosition(ball)).Magnitude
+        local ping = getPing()
+        local n31  = dist / spd - ping / 1000
+        local n32  = 15 - math.min(dist / 1000, 15) + math.min(spd / 100, 40)
+        if spd > 100 and n31 > ping / 10 then
+            n32 = math.max(n32 - 15, 15)
+        end
+        if hitPart ~= char.PrimaryPart and dist > n32 then
+            _apState.Curving = tick()
+        end
+    end)
 end)
 
-end
+-- ---- register with the shared RenderStepped dispatcher ----
+addRenderHandler(apCheck, 2)
+
+end -- AP scope
 
 -- ============================================================
 -- PARRY RANGE VISUALIZER
