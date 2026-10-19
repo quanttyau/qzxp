@@ -1,6 +1,7 @@
 -- CREDITS: S14X FOR SPAM AND ANIM FIX
---          LEAKED EAGLE HUB FOR BASICALLY EVERYTHING
---          ANGELI FOR AUTOPARRY AND TRIGGERBOT
+--          EAGLE HUB FOR BASICALLY EVERYTHING
+--          ANGELI FOR TRIGGERBOT
+--          OXY FOR AUTOPARRY
 -- Rewrite: 8 targeted fixes applied. See [FIX n] tags.
 
 local function GetSafeUIParent()
@@ -815,7 +816,7 @@ end
 -- ============================================================
 local AnimFix_AP, AnimFix_TB, AnimFix_Spam = true, true, true
 local AnimFix_Cache = {}
-local ANIM_FAIL = false  -- [FIX 2] sentinel for "tried, failed"
+local ANIM_FAIL = false
 
 local function GetParryAnimation(swordName)
     if not swordName or swordName == "" then
@@ -2239,15 +2240,26 @@ local function refreshSlash()
 end
 refreshSlash()
 
-local function equip(name)
+local function equip(name, notifyServer)
+    -- Unlock-all uses client-only equip (server would reject for unowned
+    -- swords). Skin changer keeps notifying the server so its state stays
+    -- in sync.
+    if notifyServer == nil then
+        notifyServer = not getgenv().qzxp_unlockAllActive
+    end
     if not LocalPlayer.Character then return end
     local exact = resolve(name)
+    LocalPlayer:SetAttribute("CurrentlyEquippedSword", exact)
+    LocalPlayer.Character:SetAttribute("CurrentlyEquippedSword", exact)
     pcall(function()
-        local f = rawget(swordModule, "EquipSwordTo")
+        -- Metatable-aware access — rawget can be nil if EquipSwordTo lives on __index
+        local f = swordModule.EquipSwordTo or rawget(swordModule, "EquipSwordTo")
         if type(f) == "function" then
-            local ups = getupvalues(f)
-            for i = 1, #ups do
-                if type(ups[i]) == "boolean" then setupvalue(f, i, false); break end
+            -- Match oxy: only clear booleans whose value is `true`.
+            -- The first `true` upvalue is the guard/ownership flag that
+            -- otherwise causes EquipSwordTo to silently bail on unowned swords.
+            for k, v in pairs(getupvalues(f)) do
+                if v == true then setupvalue(f, k, false); break end
             end
         end
     end)
@@ -2258,23 +2270,46 @@ local function equip(name)
         if not sc then return end
         pcall(function() if sc.SetSword then sc:SetSword(exact) end end)
         pcall(function()
-            if rs.Remotes:FindFirstChild("FireSwordInfo") then rs.Remotes.FireSwordInfo:FireServer(exact) end
+            -- Do NOT notify the server for unowned swords — it will reject
+            -- and may reset our client-side state. Oxy never notifies.
+            if notifyServer and rs.Remotes:FindFirstChild("FireSwordInfo") then
+                rs.Remotes.FireSwordInfo:FireServer(exact)
+            end
             if sc.currentSword ~= nil then pcall(function() sc.currentSword = exact end) end
             if sc.SwordFX ~= nil then pcall(function() sc.SwordFX = exact end) end
         end)
     end)
 end
 getgenv().updateSword = function()
-    refreshSlash(); AnimFix_Cache = {}
+    refreshSlash()
+    AnimFix_Cache = {}
     if getgenv().skinChanger and getgenv().swordModel ~= "" then
         getgenv().saveLastEquippedSword(getgenv().swordModel)
-        equip(getgenv().swordModel)
+        equip(getgenv().swordModel)          -- skin changer: server-aware
     end
 end
 getgenv().revertSword = function()
     if realSword ~= "" then equip(realSword) end
     AnimFix_Cache = {}
 end
+
+-- Watchdog: the game's FireSwordInfo broadcast can reset CurrentlyEquippedSword
+-- back to the real sword mid-life. Re-assert the fake one so the VFX hooker
+-- and the anim resolver both keep showing the unlock-all sword.
+spawnTracked(function()
+    while task.wait(0.5) do
+        if getgenv().qzxp_unlockAllActive and getgenv().swordModel ~= "" then
+            local char = LocalPlayer.Character
+            if char then
+                local want = resolve(getgenv().swordModel)
+                if want ~= "" and char:GetAttribute("CurrentlyEquippedSword") ~= want then
+                    pcall(function() char:SetAttribute("CurrentlyEquippedSword", want) end)
+                    pcall(function() LocalPlayer:SetAttribute("CurrentlyEquippedSword", want) end)
+                end
+            end
+        end
+    end
+end)
 
 -- VFX hooker
 local hooked = getgenv().qzxp_VFXHooked
@@ -2310,7 +2345,7 @@ spawnTracked(function()
                                 for _, a in ipairs(args) do
                                     if tostring(a) == _lpName or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then isMe = true; break end
                                 end
-                                if isMe and getgenv().skinChanger then
+                                if isMe and (getgenv().skinChanger or getgenv().qzxp_unlockAllActive) then
                                     local fx = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
                                     refreshSlash()
                                     local sf, slF = false, false
@@ -2345,7 +2380,7 @@ spawnTracked(function()
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
-    if getgenv().skinChanger and getgenv().swordModel ~= "" then
+    if (getgenv().skinChanger or getgenv().qzxp_unlockAllActive) and getgenv().swordModel ~= "" then
         task.wait(2)
         local char = LocalPlayer.Character
         if char then
@@ -2373,7 +2408,714 @@ LocalPlayer.CharacterAdded:Connect(function()
         pcall(getgenv().updateSword)
     end
 end)
+
+-- exposed for the Unlock All module
+getgenv().qzxp_equipSword   = equip
+getgenv().qzxp_resolveSword = resolve
+getgenv().qzxp_forceEquipSword = function(name)
+    if type(name) ~= "string" or name == "" then return false end
+    getgenv().swordModel      = name
+    getgenv().swordAnimations = name
+    getgenv().swordFX         = name
+    pcall(getgenv().saveLastEquippedSword, name)
+    refreshSlash()
+    AnimFix_Cache = {}
+    equip(name, false)
+    return true
+end
 end -- sword changer scope
+
+-- ============================================================
+-- UNLOCK ALL (SWORDS) — ported from oxy (tbl27)
+-- ============================================================
+local UA = {
+    enabled            = false,
+    ready              = false,
+    shop_controller    = nil,
+    shop_api           = nil,
+    shop               = nil,
+    swords             = nil,
+    sword_fn           = nil,
+    play_parry         = nil,
+    selected_sword     = nil,
+    original_sword     = nil,
+    last_equipped_sword = "",
+    chroma_bound       = false,
+    character_connection = nil,
+    sword_attr_connection = nil,
+    modern_tag         = "qzxp_unlock_all",
+    original_set_equipped = nil,
+    original_buy_fns   = {},
+    unlock_originals   = setmetatable({}, {__mode = "k"}),
+    modern_originals   = setmetatable({}, {__mode = "k"}),
+    page_connections   = {},
+    refresh_generation = {},
+    unlocked           = {},
+    parry_connections  = {},
+    fire_connections   = {},
+    deleted_swords     = {},
+    _lastError         = nil,
+}
+
+-- Capture the game's original FireSwordInfo / ParrySuccessAll handlers
+-- up front, before anything hooks them. `sword_fn` is called directly in
+-- equip_sword to refresh local state (sc.currentSword, SwordFX, sounds,
+-- etc.) without a server round-trip. `play_parry` is captured for
+-- potential direct VFX calls (VFX hooker handles the actual parry
+-- substitution, so UA won't wire ParrySuccessAll itself).
+do
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if remotes then
+        local psAll = remotes:FindFirstChild("ParrySuccessAll")
+        if psAll and psAll:IsA("RemoteEvent") then
+            local ok, conns = pcall(getconnections, psAll.OnClientEvent)
+            if ok and type(conns) == "table" then
+                for _, c in ipairs(conns) do
+                    local ok2, fn = pcall(function() return c.Function end)
+                    if ok2 and type(fn) == "function" then
+                        table.insert(UA.parry_connections, c)
+                        UA.play_parry = fn
+                    end
+                end
+            end
+        end
+        local fsi = remotes:FindFirstChild("FireSwordInfo")
+        if fsi and fsi:IsA("RemoteEvent") then
+            local ok, conns = pcall(getconnections, fsi.OnClientEvent)
+            if ok and type(conns) == "table" then
+                for _, c in ipairs(conns) do
+                    local ok2, fn = pcall(function() return c.Function end)
+                    if ok2 and type(fn) == "function" then
+                        table.insert(UA.fire_connections, c)
+                        UA.sword_fn = fn
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- oxy's set_sword_override. Disables the game's FireSwordInfo handlers so
+-- server broadcasts can't revert the fake equip while UA is active.
+-- (ParrySuccessAll is handled by the qzxp VFX hooker, so we leave it
+-- alone here to avoid double-fire.)
+function UA.set_sword_override(_, on)
+    for _, c in ipairs(UA.fire_connections) do
+        pcall(function()
+            if on then c:Disable() else c:Enable() end
+        end)
+    end
+end
+
+-- oxy's apply_chroma
+function UA.apply_chroma(_, model, sword)
+    local colorConfig = sword.ColorConfig or sword.TweenColorConfig
+    if not colorConfig and (sword.Name:find("Chroma") or sword.Name:find("Rainbow")) then
+        colorConfig = "Chroma"
+    end
+    if colorConfig then
+        pcall(function()
+            model:SetAttribute("ColorConfig", colorConfig)
+            model:AddTag("TweenColor")
+        end)
+    end
+end
+
+-- oxy's set_category_unlock
+function UA.set_category_unlock(_, category, unlock)
+    if not UA.shop_controller then return end
+    local virtual = UA.shop_controller._virtualItems[category]
+    local page    = UA.shop_controller._inventoryPages[category]
+    if type(virtual) ~= "table" then return end
+    if page and page.BeginBatch then pcall(page.BeginBatch, page) end
+
+    if unlock then
+        UA.unlocked[category] = true
+        local backed = {}
+        for _, item in pairs(virtual) do
+            if item.InventoryKey then backed[item.Name] = true end
+        end
+        for _, item in pairs(virtual) do
+            if not UA.unlock_originals[item] then
+                UA.unlock_originals[item] = {
+                    Section = item.Section,
+                    ForceHide = item.ForceHide,
+                    OriginalLayoutOrder = item.OriginalLayoutOrder or item.LayoutOrder,
+                }
+            end
+            local dirty = false
+            local deleted = UA:is_deleted(category, item.Name)
+            local targetSection = deleted and "Unowned" or "Owned"
+            if item.Section ~= targetSection then item.Section = targetSection; dirty = true end
+            if item.OwnsItem and type(item.OwnsItem.Set) == "function" then
+                pcall(item.OwnsItem.Set, item.OwnsItem, not deleted)
+            end
+            local forceHide = not item.InventoryKey and backed[item.Name] or false
+            if item.ForceHide ~= forceHide then item.ForceHide = forceHide; dirty = true end
+            if dirty and page and page.MarkDirty then
+                pcall(page.MarkDirty, page, item, false, true)
+            end
+        end
+    else
+        UA.unlocked[category] = nil
+        for _, item in pairs(virtual) do
+            local orig = UA.unlock_originals[item]
+            if orig then
+                local dirty = false
+                if item.Section ~= orig.Section then item.Section = orig.Section; dirty = true end
+                if item.ForceHide ~= orig.ForceHide then item.ForceHide = orig.ForceHide; dirty = true end
+                if dirty and page and page.MarkDirty then
+                    pcall(page.MarkDirty, page, item, false, true)
+                end
+                UA.unlock_originals[item] = nil
+            end
+        end
+    end
+
+    if page and page.MarkDirty then pcall(page.MarkDirty, page, nil, true, true) end
+    if page and page.EndBatch then pcall(page.EndBatch, page) end
+end
+
+-- oxy's set_modern_unlock
+function UA.set_modern_unlock(_, category, unlock)
+    local api = UA.shop_api
+    local bases = api and api.OwnedBases and api.OwnedBases[category]
+    if type(bases) ~= "table" then return end
+    for name, base in pairs(bases) do
+        local ok1, key = pcall(api.ParseItemKey, api, category, {Name = name})
+        local copies = nil
+        if ok1 and key then
+            local ok2, data = pcall(api.GetItemData, api, category, key)
+            if ok2 and type(data) == "table" then copies = data.OwnedCopies end
+        end
+        if unlock and copies and type(copies.Get) == "function" and type(copies.Set) == "function" then
+            if not UA.modern_originals[copies] then
+                local okG, cur = pcall(copies.Get, copies)
+                if okG then UA.modern_originals[copies] = {Value = cur} end
+            end
+            local okG, cur = pcall(copies.Get, copies)
+            if okG and (type(cur) ~= "number" or cur < 1) then
+                pcall(copies.Set, copies, 1)
+            end
+        end
+        if base and type(base.SetTag) == "function" then
+            pcall(base.SetTag, base, UA.modern_tag, unlock and true or nil)
+        end
+        if not unlock and copies then
+            local orig = UA.modern_originals[copies]
+            if orig and type(copies.Set) == "function" then
+                local bought = false
+                if base and base.State and type(base.State.Get) == "function" then
+                    local okS, s = pcall(base.State.Get, base.State)
+                    bought = okS and s == true
+                end
+                if not bought then pcall(copies.Set, copies, orig.Value) end
+                UA.modern_originals[copies] = nil
+            end
+        end
+    end
+end
+
+-- oxy's expected_size
+function UA.expected_size(_, category)
+    local n = 0
+    if category == "Sword" and UA.swords then
+        local ok, coll = pcall(function() return UA.swords:GetCollection() end)
+        if ok and type(coll) == "table" then
+            for _ in pairs(coll) do n = n + 1 end
+        end
+    elseif category == "Explosion" then
+        local misc = ReplicatedStorage:FindFirstChild("Misc")
+        misc = misc and misc:FindFirstChild("DataExplosions")
+        if misc then
+            for _, c in ipairs(misc:GetChildren()) do
+                if not c:GetAttribute("Hidden") then n = n + 1 end
+            end
+        end
+    end
+    return n
+end
+
+-- oxy's schedule_refresh
+function UA.schedule_refresh(_, category)
+    UA.refresh_generation[category] = (UA.refresh_generation[category] or 0) + 1
+    local myGen = UA.refresh_generation[category]
+    if type(UA.shop_controller._loadInventoryPage) == "function" then
+        pcall(UA.shop_controller._loadInventoryPage, category)
+    end
+    task.spawn(function()
+        local expected = UA:expected_size(category)
+        local lastCount, stable = -1, 0
+        for _ = 1, 120 do
+            RunService.Heartbeat:Wait()
+            if not UA.enabled or not UA.unlocked[category] or UA.refresh_generation[category] ~= myGen then return end
+            local virt = UA.shop_controller._virtualItems[category]
+            local count = 0
+            if type(virt) == "table" then
+                for _, it in pairs(virt) do
+                    if not it.InventoryKey then count = count + 1 end
+                end
+            end
+            if count == lastCount and count > 0 then stable = stable + 1
+            else stable = 0; lastCount = count end
+            if (expected > 0 and count >= expected) or (expected == 0 and stable >= 5) then
+                RunService.Heartbeat:Wait()
+                UA:set_category_unlock(category, true)
+                return
+            end
+        end
+        if UA.enabled and UA.unlocked[category] and UA.refresh_generation[category] == myGen then
+            UA:set_category_unlock(category, true)
+        end
+    end)
+end
+
+-- oxy's equip_sword (exact port). Patches EquipSwordTo's boolean guard,
+-- sets the attribute, calls EquipSwordTo, applies chroma, then calls the
+-- game's own FireSwordInfo handler (`sword_fn`) to refresh local state.
+function UA.equip_sword(_, swordName, restore)
+    if not UA.swords then return false end
+    local isEquip = not restore
+
+    if isEquip and UA:is_deleted("Sword", swordName) then
+        UA:undelete_item("Sword", swordName)
+    end
+
+    local sword = UA.swords:GetSword(swordName)
+    if not sword then return false end
+    local character = LocalPlayer.Character
+    if not character then return false end
+
+    if isEquip and not UA.original_sword then
+        UA.original_sword = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+                         or character:GetAttribute("CurrentlyEquippedSword")
+    end
+
+    if restore then
+        UA.selected_sword = nil
+    else
+        UA.selected_sword = sword.Name
+        UA.last_equipped_sword = sword.Name
+        UA:set_sword_override(true)
+        getgenv().qzxp_unlockAllActive = true
+        getgenv().swordModel      = sword.Name
+        getgenv().swordAnimations = sword.Name
+        getgenv().swordFX         = sword.Name
+        pcall(getgenv().saveLastEquippedSword, sword.Name)
+    end
+
+    LocalPlayer:SetAttribute("CurrentlyEquippedSword", sword.Name)
+    character:SetAttribute("CurrentlyEquippedSword", sword.Name)
+
+    pcall(function()
+        local equipSwordTo = UA.swords.EquipSwordTo
+        for k, v in pairs(getupvalues(equipSwordTo)) do
+            if v == true then
+                setupvalue(equipSwordTo, k, false)
+                break
+            end
+        end
+    end)
+
+    if not pcall(function()
+        UA.swords:EquipSwordTo(character, sword.Name)
+    end) then
+        return false
+    end
+
+    local model = character:FindFirstChild(sword.Name)
+    if model then
+        UA:apply_chroma(model, sword)
+    end
+
+    if UA.sword_fn then
+        pcall(UA.sword_fn, sword.Name)
+    end
+
+    return true
+end
+
+-- oxy's restore_sword
+function UA.restore_sword(_)
+    if UA.original_sword and UA.original_sword ~= "" then
+        UA:equip_sword(UA.original_sword, true)
+    else
+        UA.selected_sword = nil
+    end
+    UA.original_sword = nil
+    UA:set_sword_override(false)
+    getgenv().qzxp_unlockAllActive = false
+end
+
+function UA.is_deleted(_, category, name)
+    if category == "Sword" then return UA.deleted_swords[name] == true end
+    return false
+end
+
+function UA.undelete_item(_, category, name)
+    if category == "Sword" then UA.deleted_swords[name] = nil end
+    UA:refresh_selected()
+end
+
+-- oxy's refresh_selected. Turns Buy → Equip for the selected sword.
+function UA.refresh_selected(_)
+    if not UA.shop_controller or not UA.shop then return end
+    local selectedItem = UA.shop_controller._selectedItem
+    if not selectedItem then return end
+
+    local holder   = UA.shop:FindFirstChild("Holder")
+    local infoBG   = holder and holder:FindFirstChild("InfoBG")
+    local buyButton = infoBG and infoBG:FindFirstChild("BuyButton")
+
+    if not UA.enabled or not UA.unlocked[selectedItem.type] then
+        if buyButton then
+            buyButton.Visible = true
+            local pt = buyButton:FindFirstChild("PriceTag")
+            if pt then
+                local tl = pt:FindFirstChild("TextLabel")
+                if tl then tl.Visible = true end
+                local pr = pt:FindFirstChild("Price")
+                if pr then pr.Visible = true end
+            end
+        end
+        return
+    end
+
+    if selectedItem.type ~= "Sword" and selectedItem.type ~= "Explosion" then return end
+
+    local virtItem = nil
+    local virtual = UA.shop_controller._virtualItems and UA.shop_controller._virtualItems[selectedItem.type]
+    if virtual then
+        virtItem = virtual[selectedItem.key or selectedItem.name]
+    end
+
+    if UA:is_deleted(selectedItem.type, selectedItem.name) or (virtItem and virtItem.Section == "Unowned") then
+        if buyButton then buyButton.Visible = false end
+        return
+    end
+
+    if buyButton then
+        buyButton.Visible = true
+        local pt = buyButton:FindFirstChild("PriceTag")
+        if pt then
+            local tl = pt:FindFirstChild("TextLabel")
+            if tl then
+                tl.Visible = true
+                tl.Text = "Equip"
+            end
+            local pr = pt:FindFirstChild("Price")
+            if pr then pr.Visible = false end
+        end
+    end
+end
+
+-- oxy's hook_modern_shop
+function UA.hook_modern_shop(_)
+    local api = UA.shop_api
+    if not api or UA.original_set_equipped then return end
+    if type(api.SetEquipped) ~= "function" then return end
+    UA.original_set_equipped = api.SetEquipped
+    api.SetEquipped = function(self, ...)
+        local args = {...}
+        local itemType, name = args[1], args[2]
+        if type(itemType) == "table" then
+            name = itemType.Name
+            itemType = itemType.ItemType
+        elseif type(name) == "table" then
+            name = name.Name
+        end
+        if UA.enabled and (itemType == "Sword" or tostring(itemType):lower():find("sword")) then
+            if UA:equip_sword(name, false) then return true end
+        end
+        return UA.original_set_equipped(self, unpack(args))
+    end
+end
+
+-- oxy's hook_shop. Wires BuyButton (capture + replace), itemSelected,
+-- GuiService.SelectedObject, and shop Enabled.
+function UA.hook_shop(_)
+    local pg   = LocalPlayer:WaitForChild("PlayerGui")
+    local shop = pg:FindFirstChild("Shop")
+    if not shop then
+        if not UA._shopWatchConn then
+            UA._shopWatchConn = pg.ChildAdded:Connect(function(child)
+                if child.Name == "Shop" and not UA._hookedBuy then
+                    task.defer(function() UA:hook_shop() end)
+                end
+            end)
+        end
+        return false
+    end
+    if UA._hookedBuy and UA.shop == shop then return true end
+
+    local holder   = shop:FindFirstChild("Holder")
+    local infoBG   = holder and holder:FindFirstChild("InfoBG")
+    local buyButton = infoBG and infoBG:FindFirstChild("BuyButton")
+    if not buyButton then
+        if not UA._shopChildConn then
+            UA._shopChildConn = shop.DescendantAdded:Connect(function(d)
+                if d.Name == "BuyButton" and not UA._hookedBuy then
+                    task.defer(function() UA:hook_shop() end)
+                end
+            end)
+        end
+        return false
+    end
+
+    if UA._shopWatchConn then pcall(function() UA._shopWatchConn:Disconnect() end); UA._shopWatchConn = nil end
+    if UA._shopChildConn then pcall(function() UA._shopChildConn:Disconnect() end); UA._shopChildConn = nil end
+
+    UA._hookedBuy = true
+    UA.shop = shop
+
+    -- Capture + disable the game's original BuyButton handlers
+    local ok, conns = pcall(getconnections, buyButton.Activated)
+    if ok and type(conns) == "table" then
+        for _, c in ipairs(conns) do
+            if c.Function then
+                table.insert(UA.original_buy_fns, c.Function)
+                pcall(function() c:Disable() end)
+            end
+        end
+    end
+
+    -- oxy's replacement BuyButton handler
+    buyButton.Activated:Connect(function()
+        local sel = UA.shop_controller and UA.shop_controller._selectedItem
+        if not sel then return end
+        if UA.enabled and UA.unlocked[sel.type] then
+            if sel.type == "Sword" then
+                if UA:equip_sword(sel.name, false) then
+                    if buyButton.PriceTag and buyButton.PriceTag.TextLabel then
+                        buyButton.PriceTag.TextLabel.Text = "Equipped"
+                    end
+                end
+                return
+            end
+        end
+        for _, fn in ipairs(UA.original_buy_fns) do spawnTracked(fn) end
+    end)
+
+    -- oxy's itemSelected handler
+    if UA.shop_controller.itemSelected then
+        UA.shop_controller.itemSelected:Connect(function(sel)
+            if sel and UA.unlocked[sel.type] then
+                UA:set_category_unlock(sel.type, true)
+            end
+            task.defer(function() UA:refresh_selected() end)
+        end)
+    end
+
+    -- oxy's GuiService.SelectedObject handler (gamepad nav)
+    pcall(function()
+        game:GetService("GuiService"):GetPropertyChangedSignal("SelectedObject"):Connect(function()
+            if not UA.enabled or not UA.shop or not UA.shop.Enabled then return end
+            task.defer(function() UA:refresh_selected() end)
+        end)
+    end)
+
+    -- oxy's shop-Enabled handler
+    shop:GetPropertyChangedSignal("Enabled"):Connect(function()
+        if not shop.Enabled or not UA.enabled then return end
+        for _, cat in ipairs({"Sword", "Explosion"}) do
+            if UA.unlocked[cat] then UA:schedule_refresh(cat) end
+        end
+    end)
+    if shop.Enabled and UA.enabled then
+        task.defer(function()
+            for _, cat in ipairs({"Sword", "Explosion"}) do
+                if UA.unlocked[cat] then UA:schedule_refresh(cat) end
+            end
+        end)
+    end
+
+    return true
+end
+
+-- oxy's hook_chroma + setup_character. Respawn re-equip + attribute
+-- persistence (in case the game rewrites CurrentlyEquippedSword mid-life).
+function UA.hook_chroma(_)
+    if UA.chroma_bound then return end
+    UA.chroma_bound = true
+
+    UA.added_connection = LocalPlayer.CharacterAdded:Connect(function(character)
+        UA:setup_character(character)
+    end)
+    if LocalPlayer.Character then
+        task.defer(function() UA:setup_character(LocalPlayer.Character) end)
+    end
+
+    UA.sword_attr_connection = LocalPlayer:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
+        local selected = UA.selected_sword
+        if not UA.enabled or not selected then return end
+        if LocalPlayer:GetAttribute("CurrentlyEquippedSword") == selected then return end
+        LocalPlayer:SetAttribute("CurrentlyEquippedSword", selected)
+        if LocalPlayer.Character then
+            LocalPlayer.Character:SetAttribute("CurrentlyEquippedSword", selected)
+        end
+        if UA.sword_fn then pcall(UA.sword_fn, selected) end
+    end)
+end
+
+function UA.setup_character(_, character)
+    if UA.character_connection then
+        pcall(function() UA.character_connection:Disconnect() end)
+        UA.character_connection = nil
+    end
+    if not character then return end
+
+    -- oxy: re-equip last_equipped_sword on character spawn
+    if UA.enabled and UA.last_equipped_sword ~= "" then
+        task.defer(function()
+            if UA.enabled and UA.last_equipped_sword ~= "" then
+                UA:equip_sword(UA.last_equipped_sword, false)
+            end
+        end)
+    end
+
+    local function checkChild(child)
+        if not UA.enabled or not child:IsA("Model") or not UA.swords or not UA.selected_sword then return end
+        local sword = UA.swords:GetSword(child.Name)
+        if not sword then return end
+        if child.Name ~= UA.selected_sword then
+            local sel = UA.selected_sword
+            task.defer(function()
+                if UA.enabled and UA.selected_sword == sel then
+                    UA:equip_sword(sel, false)
+                end
+            end)
+        else
+            UA:apply_chroma(child, sword)
+            if UA.sword_fn then
+                task.defer(function()
+                    if UA.enabled and UA.selected_sword == child.Name then
+                        pcall(UA.sword_fn, child.Name)
+                    end
+                end)
+            end
+        end
+    end
+
+    UA.character_connection = character.ChildAdded:Connect(checkChild)
+    for _, child in ipairs(character:GetChildren()) do checkChild(child) end
+end
+
+-- oxy's initialize
+function UA.initialize(_)
+    -- Resolve Swords module directly (like oxy)
+    local shared = ReplicatedStorage:FindFirstChild("Shared")
+    shared = shared and shared:FindFirstChild("ReplicatedInstances")
+    shared = shared and shared:FindFirstChild("Swords")
+    if shared then
+        local ok, res = pcall(require, shared)
+        if ok then UA.swords = res end
+    end
+
+    -- Resolve shop controllers
+    local controllersRoot = ReplicatedStorage:FindFirstChild("Controllers")
+    if not controllersRoot then
+        pcall(function() controllersRoot = ReplicatedStorage:WaitForChild("Controllers", 5) end)
+    end
+    if not controllersRoot then
+        UA._lastError = "no Controllers root"
+        return false
+    end
+    local ui = controllersRoot:FindFirstChild("UI")
+    local scInst = ui and ui:FindFirstChild("ShopController")
+    local saInst = ui and ui:FindFirstChild("ShopControllerAPI")
+    if not scInst or not saInst then
+        for _, d in ipairs(controllersRoot:GetDescendants()) do
+            if not scInst and d.Name == "ShopController" and d:IsA("ModuleScript") then scInst = d end
+            if not saInst and d.Name == "ShopControllerAPI" and d:IsA("ModuleScript") then saInst = d end
+            if scInst and saInst then break end
+        end
+    end
+    if not scInst and not saInst then
+        UA._lastError = "no ShopController/ShopControllerAPI"
+        return false
+    end
+    local sc, sa
+    if scInst then
+        local ok, res = pcall(require, scInst)
+        if ok and type(res) == "table" then sc = res end
+    end
+    if saInst then
+        local ok, res = pcall(require, saInst)
+        if ok and type(res) == "table" then sa = res end
+    end
+    if not sc and not sa then
+        UA._lastError = "require failed"
+        return false
+    end
+
+    UA.shop_controller = sc
+    UA.shop_api = sa
+
+    -- oxy calls hook_sword_fx + hook_chroma during init. hook_sword_fx's
+    -- ParrySuccessAll substitution is handled by the qzxp VFX hooker, so
+    -- only hook_chroma is required here. The FireSwordInfo handler capture
+    -- is done at module top (UA.sword_fn).
+    UA:hook_chroma()
+
+    if UA.shop_controller then UA:hook_shop() end
+    if UA.shop_api then UA:hook_modern_shop() end
+
+    UA.ready = true
+
+    if getgenv().swordModel and getgenv().swordModel ~= "" and UA.last_equipped_sword == "" then
+        UA.last_equipped_sword = getgenv().swordModel
+    end
+
+    UA:set_enabled(UA.enabled)
+    return true
+end
+
+-- oxy's set_enabled
+function UA.set_enabled(_, on)
+    UA.enabled = on == true
+    if not UA.ready then return end
+
+    for _, cat in ipairs({"Sword", "Explosion"}) do
+        if UA.enabled then
+            if UA.shop_controller then
+                UA:set_category_unlock(cat, true)
+                UA:schedule_refresh(cat)
+            end
+            UA:set_modern_unlock(cat, true)
+        else
+            if UA.shop_controller then
+                UA.refresh_generation[cat] = (UA.refresh_generation[cat] or 0) + 1
+                UA:set_category_unlock(cat, false)
+            end
+            UA:set_modern_unlock(cat, false)
+        end
+    end
+
+    if not UA.enabled then
+        UA:restore_sword()
+    else
+        UA:refresh_selected()
+        if UA.last_equipped_sword ~= "" and UA.swords then
+            task.defer(function()
+                if UA.enabled and UA.last_equipped_sword ~= "" then
+                    UA:equip_sword(UA.last_equipped_sword, false)
+                end
+            end)
+        end
+    end
+end
+
+task.spawn(function()
+    for attempt = 1, 30 do
+        if UA:initialize() then return end
+        if attempt == 30 then
+            warn("[qzxp] unlock all: gave up after 30 attempts. Last error: " .. tostring(UA._lastError))
+        end
+        task.wait(2)
+    end
+end)
+
+getgenv().qzxp_UA = UA
 
 -- ============================================================
 -- HEADLESS / KORBLOX
@@ -2833,6 +3575,22 @@ do
         if getgenv().skinChanger and e ~= "" then pcall(getgenv().updateSword) end
         pcall(getgenv().saveLastEquippedSword, e)
     end})
+
+    local s5b = Tabs.Skins:AddSection("Unlock All (Swords)")
+    s5b:AddToggle("UnlockAllToggle", {
+        Title = "Enabled",
+        Default = false,
+        Callback = function(v)
+            UA:set_enabled(v)
+            notify({Title = "Unlock All", Content = v and "On" or "Off", Duration = 2})
+        end,
+    })
+    s5b:AddButton({
+        Title = "Refresh Shop",
+        Callback = function()
+            if UA.enabled then UA:schedule_refresh() end
+        end,
+    })
 end
 do
     local s6 = Tabs.Lock:AddSection("Parry Lock")
@@ -3006,10 +3764,25 @@ getgenv().qzxp_Cleanup = function()
             end
         end
 
+        -- Unlock All: restore shop UI + shop API before tearing down
+        pcall(function()
+            if UA and UA.ready then
+                UA.enabled = false
+                pcall(function() UA:set_category_unlock(false) end)
+                pcall(function() UA:set_modern_unlock(false) end)
+                if UA.shop_api and UA.original_set_equipped then
+                    pcall(function() UA.shop_api.SetEquipped = UA.original_set_equipped end)
+                end
+            end
+        end)
+
         getgenv().skinChanger = nil; getgenv().skinChangerEnabled = nil
+        getgenv().qzxp_unlockAllActive = nil
         getgenv().swordModel = nil; getgenv().swordAnimations = nil; getgenv().swordFX = nil
         getgenv().slashName = nil; getgenv().updateSword = nil; getgenv().revertSword = nil
         getgenv().saveLastEquippedSword = nil; getgenv().setSkinUI = nil
+        getgenv().qzxp_equipSword = nil; getgenv().qzxp_resolveSword = nil
+        getgenv().qzxp_forceEquipSword = nil
         getgenv().qzxp_Cleanup = nil
     end)
 end
