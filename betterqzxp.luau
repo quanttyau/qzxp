@@ -550,27 +550,79 @@ function SaveManager:Save(name)
     end)
     Fluent:Notify({Title = "Config", Content = ok and ("Saved: " .. name) or "Save failed", Duration = 3})
 end
+-- Load order: lower number loads first. Dependencies MUST come before dependents.
+local LOAD_PRIORITY = {
+    -- Inputs / sliders / dropdowns that other callbacks read
+    ManualSword = 10, AvatarSaver = 10, LockTarget = 10,
+    Accuracy    = 10, SpamRPS     = 10, FPSCap     = 10,
+    CurveMode   = 10, HLR = 10, HLG = 10, HLB = 10,
+    -- Keybinds
+    APKey = 20, SpamKey = 20, TBKey = 20,
+    CursorKey = 20, LockKey = 20, GUIToggleKey = 20,
+    -- Toggles that consume the inputs above
+    SkinToggle = 30, AvatarChanger = 30,
+    -- Heavy / stateful toggles last
+    UnlockAllToggle = 40, ThunderDashToggle = 40,
+}
+
 function SaveManager:Load(name)
-    local ok, contents = pcall(function() return readfile((self.folder or "qzxp/configs") .. "/" .. name .. ".json") end)
+    local ok, contents = pcall(function()
+        return readfile((self.folder or "qzxp/configs") .. "/" .. name .. ".json")
+    end)
     if not ok or not contents then
-        Fluent:Notify({Title = "Config", Content = "Not found: " .. name, Duration = 3}); return
+        Fluent:Notify({Title = "Config", Content = "Not found: " .. name, Duration = 3})
+        return
     end
+
     local ok2, data = pcall(function() return _HS:JSONDecode(contents) end)
     if not ok2 or type(data) ~= "table" then
-        Fluent:Notify({Title = "Config", Content = "Invalid config", Duration = 3}); return
+        Fluent:Notify({Title = "Config", Content = "Invalid config", Duration = 3})
+        return
     end
+
+    local entries = {}
     for id, entry in pairs(data) do
         local opt = Fluent.Options[id]
-        if opt and opt.SetValue then
-            local v = entry.v
-            if entry.t == "EnumItem" then
-                local ok3, e = pcall(function() return Enum[entry.c][entry.v] end)
-                if ok3 then v = e end
-            end
-            pcall(function() opt:SetValue(v) end)
+        if opt and opt.SetValue and type(entry) == "table" and entry.v ~= nil then
+            table.insert(entries, {id = id, entry = entry,
+                priority = LOAD_PRIORITY[id] or 50})
         end
     end
-    Fluent:Notify({Title = "Config", Content = "Loaded: " .. name, Duration = 3})
+
+    table.sort(entries, function(a, b)
+        if a.priority ~= b.priority then return a.priority < b.priority end
+        return a.id < b.id
+    end)
+
+    local wasSuppressed = getgenv().qzxp_suppressNotify
+    getgenv().qzxp_suppressNotify = true
+
+    local applied, failed = 0, 0
+    for _, item in ipairs(entries) do
+        local opt = Fluent.Options[item.id]
+        local v   = item.entry.v
+        if item.entry.t == "EnumItem" then
+            if type(item.entry.c) == "string" and type(item.entry.v) == "string" then
+                local ok3, e = pcall(function() return Enum[item.entry.c][item.entry.v] end)
+                if ok3 and e then v = e end
+            end
+        end
+        if pcall(function() opt:SetValue(v) end) then
+            applied += 1
+        else
+            failed += 1
+        end
+    end
+
+    getgenv().qzxp_suppressNotify = wasSuppressed
+
+    Fluent:Notify({
+        Title   = "Config",
+        Content = ("Loaded: %s (%d applied%s)"):format(
+            name, applied,
+            failed > 0 and (", " .. failed .. " failed") or ""),
+        Duration = 3,
+    })
 end
 function SaveManager:BuildConfigSection(tab)
     local s = tab:AddSection("Config")
@@ -626,10 +678,10 @@ function InterfaceManager:BuildInterfaceSection(tab) end
 local Window = Fluent:CreateWindow({Title = "qzxp", TabWidth = 130,
     Size = UDim2.fromOffset(750, 450), MinimizeKey = Enum.KeyCode.LeftControl})
 local Tabs = {
-    Main = Window:AddTab({Title = "Parry"}), Detection = Window:AddTab({Title = "Detect"}),
-    Spam = Window:AddTab({Title = "Spam"}), Trigger = Window:AddTab({Title = "Trigger"}),
-    Skins = Window:AddTab({Title = "Skins"}), Lock = Window:AddTab({Title = "Lock"}),
-    Visuals = Window:AddTab({Title = "Visuals"}), Settings = Window:AddTab({Title = "Config"}),
+    Main = Window:AddTab({Title = "Autoparry"}), Detection = Window:AddTab({Title = "Detections"}),
+    Spam = Window:AddTab({Title = "Spam"}), Trigger = Window:AddTab({Title = "Triggerbot"}),
+    Skins = Window:AddTab({Title = "Swords"}), Lock = Window:AddTab({Title = "Parry Lock"}),
+    Visuals = Window:AddTab({Title = "Misc"}), Settings = Window:AddTab({Title = "Settings"}),
 }
 
 local Players           = game:GetService("Players")
@@ -649,9 +701,8 @@ local frameCount = 0
 local Stats_Network = Stats.Network
 local Stats_DataPing = Stats_Network and Stats_Network.ServerStatsItem and Stats_Network.ServerStatsItem["Data Ping"]
 
-local suppressNotifies = false
 local function notify(cfg)
-    if suppressNotifies then return end
+    if getgenv().qzxp_suppressNotify then return end
     task.defer(function() pcall(function() Fluent:Notify(cfg) end) end)
 end
 
@@ -803,6 +854,7 @@ end
 buildRegistry()
 local function resolve(input)
     if not input or input == "" then return "" end
+    input = tostring(input)
     local n = norm(input)
     if SwordRegistry[n] then return SwordRegistry[n] end
     for nk, actual in pairs(SwordRegistry) do
@@ -1272,26 +1324,156 @@ end
 
 local LockEnabled, LockTarget = false, "None"
 local HLEnabled, HLColor = false, Color3.fromRGB(255, 60, 60)
-local hlInst = nil
-local function clearHL() if hlInst then pcall(function() hlInst:Destroy() end); hlInst = nil end end
-local function refreshHL()
-    clearHL()
-    if not HLEnabled or LockTarget == "None" then return end
-    local p = findPart(LockTarget)
-    if p and p.Parent then
-        local h = Instance.new("Highlight")
-        h.Name = "PL_HL"; h.FillColor = HLColor; h.OutlineColor = HLColor
-        h.FillTransparency = 0.6; h.OutlineTransparency = 0
-        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; h.Adornee = p.Parent; h.Parent = p.Parent
-        hlInst = h
+
+-- ============================================================
+-- LOCK INDICATOR — corner brackets drawn around the locked player.
+-- Replaces the old Highlight instance entirely. Pure screen-space
+-- Frames in a ScreenGui; nothing touches the world.
+-- ============================================================
+local LockIndicator = {
+    gui   = nil,
+    lines = {},   -- 8 frames: 4 corners x (horizontal + vertical)
+}
+
+local function ensureLockIndicator()
+    if LockIndicator.gui and LockIndicator.gui.Parent then return end
+    LockIndicator.gui = nil
+    LockIndicator.lines = {}
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "qzxp_LockIndicator"
+    sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = false
+    sg.DisplayOrder = 90
+    sg.Parent = GetSafeUIParent()
+    LockIndicator.gui = sg
+    for i = 1, 8 do
+        local f = Instance.new("Frame")
+        f.Name = "Corner" .. i
+        f.BackgroundColor3 = HLColor
+        f.BorderSizePixel = 0
+        f.Visible = false
+        f.Parent = sg
+        LockIndicator.lines[i] = f
     end
 end
-spawnTracked(function()
-    while task.wait(0.5) do
-        if HLEnabled then if not hlInst or not hlInst.Parent then refreshHL() end
-        else clearHL() end
+
+local function hideLockIndicator()
+    if not LockIndicator.gui then return end
+    for i = 1, 8 do
+        local f = LockIndicator.lines[i]
+        if f then f.Visible = false end
     end
-end)
+end
+
+local function drawLockIndicator()
+    if not HLEnabled or LockTarget == "None" then
+        hideLockIndicator()
+        return
+    end
+    local part = findPart(LockTarget)
+    if not part or not part.Parent then
+        hideLockIndicator()
+        return
+    end
+    local char = part.Parent
+    if not char or not char:IsA("Model") then
+        hideLockIndicator()
+        return
+    end
+
+    -- Get the character's real 3D bounding box (includes accessories,
+    -- hair, arms, feet — everything visibly attached).
+    local ok, cf, size = pcall(function()
+        local c, s = char:GetBoundingBox()
+        return c, s
+    end)
+    if not ok or not cf or not size then
+        hideLockIndicator()
+        return
+    end
+
+    local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+
+    -- Project all 8 corners to screen and take the 2D AABB.
+    local minX, minY = math.huge, math.huge
+    local maxX, maxY = -math.huge, -math.huge
+    local visibleCorners = 0
+    for _, sx in ipairs({-1, 1}) do
+        for _, sy in ipairs({-1, 1}) do
+            for _, sz in ipairs({-1, 1}) do
+                local wp = (cf * CFrame.new(sx * hx, sy * hy, sz * hz)).Position
+                local sp, on = Camera:WorldToViewportPoint(wp)
+                if on then
+                    visibleCorners += 1
+                    if sp.X < minX then minX = sp.X end
+                    if sp.Y < minY then minY = sp.Y end
+                    if sp.X > maxX then maxX = sp.X end
+                    if sp.Y > maxY then maxY = sp.Y end
+                end
+            end
+        end
+    end
+
+    -- Need at least a couple of corners to make a sensible box.
+    if visibleCorners < 2 then
+        hideLockIndicator()
+        return
+    end
+
+    -- If the box is absurdly large (character right on top of the camera,
+    -- or a giant sword VFX parented to the model), cap it so we don't draw
+    -- off-screen brackets.
+    local vp = Camera.ViewportSize
+    if (maxX - minX) > vp.X * 3 or (maxY - minY) > vp.Y * 3 then
+        hideLockIndicator()
+        return
+    end
+
+    -- Small padding so brackets sit just outside the model's silhouette.
+    local padX = (maxX - minX) * 0.06 + 2
+    local padY = (maxY - minY) * 0.06 + 2
+    minX -= padX; maxX += padX
+    minY -= padY; maxY += padY
+
+    local w = maxX - minX
+    local h = maxY - minY
+    local cornerLen = math.min(w, h) * 0.22
+    local t = 2
+
+    ensureLockIndicator()
+    local L = LockIndicator.lines
+
+    -- Top-left
+    L[1].Position = UDim2.fromOffset(minX, minY)
+    L[1].Size     = UDim2.fromOffset(cornerLen, t)
+    L[2].Position = UDim2.fromOffset(minX, minY)
+    L[2].Size     = UDim2.fromOffset(t, cornerLen)
+
+    -- Top-right
+    L[3].Position = UDim2.fromOffset(maxX - cornerLen, minY)
+    L[3].Size     = UDim2.fromOffset(cornerLen, t)
+    L[4].Position = UDim2.fromOffset(maxX - t, minY)
+    L[4].Size     = UDim2.fromOffset(t, cornerLen)
+
+    -- Bottom-right
+    L[5].Position = UDim2.fromOffset(maxX - cornerLen, maxY - t)
+    L[5].Size     = UDim2.fromOffset(cornerLen, t)
+    L[6].Position = UDim2.fromOffset(maxX - t, maxY - cornerLen)
+    L[6].Size     = UDim2.fromOffset(t, cornerLen)
+
+    -- Bottom-left
+    L[7].Position = UDim2.fromOffset(minX, maxY - t)
+    L[7].Size     = UDim2.fromOffset(cornerLen, t)
+    L[8].Position = UDim2.fromOffset(minX, maxY - cornerLen)
+    L[8].Size     = UDim2.fromOffset(t, cornerLen)
+
+    for i = 1, 8 do
+        L[i].Visible          = true
+        L[i].BackgroundColor3 = HLColor
+    end
+end
+
+addRenderHandler(drawLockIndicator, 7)
 
 local function closestToCursor()
     local ml; pcall(function() ml = UserInputService:GetMouseLocation() end)
@@ -1468,6 +1650,7 @@ local function isAPLocked()
 end
 
 local function fireRemote(ball)
+    if not ball or not ball.Parent then return false end
     if not _remote or not _args or not _tokenFound then return false end
     local rcf = getCurveCF(ball)
     if _frameEdFrame ~= frameCount then
@@ -1541,8 +1724,30 @@ local InfOn, DSOn, THOn, SFOn = false, false, false, false
 local InfDet, DSDet, THDet, SFDet = false, false, false, false
 
 pcall(function()
-    ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_, d) DSOn = d or false end)
-    ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, b) InfOn = b or false end)
+    -- Death Slash: FlyteBB only tracks the event when the activating
+    -- player is the local player. The old version ignored the player
+    -- argument, so any player's DeathBall toggled DSOn for us.
+    ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(who, on)
+        if who ~= LocalPlayer and who ~= LocalPlayer.Name then return end
+        DSOn = (on == true)
+    end)
+
+    -- Infinity: FlyteBB gates activation on the local player actually
+    -- having Infinity equipped and the ability model enabled, so we
+    -- never arm InfOn from another player's Infinity shield.
+    ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on)
+        if on then
+            local char = LocalPlayer.Character
+            local abilities = char and char:FindFirstChild("Abilities")
+            local inf = abilities and abilities:FindFirstChild("Infinity")
+            if LocalPlayer:GetAttribute("CurrentlyEquippedAbility") == "Infinity"
+               and inf and inf.Enabled then
+                InfOn = true
+            end
+        elseif InfOn then
+            InfOn = false
+        end
+    end)
 end)
 
 local _lpName = LocalPlayer.Name
@@ -1591,10 +1796,31 @@ local function _hookNetEvent(name, onFire)
     end
     if not hooked then warn("[qzxp] detection: could not hook net event " .. name) end
 end
-_hookNetEvent("RE/TimeHoleActivate", function(a) if _argsContainMe(a) then THOn = true end end)
-_hookNetEvent("RE/TimeHoleDeactivate", function(a) if _argsContainMe(a) then THOn = false end end)
-_hookNetEvent("RE/SlashesOfFuryActivate", function(a) if _argsContainMe(a) then SFOn = true end end)
-_hookNetEvent("RE/SlashesOfFuryEnd", function(a) if _argsContainMe(a) then SFOn = false end end)
+-- TimeHole: FlyteBB reads the first argument directly and compares it
+-- to the local player. _argsContainMe was walking every argument which
+-- gave false positives on events with player-y objects in later slots.
+_hookNetEvent("RE/TimeHoleActivate", function(a)
+    local who = a[1]
+    if who == LocalPlayer or who == LocalPlayer.Name then THOn = true end
+end)
+_hookNetEvent("RE/TimeHoleDeactivate", function(a)
+    THOn = false
+end)
+
+-- Slashes of Fury: FlyteBB tracks Catch (fires only on the client that
+-- actually caught a ball with SoF) in addition to Activate. Keeping
+-- both means we arm SFOn the instant the ability goes active, and stay
+-- armed through any subsequent catch. The End event disarms it.
+_hookNetEvent("RE/SlashesOfFuryActivate", function(a)
+    local who = a[1]
+    if who == LocalPlayer or who == LocalPlayer.Name then SFOn = true end
+end)
+_hookNetEvent("RE/SlashesOfFuryCatch", function(a)
+    SFOn = true
+end)
+_hookNetEvent("RE/SlashesOfFuryEnd", function(a)
+    SFOn = false
+end)
 
 -- ============================================================
 -- [FIX 3] AP / TB / Spam as RenderStepped handlers
@@ -1687,6 +1913,14 @@ local function apPickRandom()
 end
 
 local function apByMouse()
+    -- [PARRY LOCK] When locked, always target the locked player.
+    if LockEnabled and LockTarget ~= "None" then
+        local lp = findPart(LockTarget)
+        if lp and lp.Parent then
+            _apTarget.current = lp.Parent
+            return lp.Parent
+        end
+    end
     local list = {}
     local af = Workspace:FindFirstChild("Alive")
     if af then
@@ -1731,6 +1965,14 @@ local function apGetCurveCF()
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return cf end
+    -- [PARRY LOCK] When locked, aim CFrame directly at the target,
+    -- matching fireRemote's behavior for TB/Spam (overrides curve mode).
+    if LockEnabled and LockTarget ~= "None" then
+        local lockPart = findPart(LockTarget)
+        if lockPart then
+            return CFrame.new(root.Position, lockPart.Position)
+        end
+    end
     local tp        = _apTarget.current and _apTarget.current.PrimaryPart
     local targetPos = tp and tp.Position or (root.Position + cf.LookVector * 1000)
     local delta     = targetPos - root.Position
@@ -1852,9 +2094,25 @@ end
 local _apDebounce = false
 local _apUntilAt  = 0
 
--- ---- the check (ported from oxy tbl31.check) ----
+-- ---- [MULTI-BALL] the check ----
+-- Scans EVERY ball targeting the local player, skips curved ones (which
+-- need different timing), and fires one parry for whichever is closest
+-- to impact. The 1s debounce still applies globally so the server gets
+-- one parry per hit — but the ball chosen is now the most urgent one.
 local function apCheck()
     if not AP_On or TB_On or Spam_On then return end
+    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
+    if not _frameBlockOk then return end
+
+    -- [DETECTION GATE] Bail out before scanning if any enabled detection
+    -- is currently active. The old AP check silently skipped these, so
+    -- AP would keep firing while Infinity / Death Slash / Time Hole /
+    -- Slashes of Fury was on.
+    if InfDet and InfOn then return end
+    if DSDet and DSOn then return end
+    if THDet and THOn then return end
+    if SFDet and SFOn then return end
+
     local char = LocalPlayer.Character
     if not char or not char.PrimaryPart then return end
 
@@ -1864,43 +2122,63 @@ local function apCheck()
     local pos       = char.PrimaryPart.Position
     local pingDist  = math.clamp(getPing() / 100, 5, 17)
     local allBalls  = getAllBalls()
-    local firstBall = allBalls[1]
-    local firstTarget = firstBall and firstBall:GetAttribute("target")
     local runtime   = Workspace:FindFirstChild("Runtime")
     local tornado   = runtime and runtime:FindFirstChild("Tornado")
     local tornadoT  = tornado and (tornado:GetAttribute("TornadoTime") or 1)
 
+    -- Tornado blocks every parry (matches original behavior).
+    if tornado and now - _apState.AerodynamicTime < tornadoT + 0.314159 then
+        return
+    end
+
+    -- [MULTI-BALL] Candidate scan. Nothing fires inside the loop —
+    -- we only collect the best candidate and fire once at the end.
+    local urgentBall = nil
+    local urgentDist = math.huge
+
     for _, ball in ipairs(allBalls) do
         local z = ball:FindFirstChild("zoomies")
         if z then
-            local target = ball:GetAttribute("target")
-            local spd    = z.VectorVelocity.Magnitude
-            local dist   = (pos - apPosition(ball)).Magnitude
-            local acc    = apAccuracy()
-            local n31    = (2.4 + math.min(math.max(spd - 9.5, 0), 650) * 0.002) * acc
-
+            -- Per-ball AeroDynamicSlashVFX cleanup, as before.
             if ball:FindFirstChild("AeroDynamicSlashVFX") then
                 ball.AeroDynamicSlashVFX:Destroy()
                 _apState.AerodynamicTime = now
             end
 
-            if tornado and now - _apState.AerodynamicTime < tornadoT + 0.314159 then
-                return
-            end
+            local target = ball:GetAttribute("target")
+            if target == _lpName then
+                local spd  = z.VectorVelocity.Magnitude
+                local dist = (pos - apPosition(ball)).Magnitude
+                local acc  = apAccuracy()
+                local n31  = (2.4 + math.min(math.max(spd - 9.5, 0), 650) * 0.002) * acc
+                local triggerDist = pingDist + math.max(spd / n31, 9.5)
 
-            if firstTarget == _lpName and apCurved(ball) then
-                return
-            end
-
-            if target == _lpName
-               and dist <= pingDist + math.max(spd / n31, 9.5) then
-                if apFire() then
-                    _apLastFire = os.clock()
-                    if AnimFix_AP then PlaySingleParryAnimation() end
+                if dist <= triggerDist then
+                    -- [MULTI-BALL FIX] skip this ball if it is curved, but
+                    -- DO NOT abort the whole scan. A straight ball from a
+                    -- different sender further down the list can still be
+                    -- parried this frame.
+                    if apCurved(ball) then
+                        continue
+                    end
+                    -- Prioritise the ball whose impact is closest.
+                    if dist < urgentDist then
+                        urgentDist = dist
+                        urgentBall = ball
+                    end
                 end
-                _apDebounce = true
-                _apUntilAt  = now + 1
             end
+        end
+    end
+
+    -- [MULTI-BALL FIX] only arm debounce after a successful fire. A failed
+    -- fire (no remote, token missing, etc.) no longer locks parry for 1s.
+    if urgentBall then
+        if apFire() then
+            _apLastFire = os.clock()
+            if AnimFix_AP then PlaySingleParryAnimation() end
+            _apDebounce = true
+            _apUntilAt  = now + 1
         end
     end
 end
@@ -2043,7 +2321,9 @@ addRenderHandler(function()
     if PRV.Model and PRV.Model.Parent ~= Workspace then PRV.Model.Parent = Workspace end
 end, 6)
 
--- Triggerbot
+-- ============================================================
+-- TRIGGERBOT
+-- ============================================================
 local function tryTBForBall(ball)
     if not TB_On or Spam_On or not ball or not ball.Parent then return end
     -- [[ GLOBAL AP/TB LOCKOUT ]] shared with AP (AP and TB are mutually exclusive)
@@ -2137,7 +2417,9 @@ spawnTracked(function()
     watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
 end)
 
--- Spam engine
+-- ============================================================
+-- SPAM ENGINE
+-- ============================================================
 local SpamRPS, SpamInt, SpamDetect = 100, 0.01, true
 local function spamOk()
     if not SpamDetect then return true end
@@ -2244,10 +2526,11 @@ local function equip(name, notifyServer)
     -- Unlock-all uses client-only equip (server would reject for unowned
     -- swords). Skin changer keeps notifying the server so its state stays
     -- in sync.
+    if not name or name == "" then return false end
     if notifyServer == nil then
         notifyServer = not getgenv().qzxp_unlockAllActive
     end
-    if not LocalPlayer.Character then return end
+    if not LocalPlayer.Character then return false end
     local exact = resolve(name)
     LocalPlayer:SetAttribute("CurrentlyEquippedSword", exact)
     LocalPlayer.Character:SetAttribute("CurrentlyEquippedSword", exact)
@@ -2279,6 +2562,7 @@ local function equip(name, notifyServer)
             if sc.SwordFX ~= nil then pcall(function() sc.SwordFX = exact end) end
         end)
     end)
+    return true
 end
 getgenv().updateSword = function()
     refreshSlash()
@@ -2455,6 +2739,8 @@ local UA = {
     fire_connections   = {},
     deleted_swords     = {},
     _lastError         = nil,
+    _savedButtonState  = {},
+    original_buy_conns = {},
 }
 
 -- Capture the game's original FireSwordInfo / ParrySuccessAll handlers
@@ -2673,9 +2959,55 @@ end
 -- oxy's equip_sword (exact port). Patches EquipSwordTo's boolean guard,
 -- sets the attribute, calls EquipSwordTo, applies chroma, then calls the
 -- game's own FireSwordInfo handler (`sword_fn`) to refresh local state.
+-- Was the local player really (server-side) owning this sword before
+-- unlock-all touched the shop? Uses the pre-modification state captured
+-- by set_category_unlock / set_modern_unlock.
+function UA.is_actually_owned(_, swordName)
+    -- Legacy shop: check the item's original Section (Owned vs Unowned).
+    local virtual = UA.shop_controller
+        and UA.shop_controller._virtualItems
+        and UA.shop_controller._virtualItems["Sword"]
+    if type(virtual) == "table" then
+        for _, item in pairs(virtual) do
+            if item.Name == swordName then
+                local orig = UA.unlock_originals[item]
+                if orig then return orig.Section == "Owned" end
+                return item.Section == "Owned"
+            end
+        end
+    end
+
+    -- Modern shop API: check the pre-unlock OwnedCopies value.
+    local api = UA.shop_api
+    if api and api.OwnedBases and api.OwnedBases["Sword"] then
+        local base = api.OwnedBases["Sword"][swordName]
+        if base then
+            local ok1, key = pcall(api.ParseItemKey, api, "Sword", {Name = swordName})
+            if ok1 and key then
+                local ok2, data = pcall(api.GetItemData, api, "Sword", key)
+                if ok2 and type(data) == "table" and data.OwnedCopies then
+                    local orig = UA.modern_originals[data.OwnedCopies]
+                    if orig then
+                        return type(orig.Value) == "number" and orig.Value >= 1
+                    end
+                    local okG, cur = pcall(data.OwnedCopies.Get, data.OwnedCopies)
+                    if okG then return type(cur) == "number" and cur >= 1 end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
 function UA.equip_sword(_, swordName, restore)
+    if type(swordName) ~= "string" or swordName == "" then return false end
     if not UA.swords then return false end
     local isEquip = not restore
+    -- For genuinely-owned swords, use the normal server-notify path so
+    -- the equip persists (survives death, other players see it).
+    -- For unowned swords, stay client-only.
+    local isOwned = UA:is_actually_owned(swordName)
 
     if isEquip and UA:is_deleted("Sword", swordName) then
         UA:undelete_item("Sword", swordName)
@@ -2696,7 +3028,10 @@ function UA.equip_sword(_, swordName, restore)
     else
         UA.selected_sword = sword.Name
         UA.last_equipped_sword = sword.Name
-        UA:set_sword_override(true)
+        -- Only disable the game's FireSwordInfo handlers for unowned swords.
+        -- For owned swords we want them active so the server response updates
+        -- the character model normally.
+        UA:set_sword_override(not isOwned)
         getgenv().qzxp_unlockAllActive = true
         getgenv().swordModel      = sword.Name
         getgenv().swordAnimations = sword.Name
@@ -2726,6 +3061,17 @@ function UA.equip_sword(_, swordName, restore)
     local model = character:FindFirstChild(sword.Name)
     if model then
         UA:apply_chroma(model, sword)
+    end
+
+    -- Owned swords: notify the server so it becomes the real equipped
+    -- sword (survives death, replicated to other players).
+    -- Unowned swords: skip — server would reject and may reset state.
+    if isEquip and isOwned then
+        if ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo") then
+            pcall(function()
+                ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo"):FireServer(sword.Name)
+            end)
+        end
     end
 
     if UA.sword_fn then
@@ -2766,18 +3112,26 @@ function UA.refresh_selected(_)
     local holder   = UA.shop:FindFirstChild("Holder")
     local infoBG   = holder and holder:FindFirstChild("InfoBG")
     local buyButton = infoBG and infoBG:FindFirstChild("BuyButton")
+    if not buyButton then return end
+    local pt = buyButton:FindFirstChild("PriceTag")
+    if not pt then return end
+    local tl = pt:FindFirstChild("TextLabel")
+    local pr = pt:FindFirstChild("Price")
 
     if not UA.enabled or not UA.unlocked[selectedItem.type] then
-        if buyButton then
-            buyButton.Visible = true
-            local pt = buyButton:FindFirstChild("PriceTag")
-            if pt then
-                local tl = pt:FindFirstChild("TextLabel")
-                if tl then tl.Visible = true end
-                local pr = pt:FindFirstChild("Price")
-                if pr then pr.Visible = true end
-            end
+        -- Restore ONLY if we had previously modified this item's button.
+        -- This is what was causing owned items to show "Equip + coin price":
+        -- we were unconditionally setting Price.Visible = true, which is
+        -- wrong for owned items (their price is naturally hidden).
+        local saved = UA._savedButtonState[selectedItem.name]
+        if saved then
+            buyButton.Visible = saved.buttonVisible
+            if tl then tl.Visible = saved.textVisible; tl.Text = saved.text end
+            if pr then pr.Visible = saved.priceVisible end
+            UA._savedButtonState[selectedItem.name] = nil
         end
+        -- No saved state → we never touched this item's button → leave it
+        -- alone so the game's native rendering is preserved.
         return
     end
 
@@ -2790,23 +3144,23 @@ function UA.refresh_selected(_)
     end
 
     if UA:is_deleted(selectedItem.type, selectedItem.name) or (virtItem and virtItem.Section == "Unowned") then
-        if buyButton then buyButton.Visible = false end
+        buyButton.Visible = false
         return
     end
 
-    if buyButton then
-        buyButton.Visible = true
-        local pt = buyButton:FindFirstChild("PriceTag")
-        if pt then
-            local tl = pt:FindFirstChild("TextLabel")
-            if tl then
-                tl.Visible = true
-                tl.Text = "Equip"
-            end
-            local pr = pt:FindFirstChild("Price")
-            if pr then pr.Visible = false end
-        end
+    -- Save the exact pre-modification state ONCE per item.
+    if not UA._savedButtonState[selectedItem.name] then
+        UA._savedButtonState[selectedItem.name] = {
+            text         = tl and tl.Text or "",
+            textVisible  = tl and tl.Visible or true,
+            priceVisible = pr and pr.Visible or false,
+            buttonVisible = buyButton.Visible,
+        }
     end
+
+    buyButton.Visible = true
+    if tl then tl.Visible = true; tl.Text = "Equip" end
+    if pr then pr.Visible = false end
 end
 
 -- oxy's hook_modern_shop
@@ -2868,22 +3222,27 @@ function UA.hook_shop(_)
     UA._hookedBuy = true
     UA.shop = shop
 
-    -- Capture + disable the game's original BuyButton handlers
+    -- Capture the game's original BuyButton handlers. Do NOT disable yet —
+    -- `set_enabled` will disable them only while UA is active. This keeps
+    -- the native UI re-rendering working when UA is off.
     local ok, conns = pcall(getconnections, buyButton.Activated)
     if ok and type(conns) == "table" then
         for _, c in ipairs(conns) do
             if c.Function then
                 table.insert(UA.original_buy_fns, c.Function)
-                pcall(function() c:Disable() end)
+                table.insert(UA.original_buy_conns, c)
             end
         end
     end
 
-    -- oxy's replacement BuyButton handler
+    -- oxy's replacement BuyButton handler.
+    -- When UA is off, the native handlers (re-enabled by set_enabled) do
+    -- the work — we return early to avoid double-firing.
     buyButton.Activated:Connect(function()
+        if not UA.enabled then return end
         local sel = UA.shop_controller and UA.shop_controller._selectedItem
         if not sel then return end
-        if UA.enabled and UA.unlocked[sel.type] then
+        if UA.unlocked[sel.type] then
             if sel.type == "Sword" then
                 if UA:equip_sword(sel.name, false) then
                     if buyButton.PriceTag and buyButton.PriceTag.TextLabel then
@@ -2893,6 +3252,7 @@ function UA.hook_shop(_)
                 return
             end
         end
+        -- UA on but item not unlocked yet: run the originals manually
         for _, fn in ipairs(UA.original_buy_fns) do spawnTracked(fn) end
     end)
 
@@ -3075,6 +3435,15 @@ function UA.set_enabled(_, on)
     UA.enabled = on == true
     if not UA.ready then return end
 
+    -- Toggle the game's native BuyButton handlers. When UA is on, disable
+    -- them so only our fake-equip handler runs (no double-fire). When UA is
+    -- off, re-enable them so the shop UI re-renders and behaves normally.
+    for _, c in ipairs(UA.original_buy_conns) do
+        pcall(function()
+            if UA.enabled then c:Disable() else c:Enable() end
+        end)
+    end
+
     for _, cat in ipairs({"Sword", "Explosion"}) do
         if UA.enabled then
             if UA.shop_controller then
@@ -3222,51 +3591,162 @@ LocalPlayer.CharacterAdded:Connect(function()
 end)
 
 -- ============================================================
+-- THUNDER DASH 0 COOLDOWN (Fallen)
+-- Ported from angeli
+-- ============================================================
+local ThunderDash = {
+    ability          = nil,
+    originalCooldown = nil,
+    originalReduction = nil,
+    loopToken        = 0,
+}
+
+function ThunderDash.ensure()
+    if ThunderDash.ability then return true end
+    local shared    = ReplicatedStorage:FindFirstChild("Shared")
+    local abilities = shared and shared:FindFirstChild("Abilities")
+    local module    = abilities and abilities:FindFirstChild("Thunder Dash")
+    if not module then return false end
+    local ok, result = pcall(require, module)
+    if not ok or not result then return false end
+    ThunderDash.ability           = result
+    ThunderDash.originalCooldown  = result.cooldown
+    ThunderDash.originalReduction = result.cooldownReductionPerUpgrade
+    return true
+end
+
+function ThunderDash.apply()
+    if not ThunderDash.ensure() then return false end
+    return pcall(function()
+        ThunderDash.ability.cooldown                    = 0
+        ThunderDash.ability.cooldownReductionPerUpgrade = 0
+    end)
+end
+
+function ThunderDash.restore()
+    if not ThunderDash.ability then return end
+    pcall(function()
+        ThunderDash.ability.cooldown                    = ThunderDash.originalCooldown
+        ThunderDash.ability.cooldownReductionPerUpgrade = ThunderDash.originalReduction
+    end)
+end
+
+function ThunderDash.start()
+    ThunderDash.loopToken += 1
+    local token = ThunderDash.loopToken
+    ThunderDash.apply()
+    spawnTracked(function()
+        while ThunderDash.loopToken == token do
+            ThunderDash.apply()
+            task.wait(0.5)
+        end
+    end)
+end
+
+function ThunderDash.stop()
+    ThunderDash.loopToken += 1
+    ThunderDash.restore()
+end
+
+getgenv().qzxp_thunderDashStop = function()
+    pcall(ThunderDash.stop)
+end
+
+-- ============================================================
 -- ESP
 -- ============================================================
 local ESP_On = false
 local espC = {}
 local espHeads = setmetatable({}, {__mode = "k"})
+
+local function clearESPFor(p)
+    local d = espC[p]
+    if d then pcall(function() d:Destroy() end) end
+    espC[p] = nil
+    espHeads[p] = nil
+end
+
 local function updateESP()
     if not ESP_On then
-        for _, d in pairs(espC) do if d then pcall(function() d:Destroy() end) end end
-        espC = {}; return
+        for _, d in pairs(espC) do
+            if d then pcall(function() d:Destroy() end) end
+        end
+        espC = {}
+        espHeads = setmetatable({}, {__mode = "k"})
+        return
     end
     for _, p in pairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
             local head = espHeads[p]
             if not head or not head.Parent then
-                local c = p.Character; head = c and c:FindFirstChild("Head"); espHeads[p] = head
+                local c = p.Character
+                head = c and c:FindFirstChild("Head")
+                espHeads[p] = head
             end
             if head then
                 local existing = espC[p]
-                if not existing or existing.Adornee ~= head then
+                if not existing or not existing.Parent or existing.Adornee ~= head then
                     if existing then pcall(function() existing:Destroy() end) end
                     local bb = Instance.new("BillboardGui")
-                    bb.Name = "qESP"; bb.Adornee = head; bb.Size = UDim2.new(0, 200, 0, 40)
-                    bb.StudsOffset = Vector3.new(0, 3, 2); bb.AlwaysOnTop = true; bb.Parent = head
+                    bb.Name = "qESP"
+                    bb.Adornee = head
+                    bb.Size = UDim2.new(0, 200, 0, 40)
+                    bb.StudsOffset = Vector3.new(0, 3, 2)
+                    bb.AlwaysOnTop = true
+                    bb.Parent = head
                     local lbl = Instance.new("TextLabel")
-                    lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1
-                    lbl.TextColor3 = Color3.new(1,1,1); lbl.TextStrokeTransparency = 0.5
-                    lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 14; lbl.Parent = bb
+                    lbl.Size = UDim2.new(1, 0, 1, 0)
+                    lbl.BackgroundTransparency = 1
+                    lbl.TextColor3 = Color3.new(1, 1, 1)
+                    lbl.TextStrokeTransparency = 0.5
+                    lbl.Font = Enum.Font.GothamBold
+                    lbl.TextSize = 14
+                    lbl.Parent = bb
                     espC[p] = bb
                 end
-                local lbl = espC[p] and espC[p]:FindFirstChildOfClass("TextLabel")
-                if lbl then
-                    local ab = p:GetAttribute("EquippedAbility")
-                    lbl.Text = ab and (p.DisplayName .. " [" .. ab .. "]") or p.DisplayName
+                local bb = espC[p]
+                if bb and bb.Parent then
+                    local lbl = bb:FindFirstChildOfClass("TextLabel")
+                    if lbl then
+                        local ab = p:GetAttribute("EquippedAbility")
+                        lbl.Text = ab and (p.DisplayName .. " [" .. ab .. "]") or p.DisplayName
+                    end
                 end
             end
         end
     end
 end
-spawnTracked(function() while task.wait(0.25) do if ESP_On then updateESP() end end end)
+
+-- Drop the cached BB / head the instant a player respawns, so the
+-- rebuild goes against the fresh character instead of a dead one.
+local function attachESPRespawn(p)
+    if p == LocalPlayer then return end
+    p.CharacterAdded:Connect(function() clearESPFor(p) end)
+end
+for _, p in ipairs(Players:GetPlayers()) do attachESPRespawn(p) end
+Players.PlayerAdded:Connect(attachESPRespawn)
+Players.PlayerRemoving:Connect(clearESPFor)
+
+spawnTracked(function()
+    while true do
+        task.wait(0.25)
+        if ESP_On then pcall(updateESP) end
+    end
+end)
 
 -- ============================================================
 -- KEYBIND LIST & BALL STATS
 -- ============================================================
-local KBShow = false
-local BS_On = false
+-- Bundled into a single local to keep the top-level function under
+-- Luau's 200-register ceiling. Same three flags live here; references
+-- elsewhere use UIFlags.KBShow / UIFlags.BSOn / UIFlags.StatsShowFPS
+-- / UIFlags.StatsShowPing.
+local UIFlags = {
+    KBShow        = false,
+    BSOn          = false,
+    StatsShowFPS  = false,
+    StatsShowPing = false,
+}
 local kbF, bsF
 
 ;(function()
@@ -3337,8 +3817,8 @@ addRenderHandler(function()
     local now = os.clock()
     if now - uiLast < 0.1 then return end
     uiLast = now
-    kbF.Visible = KBShow
-    if KBShow then
+    kbF.Visible = UIFlags.KBShow
+    if UIFlags.KBShow then
         for i, it in ipairs(kbItems) do
             local s = it.s(); local k = it.k()
             local txt = "[" .. k .. "] " .. it.n .. " " .. (s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>")
@@ -3348,8 +3828,8 @@ addRenderHandler(function()
             end
         end
     end
-    bsF.Visible = BS_On
-    if BS_On then
+    bsF.Visible = UIFlags.BSOn
+    if UIFlags.BSOn then
         local ball = getBall()
         if ball and ball.Parent then
             local z = ball:FindFirstChild('zoomies')
@@ -3370,8 +3850,9 @@ end)() -- kb/bs scope
 -- ============================================================
 -- STATS HUD (FPS + Ping) — draggable, matches kb/bs styling
 -- ============================================================
-local Stats_ShowFPS = false
-local Stats_ShowPing = false
+-- StatsShowFPS / StatsShowPing live in UIFlags (see KEYBIND LIST
+-- & BALL STATS). No locals here — keeps the top-level under the
+-- 200-register ceiling.
 
 ;(function()
 local function MakeDrag(handle, frame)
@@ -3475,15 +3956,15 @@ addRenderHandler(function(dt)
     if now - _statsLast < 0.15 then return end
     _statsLast = now
 
-    statsF.Visible = Stats_ShowFPS or Stats_ShowPing
-    fpsLbl.Visible  = Stats_ShowFPS
-    pingLbl.Visible = Stats_ShowPing
+    statsF.Visible = UIFlags.StatsShowFPS or UIFlags.StatsShowPing
+    fpsLbl.Visible  = UIFlags.StatsShowFPS
+    pingLbl.Visible = UIFlags.StatsShowPing
 
-    if Stats_ShowFPS then
+    if UIFlags.StatsShowFPS then
         local t = string.format("FPS: %d", math.floor(_fpsAvg + 0.5))
         if t ~= _lastFpsTxt then _lastFpsTxt = t; fpsLbl.Text = t end
     end
-    if Stats_ShowPing then
+    if UIFlags.StatsShowPing then
         local p = 0
         if Stats_DataPing then
             local ok, v = pcall(function() return Stats_DataPing:GetValue() end)
@@ -3595,7 +4076,7 @@ end
 do
     local s6 = Tabs.Lock:AddSection("Parry Lock")
     s6:AddToggle("LockToggle", {Title = "Enabled", Default = false, Callback = function(v) LockEnabled = v; notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2}) end})
-    s6:AddDropdown("LockTarget", {Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v) LockTarget = pLookup[v] or "None"; refreshHL() end})
+    s6:AddDropdown("LockTarget", {Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v) LockTarget = pLookup[v] or "None" end})
     s6:AddKeybind("CursorKey", {Title = "Cursor Lock", Default = "T", Callback = function()
         local t = closestToCursor()
         if t then LockTarget = t; syncLockDD(); notify({Title = "Lock", Content = t, Duration = 2}) end
@@ -3606,10 +4087,10 @@ do
     s6:AddButton({Title = "Refresh List", Callback = function() syncLockDD() end})
 end
 do
-    local s6h = Tabs.Lock:AddSection("Highlight")
-    s6h:AddToggle("HLToggle", {Title = "Enabled", Default = false, Callback = function(v) HLEnabled = v; refreshHL() end})
+    local s6h = Tabs.Lock:AddSection("Lock Indicator")
+    s6h:AddToggle("HLToggle", {Title = "Enabled", Default = false, Callback = function(v) HLEnabled = v end})
     local hr, hg, hb = 255, 60, 60
-    local function updHL() HLColor = Color3.fromRGB(hr, hg, hb); refreshHL() end
+    local function updHL() HLColor = Color3.fromRGB(hr, hg, hb) end
     s6h:AddSlider("HLR", {Title = "R", Default = 255, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hr = v; updHL() end})
     s6h:AddSlider("HLG", {Title = "G", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hg = v; updHL() end})
     s6h:AddSlider("HLB", {Title = "B", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hb = v; updHL() end})
@@ -3618,25 +4099,628 @@ do
     local s7 = Tabs.Visuals:AddSection("ESP")
     s7:AddToggle("ESPToggle", {Title = "Ability ESP", Default = false, Callback = function(v) ESP_On = v; updateESP() end})
     local s7b = Tabs.Visuals:AddSection("Ball Stats")
-    s7b:AddToggle("BSToggle", {Title = "Ball Info", Default = false, Callback = function(v) BS_On = v end})
+    s7b:AddToggle("BSToggle", {Title = "Ball Info", Default = false, Callback = function(v) UIFlags.BSOn = v end})
     local s7p = Tabs.Visuals:AddSection("Parry Range")
     s7p:AddToggle("PRVToggle", {Title = "Range Ring", Default = false, Callback = function(v)
         PRV.On = v
         if not v then PRV.Destroy() end
     end})
     local s7c = Tabs.Visuals:AddSection("Character")
+    local s7ab = Tabs.Visuals:AddSection("Ability")
+    s7ab:AddToggle("ThunderDashToggle", {
+        Title   = "Thunder Dash 0 Cooldown",
+        Default = false,
+        Callback = function(v)
+            if v then
+                ThunderDash.start()
+                notify({Title = "Thunder Dash", Content = "0 Cooldown On",  Duration = 2})
+            else
+                ThunderDash.stop()
+                notify({Title = "Thunder Dash", Content = "0 Cooldown Off", Duration = 2})
+            end
+        end,
+    })
     s7c:AddToggle("HeadlessT", {Title = "Headless", Default = false, Callback = function(v) Headless = v; if v then doHeadless() else undoHeadless() end end})
     s7c:AddToggle("KorbloxT", {Title = "Korblox Leg", Default = false, Callback = function(v) Korblox = v; if v then doKorblox() else undoKorblox() end end})
+-- ============================================================
+-- AVATAR CHANGER (ported from Aries) — qzxp edition
+-- ============================================================
+do
+    local AvatarSlotNumber    = nil
+    local AvatarDefaultDesc   = nil
+    local AvatarKillFeedConn  = nil
+    local AvatarCharacterConn = nil
+    local AvatarCloneConn     = nil
+
+    local function GetDefaultAvatarDescription()
+        if AvatarDefaultDesc then return AvatarDefaultDesc end
+        local ok, result = pcall(function()
+            return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId)
+        end)
+        if ok and result then AvatarDefaultDesc = result end
+        return AvatarDefaultDesc
+    end
+
+    local function WeldAccessory(accessory, character)
+        local handle = accessory:FindFirstChild("Handle")
+        if not handle then return end
+        local attachment = handle:FindFirstChildOfClass("Attachment")
+        if not attachment then return end
+        local targetAttachment = character:FindFirstChild(attachment.Name, true)
+        if not targetAttachment then return end
+        local weld = Instance.new("Weld")
+        weld.Name  = "AccessoryWeld"
+        weld.Part0 = handle
+        weld.Part1 = targetAttachment.Parent
+        weld.C0    = attachment.CFrame
+        weld.C1    = targetAttachment.CFrame
+        weld.Parent = handle
+        handle.Anchored = false
+    end
+
+    local function MeshIdOf(part)
+        if part:IsA("MeshPart") then return part.MeshId end
+        local sm = part:FindFirstChildOfClass("SpecialMesh")
+        return sm and sm.MeshId or ""
+    end
+
+    local function CopyAttachments(src, dst)
+        for _, child in ipairs(src:GetChildren()) do
+            if child:IsA("Attachment") then
+                local matched = dst:FindFirstChild(child.Name)
+                if matched then
+                    matched.CFrame          = child.CFrame
+                    matched.Position        = child.Position
+                    matched.Orientation     = child.Orientation
+                    matched.Axis            = child.Axis
+                    matched.SecondaryAxis   = child.SecondaryAxis
+                else
+                    child:Clone().Parent = dst
+                end
+            end
+        end
+    end
+
+    local function ApplyAvatar(parent)
+        if not parent or not AvatarSlotNumber then return end
+        local humanoid = parent:FindFirstChildOfClass("Humanoid")
+                        or parent:WaitForChild("Humanoid", 5)
+        if not humanoid then return end
+        if parent:GetAttribute("qzxp_AvatarApplied") == AvatarSlotNumber then return end
+        parent:SetAttribute("qzxp_AvatarApplied", AvatarSlotNumber)
+
+        local ok, desc = pcall(function()
+            return Players:GetHumanoidDescriptionFromUserId(AvatarSlotNumber)
+        end)
+        if not ok or not desc then
+            parent:SetAttribute("qzxp_AvatarApplied", nil)
+            return
+        end
+
+        local equippedSword = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+
+        for _, child in parent:GetChildren() do
+            if child:IsA("Accessory") then
+                if child.Name ~= equippedSword then
+                    pcall(function() child:Destroy() end)
+                end
+            elseif child:IsA("Shirt") or child:IsA("Pants") or child:IsA("ShirtGraphic")
+                or child:IsA("BodyColors") or child:IsA("CharacterMesh") then
+                pcall(function() child:Destroy() end)
+            end
+        end
+
+        local ok2, tempModel = pcall(function()
+            return Players:CreateHumanoidModelFromDescription(desc, humanoid.RigType)
+        end)
+        if not ok2 or not tempModel then
+            parent:SetAttribute("qzxp_AvatarApplied", nil)
+            return
+        end
+
+        for _, child in tempModel:GetChildren() do
+            if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
+                local target = parent:FindFirstChild(child.Name)
+                if target then
+                    if MeshIdOf(child) ~= MeshIdOf(target) then
+                        local sm = target:FindFirstChildOfClass("SpecialMesh")
+                        if sm then pcall(function() sm:Destroy() end) end
+                        local sm2 = child:FindFirstChildOfClass("SpecialMesh")
+                        if sm2 then sm2:Clone().Parent = target end
+                        if child:IsA("MeshPart") and target:IsA("MeshPart") then
+                            pcall(function()
+                                target.MeshId    = child.MeshId
+                                target.TextureID = child.TextureID
+                            end)
+                            CopyAttachments(child, target)
+                        end
+                    end
+                end
+            elseif child:IsA("CharacterMesh") then
+                child:Clone().Parent = parent
+            end
+        end
+
+        for _, child in tempModel:GetChildren() do
+            if child:IsA("Shirt") or child:IsA("Pants") or child:IsA("ShirtGraphic")
+                or child:IsA("BodyColors") then
+                pcall(function() child:Clone().Parent = parent end)
+            elseif child:IsA("Accessory") then
+                local clone = child:Clone()
+                pcall(function() humanoid:AddAccessory(clone) end)
+                WeldAccessory(clone, parent)
+            end
+        end
+
+        local head     = parent:FindFirstChild("Head")
+        local tempHead = tempModel:FindFirstChild("Head")
+        if head and tempHead then
+            local decal     = head:FindFirstChildOfClass("Decal")
+            local tempDecal = tempHead:FindFirstChildOfClass("Decal")
+            if tempDecal then
+                if decal then decal.Texture = tempDecal.Texture
+                else tempDecal:Clone().Parent = head end
+            elseif decal then
+                pcall(function() decal:Destroy() end)
+            end
+        end
+
+        pcall(function() tempModel:Destroy() end)
+    end
+
+    local function RevertAvatar()
+        local character = LocalPlayer.Character
+        if not character then return end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+
+        character:SetAttribute("qzxp_AvatarApplied", nil)
+
+        local defaultDesc = GetDefaultAvatarDescription()
+        if not defaultDesc then return end
+
+        local ok, tempModel = pcall(function()
+            return Players:CreateHumanoidModelFromDescription(defaultDesc, humanoid.RigType)
+        end)
+        if not ok or not tempModel then return end
+
+        local accessoryList = {}
+        for _, child in tempModel:GetChildren() do
+            if child:IsA("Accessory") then
+                table.insert(accessoryList, child:Clone())
+            end
+        end
+
+        for _, child in character:GetChildren() do
+            if child:IsA("Shirt") or child:IsA("Pants") or child:IsA("ShirtGraphic")
+                or child:IsA("Accessory") or child:IsA("BodyColors")
+                or child:IsA("CharacterMesh") then
+                pcall(function() child:Destroy() end)
+            end
+        end
+
+        for _, child in tempModel:GetChildren() do
+            if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
+                local target = character:FindFirstChild(child.Name)
+                if target and MeshIdOf(child) ~= MeshIdOf(target) then
+                    local sm = target:FindFirstChildOfClass("SpecialMesh")
+                    if sm then pcall(function() sm:Destroy() end) end
+                    local sm2 = child:FindFirstChildOfClass("SpecialMesh")
+                    if sm2 then sm2:Clone().Parent = target end
+                    if child:IsA("MeshPart") and target:IsA("MeshPart") then
+                        pcall(function()
+                            target.MeshId    = child.MeshId
+                            target.TextureID = child.TextureID
+                            target.Size      = child.Size
+                        end)
+                    end
+                end
+            elseif child:IsA("CharacterMesh") then
+                child:Clone().Parent = character
+            end
+        end
+
+        for _, child in tempModel:GetChildren() do
+            if child:IsA("Shirt") or child:IsA("Pants")
+                or child:IsA("ShirtGraphic") or child:IsA("BodyColors") then
+                child:Clone().Parent = character
+            end
+        end
+
+        for _, accessory in accessoryList do
+            accessory.Parent = character
+            local handle = accessory:FindFirstChild("Handle")
+            if handle then
+                local attachment = handle:FindFirstChildWhichIsA("Attachment", true)
+                if attachment then
+                    local targetAttachment = character:FindFirstChild(attachment.Name, true)
+                    if targetAttachment then
+                        local weld = Instance.new("Weld")
+                        weld.Part0  = handle
+                        weld.Part1  = targetAttachment.Parent
+                        weld.C0     = attachment.CFrame
+                        weld.C1     = targetAttachment.CFrame
+                        weld.Parent = handle
+                    end
+                end
+            end
+        end
+
+        pcall(function() tempModel:Destroy() end)
+    end
+
+    local function HookKillFeed()
+        if AvatarKillFeedConn then
+            pcall(function() AvatarKillFeedConn:Disconnect() end)
+            AvatarKillFeedConn = nil
+        end
+        if not AvatarSlotNumber then return end
+        local killFeed = LocalPlayer.PlayerGui:FindFirstChild("KillFeed")
+                      or LocalPlayer.PlayerGui:WaitForChild("KillFeed", 10)
+        if not killFeed then return end
+        local frame = killFeed:FindFirstChild("Frame")
+        if not frame then return end
+        local headshotUrl = "rbxthumb://type=AvatarHeadShot&id="
+                          .. AvatarSlotNumber .. "&w=100&h=100"
+        AvatarKillFeedConn = frame.ChildAdded:Connect(function(child)
+            local holder = child:FindFirstChild("Holder")
+            if not holder then return end
+            local left = holder:FindFirstChild("Left")
+            local vector = left and left:FindFirstChild("Vector")
+            if vector then pcall(function() vector.Image = headshotUrl end) end
+        end)
+    end
+
+    local function HookEncryptedClone()
+        if AvatarCloneConn then return end
+        local alive = Workspace:FindFirstChild("Alive")
+                   or Workspace:WaitForChild("Alive", 30)
+        if not alive then return end
+        AvatarCloneConn = alive.ChildAdded:Connect(function(child)
+            if child.Name:find("ENCRYPTED CLONE", 1, true) then
+                if Options.AvatarChanger and Options.AvatarChanger.Value then
+                    task.defer(function() ApplyAvatar(child) end)
+                end
+            end
+        end)
+    end
+
+    local function SetAvatarEnabled(v)
+        if v then
+            if not AvatarSlotNumber then
+                notify({Title = "Avatar", Content = "Waiting for User ID...", Duration = 4})
+                return
+            end
+            local char = LocalPlayer.Character
+            if char then ApplyAvatar(char) end
+            HookKillFeed()
+            HookEncryptedClone()
+            if AvatarCharacterConn then
+                pcall(function() AvatarCharacterConn:Disconnect() end)
+            end
+            AvatarCharacterConn = LocalPlayer.CharacterAppearanceLoaded:Connect(function()
+                local newChar = LocalPlayer.Character
+                if newChar then
+                    ApplyAvatar(newChar)
+                    HookKillFeed()
+                end
+            end)
+        else
+            RevertAvatar()
+            if AvatarCharacterConn then
+                pcall(function() AvatarCharacterConn:Disconnect() end)
+                AvatarCharacterConn = nil
+            end
+            if AvatarKillFeedConn then
+                pcall(function() AvatarKillFeedConn:Disconnect() end)
+                AvatarKillFeedConn = nil
+            end
+            if AvatarCloneConn then
+                pcall(function() AvatarCloneConn:Disconnect() end)
+                AvatarCloneConn = nil
+            end
+        end
+    end
+
+    local s7a = Tabs.Visuals:AddSection("Avatar")
+
+    -- Forward-declared so the AvatarSaver callback (below) can invalidate
+    -- the cache when a new UserId is entered.
+    local ProfileSpoofer = { enabled = false, info = nil }
+
+    s7a:AddToggle("AvatarChanger", {
+        Title    = "Avatar Changer",
+        Default  = false,
+        Callback = function(v)
+            SetAvatarEnabled(v)
+            notify({Title = "Avatar", Content = v and "On" or "Off", Duration = 2})
+        end,
+    })
+
+    s7a:AddInput("AvatarSaver", {
+        Title       = "User ID / Name",
+        Default     = "",
+        Placeholder = "UserId or username",
+        Callback    = function(v)
+            local text = (v and v:match("^%s*(.-)%s*$")) or ""
+            if text == "" then
+                AvatarSlotNumber = nil
+                getgenv().qzxp_avatarUserId = nil
+                if LocalPlayer.Character then
+                    pcall(function()
+                        LocalPlayer.Character:SetAttribute("qzxp_AvatarApplied", nil)
+                    end)
+                end
+                return
+            end
+            local id = tonumber(text)
+            if not id then
+                local ok, result, attempts
+                attempts = 0
+                repeat
+                    attempts += 1
+                    ok, result = pcall(function()
+                        return Players:GetUserIdFromNameAsync(text)
+                    end)
+                    if not ok then task.wait(0.5) end
+                until ok or attempts >= 5
+                if not ok or not result then
+                    notify({Title = "Avatar", Content = "User not found", Duration = 3})
+                    return
+                end
+                id = result
+            end
+            AvatarSlotNumber = id
+            getgenv().qzxp_avatarUserId = id
+            -- Invalidate the profile-spoofer cache so it re-fetches this UserId.
+            ProfileSpoofer.info = nil
+            -- Auto-apply any toggles that were left on while waiting for input.
+            if Options.AvatarChanger and Options.AvatarChanger.Value then
+                SetAvatarEnabled(true)
+            end
+            notify({Title = "Avatar", Content = "Set to " .. tostring(id), Duration = 2})
+        end,
+    })
+
+    -- ============================================================
+    -- PROFILE SPOOFER (v3 — flicker-proof)
+    -- · Matches username (bare or @-prefixed) and display name
+    -- · Hooks Text property changes so the game can't revert us
+    --   for even one frame
+    -- · Hooks DescendantAdded so dynamically-created labels
+    --   (tooltips, new joiners) get spoofed instantly
+    -- · Toggle stays on with no UserId and auto-applies once
+    --   a UserId is entered
+    -- ============================================================
+    local function getSpoofedProfileInfo()
+        local id = getgenv().qzxp_avatarUserId
+        if not id then return nil end
+        local ok1, username = pcall(function() return Players:GetNameFromUserIdAsync(id) end)
+        if not ok1 or not username then return nil end
+        local ok2, displayName = pcall(function() return Players:GetUserDisplayNameFromUserIdAsync(id) end)
+        return {
+            userId      = id,
+            username    = username,
+            displayName = (ok2 and displayName) or username,
+            headshot    = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", id),
+        }
+    end
+
+    local function findPlayerListFrame()
+        local cg = game:GetService("CoreGui")
+        local pl = cg:FindFirstChild("PlayerList")
+        if pl then return pl end
+        local rg = cg:FindFirstChild("RobloxGui")
+        return rg and rg:FindFirstChild("PlayerList")
+    end
+
+    -- Per-label tracking. Weak keys so destroyed labels get GC'd.
+    -- spoofedLabels[lbl] = { kind = "username" | "displayName", prefix = "" | "@" }
+    local spoofedLabels = setmetatable({}, {__mode = "k"})
+    local hookedLabels  = setmetatable({}, {__mode = "k"})
+    local watchedRoots  = setmetatable({}, {__mode = "k"})
+
+    local function desiredText(state, info)
+        local base = (state.kind == "username") and info.username or info.displayName
+        return (state.prefix or "") .. base
+    end
+
+    -- True only when the label is currently showing *our* real identity.
+    -- If the game recycles this label for someone else, this returns false
+    -- and we stop enforcing the spoof on it.
+    local function stillMine(txt)
+        local name = LocalPlayer.Name
+        local disp = LocalPlayer.DisplayName
+        return txt == name
+            or txt == "@" .. name
+            or txt == disp
+            or txt == "@" .. disp
+    end
+
+    local function enforceLabel(lbl, state, info)
+        local want = desiredText(state, info)
+        if lbl.Text ~= want then
+            lbl.Text = want
+        end
+    end
+
+    -- Immediate revert. Fires synchronously whenever the game sets Text,
+    -- so the original value never renders even for a single frame.
+    -- Crucially: if the new value is *another player's* name, we do NOT
+    -- overwrite it — that means this recycled label is no longer ours.
+    local function hookLabel(lbl)
+        if hookedLabels[lbl] then return end
+        hookedLabels[lbl] = true
+        lbl:GetPropertyChangedSignal("Text"):Connect(function()
+            if not ProfileSpoofer.enabled then return end
+            local info = ProfileSpoofer.info
+            local state = spoofedLabels[lbl]
+            if not info or not state then return end
+            local txt = lbl.Text
+            if txt == desiredText(state, info) then return end
+            if stillMine(txt) then
+                lbl.Text = desiredText(state, info)
+            end
+            -- else: game wrote a different player's name to this label.
+            -- Leave it alone; it's been repurposed.
+        end)
+    end
+
+    local function classifyLabel(lbl, info)
+        if not lbl then return end
+        local isText = lbl:IsA("TextLabel")
+                    or lbl:IsA("TextButton")
+                    or lbl:IsA("TextBox")
+        if not isText then return end
+
+        local state = spoofedLabels[lbl]
+        if state then
+            local want = desiredText(state, info)
+            if lbl.Text == want then return end
+            -- Only re-enforce if the label still shows our real name.
+            -- If it shows another player, this label was recycled and we
+            -- must NOT clobber it.
+            if stillMine(lbl.Text) then
+                lbl.Text = want
+            end
+            return
+        end
+
+        local txt = lbl.Text
+        if txt == LocalPlayer.Name then
+            spoofedLabels[lbl] = {kind = "username", prefix = ""}
+        elseif txt == "@" .. LocalPlayer.Name then
+            spoofedLabels[lbl] = {kind = "username", prefix = "@"}
+        elseif LocalPlayer.DisplayName ~= LocalPlayer.Name and txt == LocalPlayer.DisplayName then
+            spoofedLabels[lbl] = {kind = "displayName", prefix = ""}
+        elseif LocalPlayer.DisplayName ~= LocalPlayer.Name and txt == "@" .. LocalPlayer.DisplayName then
+            spoofedLabels[lbl] = {kind = "displayName", prefix = "@"}
+        else
+            return
+        end
+
+        hookLabel(lbl)
+        enforceLabel(lbl, spoofedLabels[lbl], info)
+    end
+
+    local function classifyImage(img, info)
+        if not img then return end
+        if not (img:IsA("ImageLabel") or img:IsA("ImageButton")) then return end
+        local myIdStr = tostring(LocalPlayer.UserId)
+        if img.Name == "HeadShot" or (img.Image and string.find(img.Image, myIdStr, 1, true)) then
+            if img.Image ~= info.headshot then
+                img.Image = info.headshot
+            end
+        end
+    end
+
+    local function applyToContainer(container, info)
+        if not container then return end
+        for _, d in ipairs(container:GetDescendants()) do
+            classifyLabel(d, info)
+            classifyImage(d, info)
+        end
+    end
+
+    -- DescendantAdded so labels created after we run (new joiners,
+    -- tooltips, etc.) get spoofed the instant they appear.
+    local function watchRoot(root)
+        if not root or watchedRoots[root] then return end
+        watchedRoots[root] = true
+        root.DescendantAdded:Connect(function(d)
+            if not ProfileSpoofer.enabled then return end
+            local info = ProfileSpoofer.info
+            if not info then return end
+            classifyLabel(d, info)
+            classifyImage(d, info)
+        end)
+    end
+
+    local function currentRoots()
+        local out = {}
+        local pl = findPlayerListFrame()
+        if pl then out[#out + 1] = pl end
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local lb = pg and pg:FindFirstChild("Leaderboard")
+        if lb then out[#out + 1] = lb end
+        return out
+    end
+
+    local function applyAll(info)
+        local roots = currentRoots()
+        for i = 1, #roots do
+            watchRoot(roots[i])
+            applyToContainer(roots[i], info)
+        end
+    end
+
+    local function restoreProfile(info)
+        if not info then return end
+        local originalHeadshot = string.format(
+            "rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", LocalPlayer.UserId)
+        local roots = currentRoots()
+        for i = 1, #roots do
+            for _, d in ipairs(roots[i]:GetDescendants()) do
+                local state = spoofedLabels[d]
+                if state then
+                    local want = desiredText(state, info)
+                    if d.Text == want then
+                        local orig = (state.kind == "username") and LocalPlayer.Name or LocalPlayer.DisplayName
+                        d.Text = (state.prefix or "") .. orig
+                    end
+                elseif (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image == info.headshot then
+                    d.Image = originalHeadshot
+                end
+            end
+        end
+        spoofedLabels = setmetatable({}, {__mode = "k"})
+        hookedLabels  = setmetatable({}, {__mode = "k"})
+    end
+
+    s7a:AddToggle("ProfileSpooferToggle", {
+        Title    = "Spoof Profile",
+        Default  = false,
+        Callback = function(v)
+            ProfileSpoofer.enabled = v
+            if v then
+                if not getgenv().qzxp_avatarUserId then
+                    notify({Title = "Profile", Content = "Waiting for User ID...", Duration = 4})
+                    return
+                end
+                ProfileSpoofer.info = getSpoofedProfileInfo()
+                if ProfileSpoofer.info then
+                    pcall(applyAll, ProfileSpoofer.info)
+                end
+                notify({Title = "Profile", Content = "Spoofing enabled", Duration = 2})
+            else
+                pcall(restoreProfile, ProfileSpoofer.info)
+                ProfileSpoofer.info = nil
+                notify({Title = "Profile", Content = "Spoofing disabled", Duration = 2})
+            end
+        end,
+    })
+
+    -- Per-frame enforcement through the tracked dispatcher. Handles
+    -- cases where a label is created in a way that bypasses
+    -- DescendantAdded (rare) and keeps us robust across rebuilds.
+    addRenderHandler(function()
+        if not ProfileSpoofer.enabled then return end
+        local info = ProfileSpoofer.info or getSpoofedProfileInfo()
+        if not info then return end
+        ProfileSpoofer.info = info
+        pcall(applyAll, info)
+    end, 9)
+end
 
     local s7s = Tabs.Visuals:AddSection("Stats HUD")
     s7s:AddToggle("ShowFPSToggle", {Title = "Show FPS", Default = false,
-        Callback = function(v) Stats_ShowFPS = v end})
+        Callback = function(v) UIFlags.StatsShowFPS = v end})
     s7s:AddToggle("ShowPingToggle", {Title = "Show Ping", Default = false,
-        Callback = function(v) Stats_ShowPing = v end})
+        Callback = function(v) UIFlags.StatsShowPing = v end})
 end
 do
     local s8 = Tabs.Settings:AddSection("Engine")
-    s8:AddToggle("KBToggle", {Title = "Keybind List", Default = false, Callback = function(v) KBShow = v; kbF.Visible = v end})
+    s8:AddToggle("KBToggle", {Title = "Keybind List", Default = false, Callback = function(v) UIFlags.KBShow = v; kbF.Visible = v end})
     s8:AddKeybind("GUIToggleKey", {Title = "GUI Toggle", Default = "LeftControl", Callback = function()
         local w = Fluent.Window
         if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
@@ -3697,7 +4781,7 @@ end)()
 Players.PlayerAdded:Connect(function() task.wait(1); syncLockDD() end)
 Players.PlayerRemoving:Connect(function(p)
     if LockTarget == p.Name then
-        LockTarget = "None"; refreshHL()
+        LockTarget = "None"
         notify({Title = "Lock", Content = "Target left", Duration = 3})
     end
     task.wait(0.1); syncLockDD()
@@ -3712,10 +4796,10 @@ InterfaceManager:BuildInterfaceSection(Tabs.Settings)
 SaveManager:BuildConfigSection(Tabs.Settings)
 Window:SelectTab(1)
 
-suppressNotifies = true
+getgenv().qzxp_suppressNotify = true
 pcall(function() SaveManager:LoadAutoloadConfig() end)
 task.delay(1, function()
-    suppressNotifies = false
+    getgenv().qzxp_suppressNotify = false
     Fluent:Notify({Title = "qzxp", Content = "Loaded", Duration = 4})
 end)
 
@@ -3738,6 +4822,11 @@ getgenv().qzxp_Cleanup = function()
         getgenv().qzxp_VFXConns = nil
         getgenv().qzxp_VFXHooked = nil
         getgenv().qzxp_VFXDisabled = nil
+
+        -- Thunder Dash: restore original ability cooldown before killing threads
+        pcall(function()
+            if getgenv().qzxp_thunderDashStop then getgenv().qzxp_thunderDashStop() end
+        end)
 
         -- Kill every tracked background thread
         if getgenv().qzxp_Threads then
@@ -3783,6 +4872,7 @@ getgenv().qzxp_Cleanup = function()
         getgenv().saveLastEquippedSword = nil; getgenv().setSkinUI = nil
         getgenv().qzxp_equipSword = nil; getgenv().qzxp_resolveSword = nil
         getgenv().qzxp_forceEquipSword = nil
+        getgenv().qzxp_avatarUserId = nil
         getgenv().qzxp_Cleanup = nil
     end)
 end
