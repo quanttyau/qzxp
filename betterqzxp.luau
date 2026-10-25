@@ -1,4 +1,4 @@
--- CREDITS: S14X (spam/anim), EAGLE HUB, ANGELI (triggerbot), OXY (autoparry)
+-- CREDITS: S14X (spam, anim, fflags), EAGLE HUB, ANGELI (triggerbot), OXY (autoparry)
 
 local function GetSafeUIParent()
     return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
@@ -110,6 +110,22 @@ local function toKey(v)
         if ok then return kc end
     end
     return Enum.KeyCode.Unknown
+end
+local KEY_SYMBOLS = {
+    LeftBracket = "[", RightBracket = "]",
+    Semicolon = ";", Quote = "'",
+    Comma = ",", Period = ".",
+    Slash = "/", BackSlash = "\\",
+    Minus = "-", Equals = "=",
+    Backquote = "`",
+    KeypadDivide = "/", KeypadMultiply = "*",
+    KeypadMinus = "-", KeypadPlus = "+",
+    KeypadPeriod = ".", KeypadEquals = "=",
+}
+local function keyDisplay(kc)
+    if not kc or kc == Enum.KeyCode.Unknown then return "?" end
+    local n = kc.Name
+    return KEY_SYMBOLS[n] or n
 end
 
 local Fluent = {Options = {}, Window = nil}
@@ -314,9 +330,15 @@ function Section:AddKeybind(id, opts)
         TextXAlignment = Enum.TextXAlignment.Center, Text = ""}, btn)
     local listening = false
     local suppressUntil = 0
-    local obj = {Value = toKey(opts.Default)}
-    local function refresh() lbl.Text = listening and "press key..." or (obj.Value and obj.Value.Name or "?") end
-    btn.MouseButton1Click:Connect(function() listening = true; suppressUntil = os.clock() + 0.25; refresh() end)
+    local obj = {Value = toKey(opts.Default), isHeld = false}
+    local function refresh() lbl.Text = listening and "press key..." or keyDisplay(obj.Value) end
+    btn.MouseButton1Click:Connect(function()
+        if obj.isHeld then
+            obj.isHeld = false
+            if opts.ReleasedCallback then pcall(opts.ReleasedCallback, obj.Value) end
+        end
+        listening = true; suppressUntil = os.clock() + 0.25; refresh()
+    end)
     _UIS.InputBegan:Connect(function(input, gp)
         if gp then return end
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
@@ -325,7 +347,18 @@ function Section:AddKeybind(id, opts)
             if opts.ChangedCallback then pcall(opts.ChangedCallback, obj.Value) end
         else
             if os.clock() < suppressUntil then return end
-            if input.KeyCode == obj.Value then if opts.Callback then pcall(opts.Callback, obj.Value) end end
+            if input.KeyCode == obj.Value then
+                obj.isHeld = true
+                if opts.Callback then pcall(opts.Callback, obj.Value) end
+            end
+        end
+    end)
+    _UIS.InputEnded:Connect(function(input, gp)
+        if gp then return end
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        if input.KeyCode == obj.Value and obj.isHeld then
+            obj.isHeld = false
+            if opts.ReleasedCallback then pcall(opts.ReleasedCallback, obj.Value) end
         end
     end)
     refresh()
@@ -685,10 +718,13 @@ function _ui.apply(t)
 end
 getgenv().qzxp_applyUITransparency = _ui.apply
 local Tabs = {
-    Main = Window:AddTab({Title = "Autoparry"}), Detection = Window:AddTab({Title = "Detections"}),
-    Spam = Window:AddTab({Title = "Spam"}), Trigger = Window:AddTab({Title = "Triggerbot"}),
-    Skins = Window:AddTab({Title = "Swords"}), Lock = Window:AddTab({Title = "Parry Lock"}),
-    Visuals = Window:AddTab({Title = "Misc"}), Settings = Window:AddTab({Title = "Settings"}),
+    Combat   = Window:AddTab({Title = "Combat"}),
+    Swords   = Window:AddTab({Title = "Swords"}),
+    Avatar   = Window:AddTab({Title = "Avatar"}),
+    Visuals  = Window:AddTab({Title = "Visuals"}),
+    Utility  = Window:AddTab({Title = "Utility"}),
+    FFlags   = Window:AddTab({Title = "FFlags"}),
+    Settings = Window:AddTab({Title = "Settings"}),
 }
 
 local Players           = game:GetService("Players")
@@ -908,7 +944,7 @@ local function PlayParryAnimation()
     end
 end
 local function PlaySingleParryAnimation()
-    if os.clock() - AnimLastPlayed >= 1 or Bypass_Cd then
+    if os.clock() - AnimLastPlayed >= 1.2 or Bypass_Cd then
         AnimLastPlayed = os.clock()
         Bypass_Cd = false
         PlayParryAnimation()
@@ -1472,25 +1508,33 @@ local function getCurveCF(ballArg)
     if LockEnabled and tp then cachedCF = CFrame.new(rp, tpos); return cachedCF end
     local m = (Options and Options.CurveMode and Options.CurveMode.Value) or CurveMode
     local resCF = Camera.CFrame
-    if m == "Camera" then resCF = Camera.CFrame
-    elseif m == "Dot" then
-        if ball then
-            local z = ball:FindFirstChild("zoomies")
-            local v = z and z.VectorVelocity or Vector3.zero
-            local d = v.Magnitude > 1 and -v.Unit or (tpos - rp).Unit
-            resCF = CFrame.new(rp, rp + d * 100)
-        else resCF = CFrame.new(rp, tpos) end
-    elseif m == "Nearest" then resCF = CFrame.new(rp, tpos)
-    elseif m == "Random" then resCF = CFrame.new(rp, tpos + Vector3.new(math.random(-4000,4000), math.random(-4000,4000), math.random(-4000,4000)))
-    elseif m == "Accel" then resCF = CFrame.new(rp, tpos + Vector3.new(0, 5, 0))
-    elseif m == "Backwards" then resCF = CFrame.new(Camera.CFrame.Position, rp + (rp - tpos).Unit * 10000 + Vector3.new(0, 1000, 0))
-    elseif m == "Slow" then resCF = CFrame.new(rp, tpos + Vector3.new(0, -9e18, 0))
-    elseif m == "High" then resCF = CFrame.new(rp, tpos + Vector3.new(0, 9e18, 0))
-    elseif m == "Normal" then resCF = CFrame.new(rp, rp + (root and root.CFrame.LookVector or Camera.CFrame.LookVector))
-    elseif m == "Speed" then resCF = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position + Camera.CFrame.UpVector * 5)
-    elseif m == "Down" then resCF = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position - Vector3.new(0, 9e9, 0))
-    elseif m == "Left" then resCF = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position - Camera.CFrame.RightVector * 9e9)
-    elseif m == "Right" then resCF = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position + Camera.CFrame.RightVector * 9e9)
+    if m == "Camera" then
+        resCF = Camera.CFrame
+    else
+        local fwd = tpos - rp
+        if fwd.Magnitude > 0.001 then fwd = fwd.Unit else fwd = Camera.CFrame.LookVector end
+        local up = Vector3.new(0, 1, 0)
+        local right = fwd:Cross(up)
+        if right.Magnitude > 0.001 then right = right.Unit else right = Camera.CFrame.RightVector end
+        if m == "Dot" then
+            if ball then
+                local z = ball:FindFirstChild("zoomies")
+                local v = z and z.VectorVelocity or Vector3.zero
+                local d = v.Magnitude > 1 and -v.Unit or fwd
+                resCF = CFrame.new(rp, rp + d * 100)
+            else resCF = CFrame.new(rp, tpos) end
+        elseif m == "Nearest" then resCF = CFrame.new(rp, tpos)
+        elseif m == "Random" then resCF = CFrame.new(rp, tpos + Vector3.new(math.random(-4000,4000), math.random(-4000,4000), math.random(-4000,4000)))
+        elseif m == "Accel" then resCF = CFrame.new(rp, tpos + Vector3.new(0, 5, 0))
+        elseif m == "Backwards" then resCF = CFrame.new(rp, rp - fwd * 10000 + Vector3.new(0, 1000, 0))
+        elseif m == "Slow" then resCF = CFrame.new(rp, tpos + Vector3.new(0, -9e18, 0))
+        elseif m == "High" then resCF = CFrame.new(rp, tpos + Vector3.new(0, 9e18, 0))
+        elseif m == "Normal" then resCF = CFrame.new(rp, rp + fwd * 1000)
+        elseif m == "Speed" then resCF = CFrame.new(rp, rp + up * 5)
+        elseif m == "Down" then resCF = CFrame.new(rp, rp - up * 9e9)
+        elseif m == "Left" then resCF = CFrame.new(rp, rp - right * 9e9)
+        elseif m == "Right" then resCF = CFrame.new(rp, rp + right * 9e9)
+        end
     end
     cachedCF = resCF
     return cachedCF
@@ -1576,9 +1620,13 @@ updDiv()
 spawnTracked(function()
     while task.wait(1) do
         if RandAcc then
-            local p = getPing()
-            if p >= 90 then AP_Acc = 4
-            elseif p <= 50 then AP_Acc = math.random(70, 100) end
+            local rawPing = 50
+            if Stats_DataPing then
+                local ok, v = pcall(function() return Stats_DataPing:GetValue() end)
+                if ok and type(v) == "number" and v > 0 then rawPing = v end
+            end
+            local internal = math.clamp(1.5 - (rawPing / 200) * 1.5, 0, 1.5)
+            AP_Acc = math.clamp(math.floor(internal / 0.015151515151515152 + 1 + 0.5), 1, 100)
             updDiv()
             if Options and Options.Accuracy then pcall(function() Options.Accuracy:SetValue(AP_Acc) end) end
         end
@@ -1982,7 +2030,6 @@ local function spamService(ball, ping)
     local rootPos = char.PrimaryPart.Position
     local pos     = ball.Position
     local dot     = (rootPos - pos).Unit:Dot(vel.Unit)
-    -- Changed math to increase the base distance and make it more forgiving
     local threshold = ping + math.min(speed / 4.5, 120) + 6 
     local ballProps   = getBallProperties(ball)
     local entityProps = getEntityProperties()
@@ -2353,6 +2400,7 @@ getgenv().saveLastEquippedSword = function(n)
     if type(n) ~= "string" or n == "" then return end
     local d = readCfg(); d[SKIN_KEY] = n; writeCfg(d)
 end
+local s = loadSaved()
 do
     getgenv().skinChanger = false
     getgenv().swordModel = type(getgenv().swordModel) == "string" and getgenv().swordModel ~= "" and getgenv().swordModel or s
@@ -2360,8 +2408,6 @@ do
     getgenv().swordFX = type(getgenv().swordFX) == "string" and getgenv().swordFX ~= "" and getgenv().swordFX or s
 end
 
--- Track the TRUE server-side sword. Only updates when neither feature
--- is overriding, so fake equips don't pollute this value.
 local realSword = ""
 local _realSwordConn = nil
 local function trackReal()
@@ -2374,7 +2420,6 @@ local function trackReal()
         end
     end)
 end
--- Initial capture from the server before any feature can override.
 local function captureRealSword()
     local c = LocalPlayer.Character; if not c then return end
     local s = c:GetAttribute("CurrentlyEquippedSword")
@@ -2426,7 +2471,6 @@ local function refreshSlash()
 end
 refreshSlash()
 
--- Equip: client-only by default. Callers pass notifyServer explicitly.
 local function equip(name, notifyServer)
     if not name or name == "" then return false end
     if notifyServer == nil then notifyServer = false end
@@ -2463,13 +2507,9 @@ getgenv().updateSword = function()
     AnimFix_Cache = {}
     if getgenv().skinChanger and getgenv().swordModel ~= "" then
         getgenv().saveLastEquippedSword(getgenv().swordModel)
-        -- Skin changer is client-only — the fake sword may be unowned.
         equip(getgenv().swordModel, false)
     end
 end
--- Proper revert:
---   · If UA is still active, hand control to UA's selected sword.
---   · Otherwise revert to the tracked true server sword AND notify server.
 getgenv().revertSword = function()
     getgenv().skinChanger = false
     getgenv().skinChangerEnabled = false
@@ -2492,9 +2532,6 @@ getgenv().revertSword = function()
     end
 end
 
--- Watchdog: re-assert skin changer sword on attribute reset. Only fires
--- when skinChanger is on — UA handles its own re-assertion via
--- `sword_attr_connection` in the unlock-all block below.
 spawnTracked(function()
     while task.wait(0.5) do
         if getgenv().skinChanger and getgenv().swordModel ~= "" then
@@ -2576,8 +2613,6 @@ spawnTracked(function()
     end
 end)
 
--- Character respawn: re-equip client-only (skin changer / UA will re-assert
--- their own state on their own schedule — no server notify here).
 LocalPlayer.CharacterAdded:Connect(function()
     if (getgenv().skinChanger or getgenv().qzxp_unlockAllActive) and getgenv().swordModel ~= "" then
         task.wait(2)
@@ -2621,7 +2656,7 @@ getgenv().qzxp_forceEquipSword = function(name)
     equip(name, false)
     return true
 end
-end) -- sword changer scope
+end)
 
 -- ============================================================
 -- UNLOCK ALL (fixed revert + ownership detection)
@@ -2848,9 +2883,6 @@ function UA.schedule_refresh(_, category)
     end)
 end
 
--- Ownership check against PRE-modification state. If we're mid-revert,
--- `unlock_originals` may have already been cleared, so fall through to
--- `item.Section == "Owned"` which reflects the restored original state.
 function UA.is_actually_owned(_, swordName)
     local virtual = UA.shop_controller
         and UA.shop_controller._virtualItems
@@ -2885,9 +2917,6 @@ function UA.is_actually_owned(_, swordName)
     return false
 end
 
--- Equip: captures original_sword from realSword (true server state),
--- and notifies the server when the sword is genuinely owned (equip or
--- restore). Unowned swords remain client-only to avoid rejection.
 function UA.equip_sword(_, swordName, restore)
     if type(swordName) ~= "string" or swordName == "" then return false end
     if not UA.swords then return false end
@@ -2901,8 +2930,6 @@ function UA.equip_sword(_, swordName, restore)
     local character = LocalPlayer.Character
     if not character then return false end
     if isEquip and not UA.original_sword then
-        -- Prefer the tracked true server sword so we don't capture a fake
-        -- state left by the skin changer.
         local scReal = getgenv().qzxp_realSword
         if scReal and scReal ~= "" then
             UA.original_sword = scReal
@@ -2940,7 +2967,6 @@ function UA.equip_sword(_, swordName, restore)
     end
     local model = character:FindFirstChild(sword.Name)
     if model then UA:apply_chroma(model, sword) end
-    -- Notify server whenever the sword is genuinely owned (equip OR restore).
     if isOwned then
         if ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo") then
             pcall(function()
@@ -2952,11 +2978,6 @@ function UA.equip_sword(_, swordName, restore)
     return true
 end
 
--- Revert:
---   · Re-enable FireSwordInfo handlers FIRST so server round-trip works.
---   · If skin changer is on, defer to it (it will re-assert its own target).
---   · Otherwise restore original sword (server notify happens inside
---     equip_sword because the original was owned).
 function UA.restore_sword(_)
     local prev = UA.original_sword
     UA.original_sword = nil
@@ -3142,7 +3163,6 @@ function UA.hook_chroma(_)
     if LocalPlayer.Character then
         task.defer(function() UA:setup_character(LocalPlayer.Character) end)
     end
-    -- Do not re-assert while the skin changer is on — it has priority.
     UA.sword_attr_connection = LocalPlayer:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
         if getgenv().skinChanger then return end
         local selected = UA.selected_sword
@@ -3398,6 +3418,736 @@ HK.doKorblox = doKorblox; HK.undoKorblox = undoKorblox
 end
 
 -- ============================================================
+-- FFLAGS TAB  (Quality / Lighting & World / Custom / Import-Export)
+-- ============================================================
+;(function()
+local FFTab = Tabs.FFlags
+
+-- ============ FF ENGINE ============
+local FF = {
+    canSet = type(setfflag) == "function",
+    canGet = type(getfflag) == "function",
+    orig = {}, key = {}, applied = {}, result = {},
+}
+do
+    local PREFIXES = { "DFFlag", "DFInt", "DFString", "DFLog", "FFlag", "FInt", "FString", "FLog" }
+    function FF.prefix(n)
+        for _, p in ipairs(PREFIXES) do if n:sub(1, #p) == p and #n > #p then return p end end
+    end
+    function FF.strip(n) local p = FF.prefix(n); return p and n:sub(#p + 1) or n end
+    function FF.norm(name, v)
+        local p = FF.prefix(name) or ""
+        v = tostring(v)
+        if p:find("Flag") then
+            local l = v:lower()
+            if l == "true" or l == "1" then return "True" end
+            if l == "false" or l == "0" then return "False" end
+            return nil
+        elseif p:find("Int") then
+            local n = tonumber(v); if not n then return nil end
+            return tostring(math.floor(n + 0.5))
+        end
+        return v
+    end
+    local BLOCK_PART = { "physics", "worldstep", "hitbox", "raknet", "replicat", "humanoid", "collision", "collide",
+        "interpolat", "extrapolat", "ownership", "anticheat", "hyperion", "tamper", "integrity", "walkspeed",
+        "jumppower", "jumpheight", "timescale", "lagswitch", "desync", "teleport", "bandwidth", "networkowner",
+        "debugsim", "primalsolver", "s2phys", "datasender", "sendrate", "receiverate", "maxmissed", "camera",
+        "character", "hipheight", "fling", "noclip" }
+    local BLOCK_WORD = { phys = 1, net = 1, network = 1, rak = 1, sim = 1, simulation = 1, solver = 1, assembly = 1,
+        owner = 1, sender = 1, send = 1, receive = 1, receiver = 1, recv = 1, packet = 1, packets = 1, mtu = 1,
+        ping = 1, lag = 1, latency = 1, throttle = 1, gravity = 1, jump = 1, walk = 1, velocity = 1, hit = 1,
+        aim = 1, raycast = 1, kick = 1, step = 1, steps = 1, clock = 1, security = 1, exploit = 1, cheat = 1,
+        replication = 1, speed = 1 }
+    function FF.words(name)
+        local s = FF.strip(name):gsub("(%l)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2"):gsub("(%a)(%d)", "%1 %2")
+            :gsub("(%d)(%a)", "%1 %2"):gsub("_", " ")
+        local out = {}
+        for w in s:gmatch("%S+") do table.insert(out, w:lower()) end
+        return out
+    end
+    function FF.blocked(name)
+        local l = FF.strip(name):lower()
+        for _, b in ipairs(BLOCK_PART) do if l:find(b, 1, true) then return b end end
+        for _, w in ipairs(FF.words(name)) do if BLOCK_WORD[w] then return w end end
+    end
+    local function tryGet(n)
+        if not FF.canGet then return nil end
+        local ok, v = pcall(getfflag, n)
+        if ok and v ~= nil then return tostring(v) end
+    end
+    function FF.get(name)
+        local k = FF.key[name]
+        if k then return tryGet(k), k end
+        local v = tryGet(name); if v ~= nil then FF.key[name] = name return v, name end
+        v = tryGet(FF.strip(name)); if v ~= nil then FF.key[name] = FF.strip(name) return v, FF.strip(name) end
+    end
+    local function same(a, b) return a ~= nil and b ~= nil and tostring(a):lower() == tostring(b):lower() end
+    function FF.set(name, value)
+        if not FF.canSet then FF.result[name] = "fail" return false end
+        local v = FF.norm(name, value); if v == nil then FF.result[name] = "fail" return false end
+        local before, known = FF.get(name)
+        if FF.orig[name] == nil then FF.orig[name] = before or false end
+        local p = FF.prefix(name) or ""
+        local values = { v }
+        if p:find("Flag") then table.insert(values, v:lower()); table.insert(values, v == "True")
+        elseif p:find("Int") then table.insert(values, tonumber(v)) end
+        local names, seen = {}, {}
+        for _, n in ipairs({ known, FF.key[name], FF.strip(name), name }) do
+            if n and not seen[n] then seen[n] = true; table.insert(names, n) end
+        end
+        local accepted, matched = false, false
+        for _, n in ipairs(names) do
+            for _, val in ipairs(values) do
+                local okS = pcall(setfflag, n, val)
+                if okS then
+                    accepted = true
+                    FF.key[name] = FF.key[name] or n
+                    if not FF.canGet then break end
+                    local back = tryGet(n)
+                    if back ~= nil and same(back, v) then FF.key[name] = n; matched = true; break end
+                end
+            end
+            if matched or (accepted and not FF.canGet) then break end
+        end
+        if matched then FF.result[name] = "ok"
+        elseif accepted then FF.result[name] = FF.canGet and "reverted" or "sent"
+        else FF.result[name] = (FF.canGet and before == nil) and "unknown" or "fail" end
+        if accepted then FF.applied[name] = v end
+        return matched or (accepted and not FF.canGet)
+    end
+    function FF.good(name) local r = FF.result[name]; return r == "ok" or r == "sent" end
+    function FF.restore(name)
+        local o = FF.orig[name]
+        FF.applied[name] = nil; FF.result[name] = nil
+        if o and FF.canSet then pcall(setfflag, FF.key[name] or FF.strip(name), o) end
+    end
+end
+
+-- ============ CONFIG ============
+local DIR, FILE = "MonoFFlags", "MonoFFlags/settings.json"
+local canFile = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+
+local DEFAULT_V = {
+    Quality = 0, MSAA = "Auto", Textures = "Auto", MapTex = "Normal", Lighting = "Auto",
+    GraySky = false, PauseVoxel = false, NoGrass = false, NoPostFx = false, NoShadows = false,
+}
+local Config = { Enabled = true, V = {}, Custom = {} }
+for k, v in pairs(DEFAULT_V) do Config.V[k] = v end
+
+local function loadConfig()
+    if not canFile then return end
+    local okI = pcall(isfile, FILE); if not okI then return end
+    local okc, content = pcall(readfile, FILE); if not okc or not content then return end
+    local ok, data = pcall(function() return HttpService:JSONDecode(content) end)
+    if not ok or type(data) ~= "table" then return end
+    if type(data.Enabled) == "boolean" then Config.Enabled = data.Enabled end
+    if type(data.V) == "table" then
+        for k, v in pairs(data.V) do
+            if Config.V[k] ~= nil and type(v) == type(Config.V[k]) then Config.V[k] = v end
+        end
+    end
+    if type(data.Custom) == "table" then
+        local l = {}
+        for _, e in ipairs(data.Custom) do
+            if type(e) == "table" and type(e.name) == "string" then
+                table.insert(l, { name = e.name, value = tostring(e.value), on = e.on ~= false })
+            end
+        end
+        Config.Custom = l
+    end
+end
+local function saveConfig()
+    if not canFile then return end
+    pcall(function()
+        if isfolder and makefolder and not isfolder(DIR) then makefolder(DIR) end
+        writefile(FILE, HttpService:JSONEncode(Config))
+    end)
+end
+loadConfig()
+
+-- ============ MAPTEX (must be before Force) ============
+local MapTex = { mode = "Normal", saved = setmetatable({}, {__mode = "k"}), conns = {}, gen = 0, over = {} }
+local MaterialService = game:GetService("MaterialService")
+local PlayersS = game:GetService("Players")
+local SKIP_MAT = { Air = true, Water = true, Neon = true, Glass = true, ForceField = true, SmoothPlastic = true }
+local function remember(inst, prop, val)
+    local t = MapTex.saved[inst]; if not t then t = {}; MapTex.saved[inst] = t end
+    if t[prop] == nil then t[prop] = { val } end
+end
+local function isCharacter(inst)
+    local cam = workspace.CurrentCamera
+    if cam and inst:IsDescendantOf(cam) then return true end
+    local m = inst:FindFirstAncestorOfClass("Model")
+    while m do
+        if m:FindFirstChildOfClass("Humanoid") or PlayersS:GetPlayerFromCharacter(m) then return true end
+        m = m:FindFirstAncestorOfClass("Model")
+    end
+    return false
+end
+local function variantPhysics(name, base)
+    for _, v in ipairs(MaterialService:GetDescendants()) do
+        if v:IsA("MaterialVariant") and v.Name == name and (base == nil or v.BaseMaterial == base) then
+            return v.CustomPhysicalProperties
+        end
+    end
+end
+local function lowInst(inst, flat)
+    if inst:IsA("SurfaceAppearance") then
+        local p = inst.Parent
+        if p and not isCharacter(inst) then remember(inst, "Parent", p); inst.Parent = nil end
+    elseif inst:IsA("BasePart") then
+        if inst.MaterialVariant ~= "" and not isCharacter(inst) then
+            if inst.CustomPhysicalProperties == nil then
+                local pp = variantPhysics(inst.MaterialVariant, inst.Material)
+                if pp then remember(inst, "CustomPhysicalProperties", nil); inst.CustomPhysicalProperties = pp end
+            end
+            remember(inst, "MaterialVariant", inst.MaterialVariant); inst.MaterialVariant = ""
+        end
+        if flat and inst:IsA("MeshPart") and inst.TextureID ~= "" and not isCharacter(inst) then
+            remember(inst, "TextureID", inst.TextureID); inst.TextureID = ""
+        end
+    elseif flat and inst:IsA("Texture") then
+        if inst.Transparency < 1 and not isCharacter(inst) then
+            remember(inst, "Transparency", inst.Transparency); inst.Transparency = 1
+        end
+    elseif flat and inst:IsA("SpecialMesh") then
+        if inst.TextureId ~= "" and not isCharacter(inst) then
+            remember(inst, "TextureId", inst.TextureId); inst.TextureId = ""
+        end
+    end
+end
+local function makeOverrides()
+    local folder = Instance.new("Folder"); folder.Name = "MonoFlatMaterials"
+    local made = {}
+    for _, mat in ipairs(Enum.Material:GetEnumItems()) do
+        if not SKIP_MAT[mat.Name] then
+            pcall(function()
+                local v = Instance.new("MaterialVariant")
+                v.Name = "MonoFlat_" .. mat.Name; v.BaseMaterial = mat; made[mat] = v
+            end)
+        end
+    end
+    local okP = pcall(function() folder.Parent = MaterialService end)
+    if not okP then return 0 end
+    local n = 0
+    for mat, v in pairs(made) do
+        local ok = pcall(function()
+            local old = MaterialService:GetBaseMaterialOverride(mat)
+            if MapTex.over[mat] == nil then MapTex.over[mat] = old or "" end
+            if old and old ~= "" then
+                local pp = variantPhysics(old, mat); if pp then v.CustomPhysicalProperties = pp end
+            end
+            v.Parent = folder
+            MaterialService:SetBaseMaterialOverride(mat, v.Name)
+        end)
+        if ok then n += 1 end
+    end
+    MapTex.folder = folder
+    return n
+end
+local function clearOverrides()
+    for mat, old in pairs(MapTex.over) do pcall(function() MaterialService:SetBaseMaterialOverride(mat, old) end) end
+    MapTex.over = {}
+    if MapTex.folder then pcall(function() MapTex.folder:Destroy() end); MapTex.folder = nil end
+end
+local function restoreMap()
+    MapTex.gen += 1
+    for _, c in ipairs(MapTex.conns) do pcall(function() c:Disconnect() end) end
+    MapTex.conns = {}
+    clearOverrides()
+    local saved = MapTex.saved
+    MapTex.saved = setmetatable({}, {__mode = "k"})
+    task.spawn(function()
+        local n = 0
+        for inst, t in pairs(saved) do
+            for prop, box in pairs(t) do pcall(function() inst[prop] = box[1] end) end
+            n += 1; if n % 1500 == 0 then task.wait() end
+        end
+    end)
+end
+function MapTex.set(mode)
+    mode = (mode == "Low" or mode == "Flat") and mode or "Normal"
+    if mode == MapTex.mode then return end
+    if MapTex.mode ~= "Normal" then restoreMap() end
+    MapTex.mode = mode
+    if mode == "Normal" then return end
+    local gen = MapTex.gen
+    local flat = mode == "Flat"
+    MapTex.overrides = makeOverrides()
+    table.insert(MapTex.conns, workspace.DescendantAdded:Connect(function(inst)
+        task.defer(function() if MapTex.gen == gen and inst.Parent then pcall(lowInst, inst, flat) end end)
+    end))
+    task.spawn(function()
+        local list = workspace:GetDescendants()
+        for i, inst in ipairs(list) do
+            if MapTex.gen ~= gen then return end
+            pcall(lowInst, inst, flat)
+            if i % 1500 == 0 then task.wait() end
+        end
+    end)
+end
+function MapTex.sweep()
+    if MapTex.mode == "Normal" or MapTex.sweeping then return end
+    MapTex.sweeping = true
+    local gen, flat = MapTex.gen, MapTex.mode == "Flat"
+    task.spawn(function()
+        for i, inst in ipairs(workspace:GetDescendants()) do
+            if MapTex.gen ~= gen then break end
+            pcall(lowInst, inst, flat)
+            if i % 1000 == 0 then task.wait() end
+        end
+        MapTex.sweeping = false
+    end)
+end
+
+-- ============ FORCE ============
+local Force = { orig = {}, ok = {}, want = {}, watch = {} }
+local Lighting = game:GetService("Lighting")
+do
+    local function getP(o, p)
+        local ok, v = pcall(function() return o[p] end)
+        if ok then return v end
+        if type(gethiddenproperty) == "function" then
+            local ok2, v2 = pcall(gethiddenproperty, o, p); if ok2 then return v2 end
+        end
+    end
+    local function setP(o, p, val)
+        local ok = pcall(function() o[p] = val end)
+        if (not ok or getP(o, p) ~= val) and type(sethiddenproperty) == "function" then
+            ok = pcall(sethiddenproperty, o, p, val)
+        end
+        return ok and getP(o, p) == val
+    end
+    local function objs()
+        local R, U
+        pcall(function() R = settings().Rendering end)
+        pcall(function() U = UserSettings():GetService("UserGameSettings") end)
+        return R, U
+    end
+    function Force.set(key, obj, prop, want)
+        if not obj then Force.ok[key] = false return end
+        local id = key .. "." .. prop
+        if want ~= nil then
+            if Force.orig[id] == nil then
+                local cur = getP(obj, prop); Force.orig[id] = (cur == nil) and false or cur
+            end
+            Force.ok[key] = getP(obj, prop) == want or setP(obj, prop, want)
+            Force.want[id] = want
+            if not Force.watch[id] then
+                pcall(function()
+                    Force.watch[id] = obj:GetPropertyChangedSignal(prop):Connect(function()
+                        local w = Force.want[id]
+                        if w ~= nil and getP(obj, prop) ~= w then task.defer(setP, obj, prop, w) end
+                    end)
+                end)
+            end
+        else
+            Force.want[id] = nil
+            if Force.orig[id] ~= nil then
+                local o = Force.orig[id]; Force.orig[id] = nil
+                if o ~= false then setP(obj, prop, o) end
+            end
+            Force.ok[key] = nil
+        end
+    end
+    local TECH = { Voxel = "Voxel", Shadow = "ShadowMap", Future = "Future" }
+    local TEX_LEVEL = { Low = 1, Medium = 6, High = 14, Max = 21 }
+    function Force.apply()
+        local V = Config.V
+        local R, U = objs()
+        local q = math.floor(tonumber(V.Quality) or 0)
+        local tq = TEX_LEVEL[V.Textures]
+        if q <= 0 and tq then q = tq end
+        if q > 0 then
+            local lvl, saved
+            pcall(function() lvl = Enum.QualityLevel[("Level%02d"):format(math.clamp(q, 1, 21))] end)
+            pcall(function() saved = Enum.SavedQualitySetting["QualityLevel" .. math.clamp(math.ceil(q / 2.1), 1, 10)] end)
+            local a = lvl and Force.set("quality", R, "QualityLevel", lvl)
+            local b = saved and Force.set("qualitySaved", U, "SavedQualityLevel", saved)
+            Force.ok.quality = (a or b) and true or false
+            Force.ok.textures = tq and Force.ok.quality or nil
+        else
+            Force.set("quality", R, "QualityLevel", nil)
+            Force.set("qualitySaved", U, "SavedQualityLevel", nil)
+            Force.ok.textures = nil
+        end
+        pcall(MapTex.set, V.MapTex)
+        local tech = TECH[V.Lighting]
+        if tech then
+            local e; pcall(function() e = Enum.Technology[tech] end)
+            Force.set("lighting", Lighting, "Technology", e)
+        else
+            Force.set("lighting", Lighting, "Technology", nil)
+        end
+        Force.set("shadows", Lighting, "GlobalShadows", V.NoShadows and false or nil)
+    end
+end
+
+-- ============ FLAGS ============
+local Flags = {}
+do
+    local MSAA = { ["1x"] = 1, ["2x"] = 2, ["4x"] = 4, ["8x"] = 8 }
+    local TEX = { Low = 0, Medium = 1, High = 2, Max = 3 }
+    function Flags.wanted()
+        local V, w = Config.V, {}
+        if (tonumber(V.Quality) or 0) > 0 then w.DFIntDebugFRMQualityLevelOverride = V.Quality end
+        if MSAA[V.MSAA] then w.FIntDebugForceMSAASamples = MSAA[V.MSAA] end
+        if TEX[V.Textures] then
+            w.DFFlagTextureQualityOverrideEnabled = "True"
+            w.DFIntTextureQualityOverride = TEX[V.Textures]
+            if V.Textures == "Low" then w.FIntDebugTextureManagerSkipMips = 2 end
+        end
+        if V.Lighting == "Voxel" then w.DFFlagDebugRenderForceTechnologyVoxel = "True"
+        elseif V.Lighting == "Shadow" then w.FFlagDebugForceFutureIsBrightPhase2 = "True"
+        elseif V.Lighting == "Future" then w.FFlagDebugForceFutureIsBrightPhase3 = "True" end
+        if V.GraySky then w.FFlagDebugSkyGray = "True" end
+        if V.PauseVoxel then w.DFFlagDebugPauseVoxelizer = "True" end
+        if V.NoGrass then w.FIntFRMMinGrassDistance = 0; w.FIntFRMMaxGrassDistance = 0 end
+        if V.NoPostFx then w.FFlagDisablePostFx = "True" end
+        if V.NoShadows then w.FIntRenderShadowIntensity = 0 end
+        for _, e in ipairs(Config.Custom) do
+            if e.on and FF.prefix(e.name) and not FF.blocked(e.name) then w[e.name] = e.value end
+        end
+        return w
+    end
+    local FORCED = {
+        DFIntDebugFRMQualityLevelOverride = "quality",
+        DFFlagDebugRenderForceTechnologyVoxel = "lighting",
+        FFlagDebugForceFutureIsBrightPhase2 = "lighting",
+        FFlagDebugForceFutureIsBrightPhase3 = "lighting",
+        FIntRenderShadowIntensity = "shadows",
+    }
+    function Flags.applyAll()
+        local w = Flags.wanted()
+        for name in pairs(FF.applied) do if w[name] == nil then FF.restore(name) end end
+        pcall(Force.apply)
+        local ok, fail, total = 0, 0, 0
+        for name, v in pairs(w) do
+            total += 1
+            local nv = FF.norm(name, v)
+            if FF.applied[name] ~= nv or not FF.good(name) then FF.set(name, v) end
+            local good = FF.good(name)
+            if FORCED[name] and Force.ok[FORCED[name]] then good = true end
+            if good then ok += 1 else fail += 1 end
+        end
+        if Flags.onApplied then pcall(Flags.onApplied, ok, fail, total) end
+        return ok, fail, total
+    end
+    local queued = false
+    function Flags.changed()
+        if queued then return end
+        queued = true
+        task.delay(0.15, function()
+            queued = false
+            saveConfig()
+            if not Config.Enabled then return end
+            Flags.applyAll()
+        end)
+    end
+    function Flags.setEnabled(on)
+        Config.Enabled = on == true
+        saveConfig()
+        if Config.Enabled then
+            Flags.applyAll()
+        else
+            for name in pairs(FF.applied) do pcall(FF.restore, name) end
+            local keep = Config.V
+            Config.V = {}
+            for k, v in pairs(DEFAULT_V) do Config.V[k] = v end
+            pcall(Force.apply)
+            Config.V = keep
+        end
+    end
+    Flags.MapTex = MapTex
+    Flags.Force = Force
+end
+
+-- ============ UI HELPERS ============
+local function addLabel(section, text)
+    section._rowN += 1
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundColor3 = UITheme.Row,
+        BorderSizePixel = 0, LayoutOrder = section._rowN }, section._wrap)
+    mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.Border,
+        BackgroundTransparency = 0.4, BorderSizePixel = 0 }, row)
+    local lbl = mk("TextLabel", { Size = UDim2.new(1, -24, 1, 0), Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1, Font = FONT, TextSize = 11, TextColor3 = UITheme.TextDim,
+        TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, Text = tostring(text) }, row)
+    return lbl
+end
+local function addMultilineBox(section, height, placeholder, default)
+    section._rowN += 1
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, height + 8), BackgroundColor3 = UITheme.Row,
+        BorderSizePixel = 0, LayoutOrder = section._rowN }, section._wrap)
+    mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.Border,
+        BackgroundTransparency = 0.4, BorderSizePixel = 0 }, row)
+    local bg = mk("Frame", { Size = UDim2.new(1, -16, 1, -16), Position = UDim2.fromOffset(8, 8),
+        BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0 }, row)
+    addCorner(bg, 6); addStroke(bg, UITheme.Border, 1, 0.4)
+    local box = mk("TextBox", { Size = UDim2.new(1, -16, 1, -16), Position = UDim2.fromOffset(8, 8),
+        BackgroundTransparency = 1, Font = FONTM, TextSize = 11, TextColor3 = UITheme.Text,
+        PlaceholderText = placeholder or "", PlaceholderColor3 = UITheme.TextMute,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+        ClearTextOnFocus = false, MultiLine = true, TextWrapped = true,
+        Text = tostring(default or "") }, bg)
+    return box
+end
+
+-- ============ UI ============
+local V = Config.V
+
+-- MASTER TOGGLE
+local sM = FFTab:AddSection("Master")
+sM:AddToggle("FF_MasterToggle", { Title = "FFlags Enabled", Default = Config.Enabled,
+    Callback = function(v) Flags.setEnabled(v) end })
+
+-- QUALITY
+local sQ = FFTab:AddSection("Quality")
+sQ:AddSlider("FF_Quality", { Title = "Graphics level (0 = game default)", Default = V.Quality,
+    Min = 0, Max = 21, Rounding = 0,
+    Callback = function(v) V.Quality = math.floor(v + 0.5); Flags.changed() end })
+sQ:AddDropdown("FF_MSAA", { Title = "Anti-aliasing", Values = { "Auto", "1x", "2x", "4x", "8x" },
+    Default = V.MSAA, Multi = false,
+    Callback = function(v) V.MSAA = v; Flags.changed() end })
+sQ:AddDropdown("FF_Textures", { Title = "Textures", Values = { "Auto", "Low", "Medium", "High", "Max" },
+    Default = V.Textures, Multi = false,
+    Callback = function(v) V.Textures = v; Flags.changed() end })
+sQ:AddDropdown("FF_MapTex", { Title = "Map & object textures (forced, live)", Values = { "Normal", "Low", "Flat" },
+    Default = V.MapTex, Multi = false,
+    Callback = function(v) V.MapTex = v; Flags.changed() end })
+
+-- LIGHTING & WORLD
+local sL = FFTab:AddSection("Lighting & World")
+sL:AddDropdown("FF_Lighting", { Title = "Lighting (forced)", Values = { "Auto", "Voxel", "Shadow", "Future" },
+    Default = V.Lighting, Multi = false,
+    Callback = function(v) V.Lighting = v; Flags.changed() end })
+sL:AddToggle("FF_NoShadows", { Title = "No shadows (forced)", Default = V.NoShadows,
+    Callback = function(v) V.NoShadows = v; Flags.changed() end })
+sL:AddToggle("FF_NoPostFx", { Title = "No post effects", Default = V.NoPostFx,
+    Callback = function(v) V.NoPostFx = v; Flags.changed() end })
+sL:AddToggle("FF_GraySky", { Title = "Gray sky", Default = V.GraySky,
+    Callback = function(v) V.GraySky = v; Flags.changed() end })
+sL:AddToggle("FF_PauseVoxel", { Title = "Freeze voxel lighting", Default = V.PauseVoxel,
+    Callback = function(v) V.PauseVoxel = v; Flags.changed() end })
+sL:AddToggle("FF_NoGrass", { Title = "No grass", Default = V.NoGrass,
+    Callback = function(v) V.NoGrass = v; Flags.changed() end })
+
+-- CUSTOM FLAGS
+local sC = FFTab:AddSection("Custom flags")
+local customListRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, LayoutOrder = 1 }, sC._wrap)
+mk("UIListLayout", { Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder }, customListRow)
+local addRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, LayoutOrder = 2 }, sC._wrap)
+sC._rowN += 2
+
+local function makeCustomToggleRow(name, initialOn, onChange)
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0 }, customListRow)
+    mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.Border, BackgroundTransparency = 0.4, BorderSizePixel = 0 }, row)
+    mk("TextLabel", { Size = UDim2.new(0.55, -16, 1, 0), Position = UDim2.fromOffset(16, 0), BackgroundTransparency = 1,
+        Font = FONT, TextSize = 12, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Text = tostring(name) }, row)
+    local sw = mk("Frame", { Size = UDim2.new(0, 40, 0, 22), Position = UDim2.new(1, -56, 0.5, -11),
+        BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, ClipsDescendants = true }, row)
+    addCorner(sw, 11); addStroke(sw, UITheme.Border, 1, 0.35)
+    local knob = mk("Frame", { Size = UDim2.new(0, 18, 0, 18), Position = UDim2.new(0, 2, 0.5, -9),
+        BackgroundColor3 = UITheme.White, BorderSizePixel = 0 }, sw)
+    addCorner(knob, 9); addStroke(knob, UITheme.Border, 1, 0.45)
+    local click = mk("TextButton", { Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "" }, sw)
+    local state = initialOn
+    local function paint(on, anim)
+        local t = on and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+        sw.BackgroundColor3 = on and UITheme.White or UITheme.Off
+        if anim then tween(knob, TI_MED, { Position = t }) else knob.Position = t end
+    end
+    paint(state, false)
+    click.MouseButton1Click:Connect(function() state = not state; paint(state, true); onChange(state) end)
+    local rm = mk("TextButton", { Size = UDim2.new(0, 68, 0, 26), Position = UDim2.new(1, -132, 0.5, -13),
+        BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, Font = FONT, TextSize = 11,
+        TextColor3 = UITheme.TextDim, Text = "Remove", AutoButtonColor = false }, row)
+    addCorner(rm, 6); addStroke(rm, UITheme.Border, 1, 0.4)
+    rm.MouseButton1Click:Connect(function()
+        for i, e in ipairs(Config.Custom) do if e.name == name then table.remove(Config.Custom, i); break end end
+        if Flags.rebuildCustom then Flags.rebuildCustom() end
+        Flags.changed()
+    end)
+    return row
+end
+
+do -- add-custom form
+    local row1 = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0 }, addRow)
+    local row2 = mk("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0 }, addRow)
+    local f1 = mk("Frame", { Size = UDim2.new(1, -24, 0, 28), Position = UDim2.fromOffset(12, 5),
+        BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0 }, row1)
+    addCorner(f1, 6); addStroke(f1, UITheme.Border, 1, 0.4)
+    local nameBox = mk("TextBox", { Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0),
+        BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = UITheme.Text,
+        PlaceholderText = "Flag name, e.g. FFlagDebugSkyGray", PlaceholderColor3 = UITheme.TextMute,
+        TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Text = "" }, f1)
+    local f2 = mk("Frame", { Size = UDim2.new(0, 130, 0, 32), Position = UDim2.fromOffset(12, 5),
+        BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0 }, row2)
+    addCorner(f2, 6); addStroke(f2, UITheme.Border, 1, 0.4)
+    local valBox = mk("TextBox", { Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0),
+        BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = UITheme.Text,
+        PlaceholderText = "value", PlaceholderColor3 = UITheme.TextMute,
+        TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Text = "" }, f2)
+    local addBtn = mk("TextButton", { Size = UDim2.new(0, 110, 0, 32), Position = UDim2.fromOffset(150, 5),
+        BackgroundColor3 = UITheme.White, BorderSizePixel = 0, Font = FONTB, TextSize = 12,
+        TextColor3 = UITheme.Black, Text = "Add flag", AutoButtonColor = false }, row2)
+    addCorner(addBtn, 6)
+    addBtn.MouseButton1Click:Connect(function()
+        local name = (nameBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub('"', "")
+        local value = (valBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if name == "" then notify({ Title = "FFlags", Content = "Enter a flag name", Duration = 3 }); return end
+        if not FF.prefix(name) then notify({ Title = "FFlags", Content = "Needs a prefix (DFInt/FFlag/etc)", Duration = 3 }); return end
+        local b = FF.blocked(name)
+        if b then notify({ Title = "FFlags", Content = "Blocked (" .. b .. ")", Duration = 3 }); return end
+        local v = FF.norm(name, value)
+        if v == nil then notify({ Title = "FFlags", Content = "Invalid value", Duration = 3 }); return end
+        for _, e in ipairs(Config.Custom) do
+            if e.name == name then
+                e.value = v; e.on = true
+                nameBox.Text = ""; valBox.Text = ""
+                if Flags.rebuildCustom then Flags.rebuildCustom() end
+                Flags.changed()
+                return
+            end
+        end
+        table.insert(Config.Custom, { name = name, value = v, on = true })
+        nameBox.Text = ""; valBox.Text = ""
+        if Flags.rebuildCustom then Flags.rebuildCustom() end
+        Flags.changed()
+    end)
+end
+
+function Flags.rebuildCustom()
+    for _, c in ipairs(customListRow:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+    if #Config.Custom == 0 then
+        addLabel(sC, "No custom flags yet - add one above.")
+        return
+    end
+    for i, e in ipairs(Config.Custom) do
+        makeCustomToggleRow(e.name, e.on, function(v) e.on = v; Flags.changed() end)
+    end
+end
+Flags.rebuildCustom()
+
+-- IMPORT / EXPORT JSON
+local sJ = FFTab:AddSection("Import / Export JSON")
+local jsonBox = addMultilineBox(sJ, 180, '{"FFlagDebugSkyGray":"True","FIntDebugForceMSAASamples":4}', "")
+local btnRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundTransparency = 1,
+    LayoutOrder = sJ._rowN + 1 }, sJ._wrap)
+sJ._rowN += 1
+local importBtn = mk("TextButton", { Size = UDim2.new(0.333, -6, 0, 34), Position = UDim2.new(0, 4, 0.5, -17),
+    BackgroundColor3 = UITheme.White, BorderSizePixel = 0, Font = FONTB, TextSize = 12,
+    TextColor3 = UITheme.Black, Text = "Import", AutoButtonColor = false }, btnRow)
+addCorner(importBtn, 6)
+local exportBtn = mk("TextButton", { Size = UDim2.new(0.333, -6, 0, 34), Position = UDim2.new(0.333, 2, 0.5, -17),
+    BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, Font = FONTB, TextSize = 12,
+    TextColor3 = UITheme.Text, Text = "Export (copy)", AutoButtonColor = false }, btnRow)
+addCorner(exportBtn, 6); addStroke(exportBtn, UITheme.Border, 1, 0.3)
+local clearBtn = mk("TextButton", { Size = UDim2.new(0.333, -6, 0, 34), Position = UDim2.new(0.666, 0, 0.5, -17),
+    BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0, Font = FONTB, TextSize = 12,
+    TextColor3 = UITheme.Text, Text = "Remove all", AutoButtonColor = false }, btnRow)
+addCorner(clearBtn, 6); addStroke(clearBtn, UITheme.Border, 1, 0.3)
+
+importBtn.MouseButton1Click:Connect(function()
+    local txt = jsonBox.Text or ""
+    if txt == "" then notify({ Title = "Import", Content = "Paste JSON first", Duration = 3 }); return end
+    local ok, data = pcall(function() return HttpService:JSONDecode(txt) end)
+    if not ok or type(data) ~= "table" then notify({ Title = "Import", Content = "Not valid JSON", Duration = 4 }); return end
+    local added, blocked, bad = 0, 0, 0
+    for k, v in pairs(data) do
+        if type(k) == "string" and FF.prefix(k) then
+            local b = FF.blocked(k)
+            if b then blocked += 1
+            else
+                local nv = FF.norm(k, type(v) == "boolean" and (v and "True" or "False") or tostring(v))
+                if nv then
+                    local found = false
+                    for _, e in ipairs(Config.Custom) do if e.name == k then e.value = nv; e.on = true; found = true end end
+                    if not found then table.insert(Config.Custom, { name = k, value = nv, on = true }) end
+                    added += 1
+                else bad += 1 end
+            end
+        else bad += 1 end
+    end
+    if Flags.rebuildCustom then Flags.rebuildCustom() end
+    Flags.changed()
+    notify({ Title = "Import", Content = string.format("%d added, %d blocked, %d skipped", added, blocked, bad), Duration = 5 })
+end)
+
+exportBtn.MouseButton1Click:Connect(function()
+    local out = {}
+    for n, v in pairs(Flags.wanted()) do out[n] = FF.norm(n, v) or tostring(v) end
+    local ok, json = pcall(function() return HttpService:JSONEncode(out) end)
+    if not ok then return end
+    jsonBox.Text = json
+    if type(setclipboard) == "function" then
+        pcall(setclipboard, json)
+        notify({ Title = "Export", Content = "Copied " .. #json .. " bytes", Duration = 3 })
+    else
+        notify({ Title = "Export", Content = "No setclipboard - JSON is in the box", Duration = 4 })
+    end
+end)
+
+clearBtn.MouseButton1Click:Connect(function()
+    Config.Custom = {}
+    if Flags.rebuildCustom then Flags.rebuildCustom() end
+    Flags.changed()
+    notify({ Title = "FFlags", Content = "All custom flags removed", Duration = 3 })
+end)
+
+-- ============ KEEP-APPLIED LOOP ============
+task.spawn(function()
+    local tick2 = 0
+    while true do
+        task.wait(2)
+        if Config.Enabled then
+            pcall(Force.apply)
+            tick2 += 1
+            if tick2 % 5 == 0 then pcall(MapTex.sweep) end
+            if FF.canSet and FF.canGet then
+                for name, v in pairs(FF.applied) do
+                    local cur = FF.get(name)
+                    if cur ~= nil and tostring(cur):lower() ~= tostring(v):lower() then
+                        pcall(FF.set, name, v)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ============ AUTO-APPLY ON LAUNCH ============
+task.delay(1.5, function()
+    if Config.Enabled then
+        local ok, fail, total = Flags.applyAll()
+        if total > 0 then
+            notify({ Title = "FFlags", Content = ok .. " applied" ..
+                (fail > 0 and (", " .. fail .. " not taken") or ""), Duration = 4 })
+        end
+    end
+end)
+
+-- ============ CLEANUP HOOK ============
+do
+    local old = getgenv().qzxp_Cleanup
+    getgenv().qzxp_Cleanup = function()
+        if old then pcall(old) end
+        for name in pairs(FF.applied) do pcall(FF.restore, name) end
+        pcall(function()
+            local keep = Config.V
+            Config.V = {}
+            for k, v in pairs(DEFAULT_V) do Config.V[k] = v end
+            pcall(Force.apply)
+            Config.V = keep
+        end)
+    end
+end
+end)()
+
+-- ============================================================
 -- THUNDER DASH 0 COOLDOWN
 -- ============================================================
 local ThunderDash = {
@@ -3569,7 +4319,7 @@ Instance.new("UICorner", kbT).CornerRadius = UDim.new(0, 8)
 local kbC = Instance.new("Frame"); kbC.Size = UDim2.new(1, -10, 1, -34); kbC.Position = UDim2.new(0, 5, 0, 31); kbC.BackgroundTransparency = 1; kbC.Parent = kbF
 Instance.new("UIListLayout", kbC).Padding = UDim.new(0, 4)
 MakeDrag(kbT, kbF)
-local function keyStr(o) if not o then return "?" end; local v = o.Value; return typeof(v) == "EnumItem" and v.Name or tostring(v) end
+local function keyStr(o) if not o then return "?" end; local v = o.Value; return typeof(v) == "EnumItem" and keyDisplay(v) or tostring(v) end
 local kbItems = {
     {n = "Autoparry", k = function() return keyStr(Options and Options.APKey) end, s = function() return AP_On end},
     {n = "Manual Spam", k = function() return keyStr(Options and Options.SpamKey) end, s = function() return Spam_On end},
@@ -3611,7 +4361,8 @@ addRenderHandler(function()
     if UIFlags.KBShow then
         for i, it in ipairs(kbItems) do
             local s = it.s(); local k = it.k()
-            local txt = "[" .. k .. "] " .. it.n .. " " .. (s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>")
+            local shown = (#k == 1) and k or ("[" .. k .. "]")
+            local txt = shown .. " " .. it.n .. " " .. (s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>")
             if txt ~= kbLastText[i] then
                 kbLastText[i] = txt
                 local lbl = kbL[i]; lbl.RichText = true; lbl.Text = txt
@@ -3743,18 +4494,32 @@ end)()
 -- ============================================================
 ;(function()
 do
-    local s1 = Tabs.Main:AddSection("Autoparry")
+    local s1 = Tabs.Combat:AddSection("Autoparry")
+    local APKeyMode = "Toggle"
     s1:AddToggle("APToggle", {Title = "Enabled", Default = false, Callback = function(v)
         AP_On = v
         notify({Title = "AP", Content = v and "On" or "Off", Duration = 2})
     end})
-    s1:AddKeybind("APKey", {Title = "Keybind", Default = "P", Callback = function()
-        if Options.APToggle then Options.APToggle:SetValue(not AP_On) end
-    end, ChangedCallback = function() end})
+    s1:AddKeybind("APKey", {Title = "Keybind", Default = "P",
+        Callback = function()
+            if APKeyMode == "Hold" then
+                if Options.APToggle then Options.APToggle:SetValue(true) end
+            else
+                if Options.APToggle then Options.APToggle:SetValue(not AP_On) end
+            end
+        end,
+        ReleasedCallback = function()
+            if APKeyMode == "Hold" then
+                if Options.APToggle then Options.APToggle:SetValue(false) end
+            end
+        end,
+        ChangedCallback = function() end})
+    s1:AddDropdown("APMode", {Title = "Key Mode", Values = {"Toggle", "Hold"}, Default = "Toggle", Multi = false,
+        Callback = function(v) APKeyMode = v end})
     s1:AddSlider("Accuracy", {Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 1, Callback = function(v)
         AP_Acc = v; updDiv()
     end})
-    s1:AddToggle("RandAccToggle", {Title = "Randomize Acc", Default = false, Callback = function(v)
+    s1:AddToggle("RandAccToggle", {Title = "Auto Accuracy", Default = false, Callback = function(v)
         RandAcc = v
     end})
     s1:AddDropdown("CurveMode", {Title = "Curve", Values = CURVES, Default = "Camera", Multi = false, Callback = function(v)
@@ -3768,7 +4533,7 @@ do
     end})
 end
 do
-    local s2 = Tabs.Detection:AddSection("Detections")
+    local s2 = Tabs.Combat:AddSection("Detections")
     s2:AddToggle("InfDet", {Title = "Infinity", Default = false, Callback = function(v)
         InfDet = v
     end})
@@ -3783,15 +4548,29 @@ do
     end})
 end
 do
-    local s3 = Tabs.Spam:AddSection("Spam")
+    local s3 = Tabs.Combat:AddSection("Spam")
+    local SpamKeyMode = "Toggle"
     s3:AddToggle("SpamToggle", {Title = "Enabled", Default = false, Callback = function(v)
         Spam_On = v
         if not v and getgenv().qzxp_resetAPState then pcall(getgenv().qzxp_resetAPState) end
         notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2})
     end})
-    s3:AddKeybind("SpamKey", {Title = "Keybind", Default = "E", Callback = function()
-        if Options.SpamToggle then Options.SpamToggle:SetValue(not Spam_On) else Spam_On = not Spam_On end
-    end, ChangedCallback = function() end})
+    s3:AddKeybind("SpamKey", {Title = "Keybind", Default = "E",
+        Callback = function()
+            if SpamKeyMode == "Hold" then
+                if Options.SpamToggle then Options.SpamToggle:SetValue(true) end
+            else
+                if Options.SpamToggle then Options.SpamToggle:SetValue(not Spam_On) else Spam_On = not Spam_On end
+            end
+        end,
+        ReleasedCallback = function()
+            if SpamKeyMode == "Hold" then
+                if Options.SpamToggle then Options.SpamToggle:SetValue(false) end
+            end
+        end,
+        ChangedCallback = function() end})
+    s3:AddDropdown("SpamMode", {Title = "Key Mode", Values = {"Toggle", "Hold"}, Default = "Toggle", Multi = false,
+        Callback = function(v) SpamKeyMode = v end})
     local spamRPSSlider
     spamRPSSlider = s3:AddSlider("SpamRPS", {Title = "RPS", Default = 100, Min = 5, Max = 1000, Rounding = 0, Callback = function(v)
         local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
@@ -3805,35 +4584,49 @@ do
         SpamAnimMatchRPS = v
         SpamAnimRate = v and SpamRPS or 100
     end})
-    s3:AddToggle("AutoSpamToggle", {Title = "Auto Spam", Default = false, Callback = function(v)
-        AutoSpam_On = v
-    end})
-    s3:AddDropdown("ClashingThreshold", {Title = "Clashing Threshold", Values = {"1", "2", "3"}, Default = "1", Callback = function(v)
-        ClashingThreshold = tonumber(v) or 1
-    end})
     s3:AddToggle("SpamDet", {Title = "Respect Detections", Default = true, Callback = function(v)
         SpamDetect = v
     end})
     s3:AddToggle("AnimFixSpam", {Title = "Anim Fix", Default = true, Callback = function(v)
         AnimFix_Spam = v
     end})
+    s3:AddToggle("AutoSpamToggle", {Title = "Auto Spam", Default = false, Callback = function(v)
+        AutoSpam_On = v
+    end})
+    s3:AddDropdown("ClashingThreshold", {Title = "Clashing Threshold", Values = {"1", "2", "3"}, Default = "1", Callback = function(v)
+        ClashingThreshold = tonumber(v) or 1
+    end})
 end
 do
-    local s4 = Tabs.Trigger:AddSection("Triggerbot")
+    local s4 = Tabs.Combat:AddSection("Triggerbot")
+    local TBKeyMode = "Toggle"
     s4:AddToggle("TBToggle", {Title = "Enabled", Default = false, Callback = function(v)
         TB_On = v
         if not v and getgenv().qzxp_resetAPState then pcall(getgenv().qzxp_resetAPState) end
         notify({Title = "TB", Content = v and "On" or "Off", Duration = 2})
     end})
-    s4:AddKeybind("TBKey", {Title = "Keybind", Default = "R", Callback = function()
-        if Options.TBToggle then Options.TBToggle:SetValue(not TB_On) end
-    end, ChangedCallback = function() end})
+    s4:AddKeybind("TBKey", {Title = "Keybind", Default = "R",
+        Callback = function()
+            if TBKeyMode == "Hold" then
+                if Options.TBToggle then Options.TBToggle:SetValue(true) end
+            else
+                if Options.TBToggle then Options.TBToggle:SetValue(not TB_On) end
+            end
+        end,
+        ReleasedCallback = function()
+            if TBKeyMode == "Hold" then
+                if Options.TBToggle then Options.TBToggle:SetValue(false) end
+            end
+        end,
+        ChangedCallback = function() end})
+    s4:AddDropdown("TBMode", {Title = "Key Mode", Values = {"Toggle", "Hold"}, Default = "Toggle", Multi = false,
+        Callback = function(v) TBKeyMode = v end})
     s4:AddToggle("AnimFixTB", {Title = "Anim Fix", Default = true, Callback = function(v)
         AnimFix_TB = v
     end})
 end
 do
-    local s5 = Tabs.Skins:AddSection("Sword Changer")
+    local s5 = Tabs.Swords:AddSection("Sword Changer")
     local skinRef = s5:AddToggle("SkinToggle", {Title = "Enabled", Default = false, Callback = function(v)
         getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
         if v and getgenv().swordModel ~= "" then
@@ -3851,12 +4644,18 @@ do
     s5:AddInput("ManualSword", {Title = "Sword Name", Default = "", Placeholder = "type sword name...", Callback = function(v)
         local n = v and v:match("^%s*(.-)%s*$") or ""
         local e = resolve(n)
-        if getgenv().skinChanger then pcall(getgenv().revertSword) end
         getgenv().swordModel = e; getgenv().swordAnimations = e; getgenv().swordFX = e
-        if getgenv().skinChanger and e ~= "" then pcall(getgenv().updateSword) end
+        if getgenv().skinChanger then
+            if e ~= "" then
+                pcall(getgenv().updateSword)
+            else
+                pcall(getgenv().revertSword)
+                if getgenv().setSkinUI then pcall(getgenv().setSkinUI, false) end
+            end
+        end
         pcall(getgenv().saveLastEquippedSword, e)
     end})
-    local s5b = Tabs.Skins:AddSection("Unlock All (Swords)")
+    local s5b = Tabs.Swords:AddSection("Unlock All (Swords)")
     s5b:AddToggle("UnlockAllToggle", {Title = "Enabled", Default = false, Callback = function(v)
         UA:set_enabled(v)
         notify({Title = "Unlock All", Content = v and "On" or "Off", Duration = 2})
@@ -3866,7 +4665,7 @@ do
     end})
 end
 do
-    local s6 = Tabs.Lock:AddSection("Parry Lock")
+    local s6 = Tabs.Combat:AddSection("Parry Lock")
     s6:AddToggle("LockToggle", {Title = "Enabled", Default = false, Callback = function(v)
         LockEnabled = v
         notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2})
@@ -3897,7 +4696,7 @@ do
         PRV.On = v
         if not v then PRV.Destroy() end
     end})
-    local s7c = Tabs.Visuals:AddSection("Character")
+    local s7c = Tabs.Avatar:AddSection("Character")
     s7c:AddToggle("HeadlessT", {Title = "Headless", Default = false, Callback = function(v)
         HK.Headless = v
         if v then HK.doHeadless() else HK.undoHeadless() end
@@ -3906,7 +4705,7 @@ do
         HK.Korblox = v
         if v then HK.doKorblox() else HK.undoKorblox() end
     end})
-    local s7ab = Tabs.Visuals:AddSection("Ability")
+    local s7ab = Tabs.Utility:AddSection("Ability")
     s7ab:AddToggle("ThunderDashToggle", {Title = "Thunder Dash 0 Cooldown", Default = false, Callback = function(v)
         if v then
             ThunderDash.start()
@@ -4399,7 +5198,7 @@ do
     -- UI SECTION: Avatar
     -- Pattern: [Toggle] -> [Input]
     -- ---------------------------------------------------------
-    local s7a = Tabs.Visuals:AddSection("Avatar")
+    local s7a = Tabs.Avatar:AddSection("Avatar")
 
     s7a:AddToggle("AvatarChanger", {Title = "Avatar Changer", Default = false, Callback = function(v)
         SetAvatarEnabled(v)
@@ -4586,21 +5385,17 @@ end -- Avatar/Profile spoofer scope
     end})
 end
 do
-    local s8 = Tabs.Settings:AddSection("Engine")
-    s8:AddToggle("KBToggle", {Title = "Keybind List", Default = false, Callback = function(v)
+    local s8v = Tabs.Visuals:AddSection("Keybind List")
+    s8v:AddToggle("KBToggle", {Title = "Keybind List", Default = false, Callback = function(v)
         UIFlags.KBShow = v; kbF.Visible = v
     end})
-    s8:AddKeybind("GUIToggleKey", {Title = "GUI Toggle", Default = "LeftControl", Callback = function()
-        local w = Fluent.Window
-        if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
-    end, ChangedCallback = function() end})
 end
-end)() -- UI LAYOUT scope
+end)()
 
 -- FPS Cap
 ;(function()
 do
-    local fpsSection = Tabs.Settings:AddSection("Performance")
+    local fpsSection = Tabs.Utility:AddSection("Performance")
     local FPSUncapped = false
     local FPSCap      = 240
     local _setFPS = type(setfpscap) == "function" and setfpscap or nil
@@ -4636,8 +5431,12 @@ end)()
 
 ;(function()
 do
-    local appearanceSection = Tabs.Settings:AddSection("Appearance")
-    appearanceSection:AddSlider("UITransparency", {
+    local interfaceSection = Tabs.Settings:AddSection("Interface")
+    interfaceSection:AddKeybind("GUIToggleKey", {Title = "GUI Toggle", Default = "LeftControl", Callback = function()
+        local w = Fluent.Window
+        if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
+    end, ChangedCallback = function() end})
+    interfaceSection:AddSlider("UITransparency", {
         Title = "UI Transparency",
         Default = 0,
         Min = 0,
@@ -4737,4 +5536,4 @@ getgenv().qzxp_Cleanup = function()
     end)
 end
 
-end) -- top-level task.spawn
+end)
