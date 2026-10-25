@@ -1,14 +1,10 @@
--- CREDITS: S14X FOR SPAM AND ANIM FIX
---          EAGLE HUB FOR BASICALLY EVERYTHING
---          ANGELI FOR TRIGGERBOT
---          OXY FOR AUTOPARRY
--- Rewrite: 8 targeted fixes applied. See [FIX n] tags.
+-- CREDITS: S14X (spam/anim), EAGLE HUB, ANGELI (triggerbot), OXY (autoparry)
 
 local function GetSafeUIParent()
     return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 end
 
--- [[ VFX HOOK CLEANUP — prevent duplication on reload ]]
+-- VFX hooks — detach/restore on reload
 pcall(function()
     if getgenv().qzxp_VFXConns then
         for _, conn in ipairs(getgenv().qzxp_VFXConns) do
@@ -25,8 +21,6 @@ getgenv().qzxp_VFXConns = {}
 getgenv().qzxp_VFXHooked = {}
 getgenv().qzxp_VFXDisabled = {}
 
--- [FIX 8] Thread registry. Every long-running loop we spawn is tracked here
---         so qzxp_Cleanup can cancel them on reload.
 local _threads = {}
 local function spawnTracked(fn, ...)
     local t = task.spawn(fn, ...)
@@ -35,7 +29,6 @@ local function spawnTracked(fn, ...)
 end
 getgenv().qzxp_Threads = _threads
 
--- [FIX 3] Single RenderStepped dispatcher. Handlers run in registration order.
 local _renderHandlers = {}
 local _renderConn = nil
 local function addRenderHandler(fn, order)
@@ -59,41 +52,40 @@ end
 task.spawn(function()
 
 -- ============================================================
--- CUSTOM UI LIBRARY
+-- UI LIBRARY
 -- ============================================================
 local _UIS = game:GetService("UserInputService")
 local _HS  = game:GetService("HttpService")
 local _TS  = game:GetService("TweenService")
 
 local UITheme = {
-    Bg = Color3.fromRGB(15, 15, 18),
-    Sidebar = Color3.fromRGB(11, 11, 14),
-    Panel = Color3.fromRGB(22, 22, 27),
-    Row = Color3.fromRGB(26, 26, 31),
-    Border = Color3.fromRGB(46, 46, 56),
-    BorderDim = Color3.fromRGB(32, 32, 39),
-    Text = Color3.fromRGB(242, 242, 248),
-    TextDim = Color3.fromRGB(182, 182, 194),
-    TextMute = Color3.fromRGB(126, 126, 138),
+    Bg = Color3.fromRGB(15, 15, 15),
+    Sidebar = Color3.fromRGB(11, 11, 11),
+    Panel = Color3.fromRGB(15, 15, 15),
+    Row = Color3.fromRGB(15, 15, 15),
+    Border = Color3.fromRGB(55, 55, 55),
+    BorderDim = Color3.fromRGB(35, 35, 35),
+    Text = Color3.fromRGB(242, 242, 242),
+    TextDim = Color3.fromRGB(182, 182, 182),
+    TextMute = Color3.fromRGB(126, 126, 126),
     White = Color3.fromRGB(255, 255, 255),
     Black = Color3.fromRGB(0, 0, 0),
-    Off = Color3.fromRGB(52, 52, 60),
-    Hover = Color3.fromRGB(34, 34, 40),
-    GradTop = Color3.fromRGB(22, 22, 27),
-    GradBot = Color3.fromRGB(13, 13, 16),
-    RowTop = Color3.fromRGB(29, 29, 35),
-    RowBot = Color3.fromRGB(21, 21, 25),
-    BtnTop = Color3.fromRGB(34, 34, 41),
-    BtnBot = Color3.fromRGB(23, 23, 28),
+    Off = Color3.fromRGB(52, 52, 52),
+    Hover = Color3.fromRGB(28, 28, 28),
+    GradTop = Color3.fromRGB(15, 15, 15),
+    GradBot = Color3.fromRGB(15, 15, 15),
+    RowTop = Color3.fromRGB(15, 15, 15),
+    RowBot = Color3.fromRGB(15, 15, 15),
+    BtnTop = Color3.fromRGB(15, 15, 15),
+    BtnBot = Color3.fromRGB(15, 15, 15),
     KnobTop = Color3.fromRGB(255, 255, 255),
-    KnobBot = Color3.fromRGB(222, 222, 230),
-    OffTop = Color3.fromRGB(58, 58, 68),
-    OffBot = Color3.fromRGB(42, 42, 50),
+    KnobBot = Color3.fromRGB(255, 255, 255),
+    OffTop = Color3.fromRGB(52, 52, 52),
+    OffBot = Color3.fromRGB(52, 52, 52),
 }
 local FONT  = Enum.Font.GothamMedium
 local FONTB = Enum.Font.GothamBold
 local FONTM = Enum.Font.RobotoMono
-
 local TI_FAST = TweenInfo.new(0.14, Enum.EasingStyle.Quad,  Enum.EasingDirection.Out)
 local TI_MED  = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local function tween(o, ti, p) _TS:Create(o, ti, p):Play() end
@@ -110,10 +102,6 @@ local function addStroke(par, color, thick, trans)
 end
 local function addCorner(par, r) return mk("UICorner", {CornerRadius = UDim.new(0, r or 0)}, par) end
 local function addGrad(par, top, bottom, rot)
-    return mk("UIGradient", {Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, top or UITheme.GradTop),
-        ColorSequenceKeypoint.new(1, bottom or UITheme.GradBot),
-    }), Rotation = rot or 90}, par)
 end
 local function toKey(v)
     if typeof(v) == "EnumItem" then return v end
@@ -127,9 +115,6 @@ end
 local Fluent = {Options = {}, Window = nil}
 local Options = Fluent.Options
 
--- ============================================================
--- Notifications
--- ============================================================
 local _nGui, _nHolder, _nCount = nil, nil, 0
 local function ensureNotify()
     if _nGui and _nGui.Parent then return end
@@ -157,9 +142,6 @@ function Fluent:Notify(opts)
     task.delay(dur, function() if card and card.Parent then pcall(function() card:Destroy() end) end end)
 end
 
--- ============================================================
--- Section / Tab / Window
--- ============================================================
 local Tab, Section, Window, _openDropdown
 local function closeDropdown()
     if _openDropdown then pcall(function() _openDropdown:Destroy() end); _openDropdown = nil end
@@ -171,7 +153,7 @@ function Section:_row(h)
     local row = mk("Frame", {Size = UDim2.new(1, 0, 0, h or 36), BackgroundColor3 = UITheme.Row,
         BorderSizePixel = 0, LayoutOrder = self._rowN}, self._wrap)
     mk("Frame", {Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 0),
-        BackgroundColor3 = UITheme.BorderDim, BackgroundTransparency = 0.55, BorderSizePixel = 0}, row)
+        BackgroundColor3 = UITheme.Border, BackgroundTransparency = 0.4, BorderSizePixel = 0}, row)
     return row
 end
 function Section:_label(row, text)
@@ -184,21 +166,15 @@ function Section:AddToggle(id, opts)
     local switch = mk("Frame", {Size = UDim2.new(0, 40, 0, 22), Position = UDim2.new(1, -56, 0.5, -11),
         BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, ClipsDescendants = true}, row)
     addCorner(switch, 11); addStroke(switch, UITheme.Border, 1, 0.35)
-    local trackGrad = addGrad(switch, UITheme.OffTop, UITheme.OffBot, 90)
     local knob = mk("Frame", {Size = UDim2.new(0, 18, 0, 18), Position = UDim2.new(0, 2, 0.5, -9),
-        BackgroundColor3 = UITheme.Text, BorderSizePixel = 0}, switch)
-    addCorner(knob, 9); local knobGrad = addGrad(knob, UITheme.KnobTop, UITheme.KnobBot, 90)
+        BackgroundColor3 = UITheme.White, BorderSizePixel = 0}, switch)
+    addCorner(knob, 9)
     addStroke(knob, UITheme.Border, 1, 0.45)
     local click = mk("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = ""}, switch)
     local obj = {Value = not not opts.Default}
     local function apply(on, animate)
         local knobPos = on and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
-        trackGrad.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, on and UITheme.White or UITheme.OffTop),
-            ColorSequenceKeypoint.new(1, on and Color3.fromRGB(205, 205, 215) or UITheme.OffBot)})
-        knobGrad.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, on and Color3.fromRGB(255, 255, 255) or UITheme.KnobTop),
-            ColorSequenceKeypoint.new(1, on and Color3.fromRGB(226, 226, 234) or UITheme.KnobBot)})
+        switch.BackgroundColor3 = on and UITheme.White or UITheme.Off
         if animate then tween(knob, TI_MED, {Position = knobPos}) else knob.Position = knobPos end
     end
     local function set(v, animate)
@@ -292,7 +268,7 @@ function Section:AddDropdown(id, opts)
     end
     local function refresh() lbl.Text = display() end
     btn.MouseButton1Click:Connect(function()
-        if _openDropdown then closeDropdown() return end
+        if _openDropdown then closeDropdown() end
         local abs = btn.AbsolutePosition; local sz = btn.AbsoluteSize
         local h = math.min(#values * 26 + 6, 190)
         local panel = mk("ScrollingFrame", {Position = UDim2.fromOffset(abs.X, abs.Y + sz.Y + 4),
@@ -391,12 +367,8 @@ function Section:AddButton(opts)
     local btn = mk("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
         Font = FONT, TextSize = 12, TextColor3 = Color3.fromRGB(255, 255, 255),
         Text = opts.Title or "Button", AutoButtonColor = false}, bg)
-    btn.MouseEnter:Connect(function()
-        tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Hover})
-    end)
-    btn.MouseLeave:Connect(function()
-        tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Panel})
-    end)
+    btn.MouseEnter:Connect(function() tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Hover}) end)
+    btn.MouseLeave:Connect(function() tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Panel}) end)
     btn.MouseButton1Click:Connect(function() if opts.Callback then pcall(opts.Callback) end end)
     return btn
 end
@@ -472,7 +444,7 @@ function Fluent:CreateWindow(opts)
     addCorner(main, 14); addStroke(main, UITheme.Border, 1, 0.3); addGrad(main, UITheme.GradTop, UITheme.GradBot, 90)
     local titleBar = mk("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, main)
     addCorner(titleBar, 14)
-    local titleBarMask = mk("Frame", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 1, -14),
+    mk("Frame", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 1, -14),
         BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, titleBar)
     addGrad(titleBar, UITheme.RowTop, UITheme.Bg, 90)
     local dot = mk("Frame", {Size = UDim2.new(0, 6, 0, 6), Position = UDim2.new(0, 16, 0.5, -3),
@@ -489,6 +461,9 @@ function Fluent:CreateWindow(opts)
     local sidebar = mk("Frame", {Size = UDim2.new(0, 140, 1, -38), Position = UDim2.new(0, 0, 0, 38),
         BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, main)
     addGrad(sidebar, Color3.fromRGB(13, 13, 17), Color3.fromRGB(8, 8, 10), 90)
+    addCorner(sidebar, 14)
+    mk("Frame", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 0, 0),
+        BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, sidebar)
     local content = mk("Frame", {Size = UDim2.new(1, -140, 1, -38), Position = UDim2.new(0, 140, 0, 38),
         BackgroundColor3 = UITheme.Bg, BackgroundTransparency = 1, BorderSizePixel = 0}, main)
     local window = setmetatable({_gui = gui, _main = main, _sidebar = sidebar, _content = content, _tabs = {}, _active = nil}, Window)
@@ -515,9 +490,7 @@ function Fluent:CreateWindow(opts)
     return window
 end
 
--- ============================================================
--- SaveManager / InterfaceManager shims
--- ============================================================
+-- SaveManager / InterfaceManager
 local SaveManager = {}
 local InterfaceManager = {}
 function SaveManager:SetLibrary(lib) self.Library = lib end
@@ -550,21 +523,15 @@ function SaveManager:Save(name)
     end)
     Fluent:Notify({Title = "Config", Content = ok and ("Saved: " .. name) or "Save failed", Duration = 3})
 end
--- Load order: lower number loads first. Dependencies MUST come before dependents.
 local LOAD_PRIORITY = {
-    -- Inputs / sliders / dropdowns that other callbacks read
     ManualSword = 10, AvatarSaver = 10, LockTarget = 10,
     Accuracy    = 10, SpamRPS     = 10, FPSCap     = 10,
     CurveMode   = 10, HLR = 10, HLG = 10, HLB = 10,
-    -- Keybinds
     APKey = 20, SpamKey = 20, TBKey = 20,
     CursorKey = 20, LockKey = 20, GUIToggleKey = 20,
-    -- Toggles that consume the inputs above
     SkinToggle = 30, AvatarChanger = 30,
-    -- Heavy / stateful toggles last
     UnlockAllToggle = 40, ThunderDashToggle = 40,
 }
-
 function SaveManager:Load(name)
     local ok, contents = pcall(function()
         return readfile((self.folder or "qzxp/configs") .. "/" .. name .. ".json")
@@ -573,30 +540,24 @@ function SaveManager:Load(name)
         Fluent:Notify({Title = "Config", Content = "Not found: " .. name, Duration = 3})
         return
     end
-
     local ok2, data = pcall(function() return _HS:JSONDecode(contents) end)
     if not ok2 or type(data) ~= "table" then
         Fluent:Notify({Title = "Config", Content = "Invalid config", Duration = 3})
         return
     end
-
     local entries = {}
     for id, entry in pairs(data) do
         local opt = Fluent.Options[id]
         if opt and opt.SetValue and type(entry) == "table" and entry.v ~= nil then
-            table.insert(entries, {id = id, entry = entry,
-                priority = LOAD_PRIORITY[id] or 50})
+            table.insert(entries, {id = id, entry = entry, priority = LOAD_PRIORITY[id] or 50})
         end
     end
-
     table.sort(entries, function(a, b)
         if a.priority ~= b.priority then return a.priority < b.priority end
         return a.id < b.id
     end)
-
     local wasSuppressed = getgenv().qzxp_suppressNotify
     getgenv().qzxp_suppressNotify = true
-
     local applied, failed = 0, 0
     for _, item in ipairs(entries) do
         local opt = Fluent.Options[item.id]
@@ -607,30 +568,54 @@ function SaveManager:Load(name)
                 if ok3 and e then v = e end
             end
         end
-        if pcall(function() opt:SetValue(v) end) then
-            applied += 1
-        else
-            failed += 1
-        end
+        if pcall(function() opt:SetValue(v) end) then applied += 1 else failed += 1 end
     end
-
     getgenv().qzxp_suppressNotify = wasSuppressed
-
     Fluent:Notify({
         Title   = "Config",
         Content = ("Loaded: %s (%d applied%s)"):format(
-            name, applied,
-            failed > 0 and (", " .. failed .. " failed") or ""),
+            name, applied, failed > 0 and (", " .. failed .. " failed") or ""),
         Duration = 3,
     })
 end
 function SaveManager:BuildConfigSection(tab)
     local s = tab:AddSection("Config")
+    local function listConfigs()
+        local list = {}
+        local folder = self.folder or "qzxp/configs"
+        pcall(function()
+            if isfolder and isfolder(folder) then
+                for _, f in ipairs(listfiles(folder)) do
+                    local n = f:match("([^/\\]+)%.json$")
+                    if n then table.insert(list, n) end
+                end
+            end
+        end)
+        table.sort(list)
+        if #list == 0 then list = {"(no configs)"} end
+        return list
+    end
+    local cfgDropdown
+    cfgDropdown = s:AddDropdown("__cfglst", {Title = "Saved Configs", Values = listConfigs(), Default = "(no configs)", Multi = false, Callback = function(v)
+        if v and v ~= "(no configs)" and Options.__cfgname then
+            Options.__cfgname:SetValue(v)
+        end
+    end})
+    s:AddButton({Title = "Refresh List", Callback = function()
+        local new = listConfigs()
+        if cfgDropdown and cfgDropdown.SetValues then cfgDropdown:SetValues(new) end
+        if new[1] and new[1] ~= "(no configs)" and Options.__cfgname then
+            Options.__cfgname:SetValue(new[1])
+        end
+    end})
     s:AddInput("__cfgname", {Title = "Config Name", Default = "default", Placeholder = "name"})
     s:AddButton({Title = "Save", Callback = function()
         local n = Fluent.Options.__cfgname and Fluent.Options.__cfgname.Value or "default"
         if n == "" then n = "default" end
         self:Save(n)
+        if cfgDropdown and cfgDropdown.SetValues then
+            cfgDropdown:SetValues(listConfigs())
+        end
     end})
     s:AddButton({Title = "Load", Callback = function()
         local n = Fluent.Options.__cfgname and Fluent.Options.__cfgname.Value or "default"
@@ -672,11 +657,33 @@ function InterfaceManager:SetLibrary(lib) self.Library = lib end
 function InterfaceManager:SetFolder(f) self.folder = f end
 function InterfaceManager:BuildInterfaceSection(tab) end
 
--- ============================================================
--- Window & Tabs
--- ============================================================
 local Window = Fluent:CreateWindow({Title = "qzxp", TabWidth = 130,
     Size = UDim2.fromOffset(750, 450), MinimizeKey = Enum.KeyCode.LeftControl})
+local _ui = { value = 0, connected = false }
+function _ui.getOrStoreBase(obj)
+    local b = obj:GetAttribute("qzxp_baseBgTransparency")
+    if b == nil then
+        b = obj.BackgroundTransparency
+        obj:SetAttribute("qzxp_baseBgTransparency", b)
+    end
+    return b
+end
+function _ui.applyObj(obj)
+    if obj:IsA("Frame") or obj:IsA("ScrollingFrame") or obj:IsA("TextButton") then
+        local b = _ui.getOrStoreBase(obj)
+        obj.BackgroundTransparency = 1 - (1 - b) * (1 - _ui.value)
+    end
+end
+function _ui.apply(t)
+    _ui.value = t
+    if not Window or not Window._gui then return end
+    for _, obj in ipairs(Window._gui:GetDescendants()) do _ui.applyObj(obj) end
+    if not _ui.connected then
+        _ui.connected = true
+        Window._gui.DescendantAdded:Connect(_ui.applyObj)
+    end
+end
+getgenv().qzxp_applyUITransparency = _ui.apply
 local Tabs = {
     Main = Window:AddTab({Title = "Autoparry"}), Detection = Window:AddTab({Title = "Detections"}),
     Spam = Window:AddTab({Title = "Spam"}), Trigger = Window:AddTab({Title = "Triggerbot"}),
@@ -695,9 +702,17 @@ local HttpService       = game:GetService("HttpService")
 local LocalPlayer       = Players.LocalPlayer
 local Camera            = Workspace.CurrentCamera
 
-local AP_On, TB_On, Spam_On = false, false, false
-local frameCount = 0
+local function isRealPlayerModel(model)
+    if not model then return false end
+    return Players:GetPlayerFromCharacter(model) ~= nil
+end
 
+local AP_On, TB_On, Spam_On = false, false, false
+local AutoSpam_On = false
+local Parries = 0
+local ClashingThreshold = 1
+local InfinityBallRaw = false
+local frameCount = 0
 local Stats_Network = Stats.Network
 local Stats_DataPing = Stats_Network and Stats_Network.ServerStatsItem and Stats_Network.ServerStatsItem["Data Ping"]
 
@@ -706,13 +721,10 @@ local function notify(cfg)
     task.defer(function() pcall(function() Fluent:Notify(cfg) end) end)
 end
 
--- ============================================================
--- [FIX 4] ANTICHEAT BYPASS — retry-capable token finder
--- ============================================================
+-- Anticheat token finder
 local _token, _tokenFound = nil, false
 local _tokenAttempts = 0
 local MAX_TOKEN_ATTEMPTS = 8
-
 local function findToken()
     if _tokenFound then return true end
     pcall(function()
@@ -734,7 +746,6 @@ local function findToken()
     end)
     return _tokenFound
 end
-
 local function scheduleTokenRetry()
     if _tokenFound then return end
     if _tokenAttempts >= MAX_TOKEN_ATTEMPTS then
@@ -750,7 +761,6 @@ local function scheduleTokenRetry()
         end
     end)
 end
-
 task.defer(function()
     if findToken() then
         notify({Title = "AC", Content = "Bypassed", Duration = 4})
@@ -759,7 +769,6 @@ task.defer(function()
     end
 end)
 
--- [FIX 6] _tokenize: empty token guard, pcall around _token call
 local _tokenBuf = buffer.create(16)
 local function _tokenize(uid)
     if not _tokenFound or type(_token) ~= "function" then return "" end
@@ -776,9 +785,6 @@ local function _tokenize(uid)
     return buffer.readstring(_tokenBuf, 0, n)
 end
 
--- ============================================================
--- REMOTE HOOKER
--- ============================================================
 local _remote, _args = nil, nil
 pcall(function()
     local mt = getrawmetatable(game)
@@ -805,12 +811,11 @@ pcall(function()
     setreadonly(mt, true)
 end)
 
--- ============================================================
--- SWORD REGISTRY
--- ============================================================
 local SwordAPI = ReplicatedStorage:WaitForChild("Shared", 9e9):WaitForChild("SwordAPI", 9e9)
 local swordModuleInstance = ReplicatedStorage:WaitForChild("Shared", 9e9):WaitForChild("ReplicatedInstances", 9e9):WaitForChild("Swords", 9e9)
 local swordModule = require(swordModuleInstance)
+local swordApi = require(SwordAPI)
+local animationController = require(ReplicatedStorage:WaitForChild("Controllers"):WaitForChild("AnimationController"))
 
 local SwordRegistry = {}
 local SwordRegistryReverse = {}
@@ -863,94 +868,101 @@ local function resolve(input)
     return input
 end
 
--- ============================================================
--- ANIMATION SYSTEM
--- ============================================================
+-- Animation system
 local AnimFix_AP, AnimFix_TB, AnimFix_Spam = true, true, true
 local AnimFix_Cache = {}
 local ANIM_FAIL = false
-
-local function GetParryAnimation(swordName)
-    if not swordName or swordName == "" then
-        return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
-    end
-    local cached = AnimFix_Cache[swordName]
-    if cached ~= nil then
-        if cached == ANIM_FAIL then
-            return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
-        end
-        return cached
-    end
-    local ok, swordData = pcall(function()
-        return ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(swordName)
-    end)
-    if not ok or not swordData or type(swordData) ~= "table" or not swordData.AnimationType then
-        AnimFix_Cache[swordName] = ANIM_FAIL
-        return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
-    end
-    for _, obj in pairs(SwordAPI.Collection:GetChildren()) do
-        if obj.Name == swordData.AnimationType then
-            local anim = obj:FindFirstChild("GrabParry") or obj:FindFirstChild("Grab")
-            if anim then AnimFix_Cache[swordName] = anim return anim end
-        end
-    end
-    AnimFix_Cache[swordName] = ANIM_FAIL
-    return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
-end
+local Bypass_Cd = false
+local AnimLastPlayed = 0
 
 local function PlayParryAnimation()
-    local char = LocalPlayer.Character; if not char then return end
-    local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
-    local animator = humanoid:FindFirstChildOfClass("Animator"); if not animator then return end
-    local animation = GetParryAnimation(char:GetAttribute("CurrentlyEquippedSword")); if not animation then return end
-    for _, track in pairs(animator:GetPlayingAnimationTracks()) do
-        if track.Name == "GrabParry" or track.Name == "Grab" then
-            pcall(function() track.TimePosition = 0 end); pcall(function() track:Stop(0.1) end)
-        elseif track.Name == "SuccessParry" or track.Name == "Success" then
-            pcall(function() track:Stop(0.1) end)
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+    if not animator then return end
+    local attribute = character:GetAttribute("CurrentlyEquippedSword")
+                   or LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+    if not attribute then return end
+    local swordInfo = swordModule:GetSword(attribute)
+    if not swordInfo or character ~= LocalPlayer.Character then return end
+    for _, track in animationController:GetPlayingAnimationTracks(animator) do
+        if track:GetAttribute("GrabParry") or track:GetAttribute("Parry")
+            or track.Name == "GrabParry" or track.Name == "Grab"
+            or track.Name == "Parry"
+            or track.Name == "SuccessParry" or track.Name == "Success" then
+            track:Stop(track:GetAttribute("StopFadeTime") or 0.1)
         end
     end
-    local ok, newTrack = pcall(function() return animator:LoadAnimation(animation) end)
-    if ok and newTrack then
-        pcall(function()
-            newTrack:Play(newTrack:GetAttribute("PlayFadeTime") or 0,
-                newTrack:GetAttribute("PlayWeight") or 1, newTrack:GetAttribute("PlaySpeed") or 1)
-        end)
+    for _, animation in swordApi:GetAnimations(character, {"Parry", "GrabParry"}, swordInfo.AnimationType, swordInfo.SwordType) do
+        local track = animationController:LoadAnimation(animator, animation, true)
+        local speed = track:GetAttribute("PlaySpeed") or 1
+        track:Play(
+            track:GetAttribute("PlayFadeTime") or 0.1,
+            track:GetAttribute("PlayWeight") or 1,
+            speed
+        )
+        character:SetAttribute("ParryTime", math.max(
+            character:GetAttribute("ParryTime") or 0,
+            track.Length == 0 and 1 or (track.Length - track.TimePosition) * speed
+        ))
+    end
+end
+local function PlaySingleParryAnimation()
+    if os.clock() - AnimLastPlayed >= 1 or Bypass_Cd then
+        AnimLastPlayed = os.clock()
+        Bypass_Cd = false
+        PlayParryAnimation()
     end
 end
 
-local SingleAnimLast = 0
-local function PlaySingleParryAnimation()
-    if os.clock() - SingleAnimLast < 0.1 then return end
-    SingleAnimLast = os.clock()
-    PlayParryAnimation()
+-- Block keybind detection (for game-native parry animation)
+local Block_Keybind
+do
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+        if not pg then return end
+        local settings = pg:FindFirstChild("Settings")
+        if not settings then return end
+        local outer = settings:FindFirstChild("Frame")
+        if not outer then return end
+        local frame = outer:FindFirstChild("Frame")
+        if not frame then return end
+        local bind = frame:FindFirstChild("Keybinds/Block")
+        if not bind then return end
+        for i = 1, 3 do
+            local kb = bind:FindFirstChild("Keybind" .. i)
+            local tb = kb and kb:FindFirstChild("TextBox")
+            if tb and type(tb.Text) == "string" and tb.Text ~= "" then
+                Block_Keybind = tb.Text
+                break
+            end
+        end
+    end)
+    if not Block_Keybind then
+        warn("[qzxp] block keybind not found — spam animation will fall back to script-driven playback")
+    end
 end
-
+local function Animation_Fix()
+    if not Block_Keybind or type(VirtualInputManager) ~= "Instance" then
+        PlayParryAnimation()
+        return
+    end
+    local key = Enum.KeyCode[Block_Keybind] or Block_Keybind
+    local oldId = getthreadidentity and getthreadidentity() or 8
+    if oldId ~= 8 and setthreadidentity then setthreadidentity(8) end
+    local ok = pcall(function()
+        VirtualInputManager:SendKeyEvent(true,  key, false, game)
+        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end)
+    if oldId ~= 8 and setthreadidentity then setthreadidentity(oldId) end
+    if not ok then
+        PlayParryAnimation()
+    end
+end
 local SpamAnimRate, SpamAnimLastPlayed, SpamAnimBypass = 100, 0, false
 local SpamAnimDelayLimit, SpamAnimSpammingMode, SpamAnimParries = 0, false, 0
 local SpamAnimMatchRPS = false
-
-local function SpamParryAnimation()
-    if os.clock() - SpamAnimDelayLimit >= (1 / SpamAnimRate) then
-        SpamAnimDelayLimit = os.clock()
-        if (os.clock() - SpamAnimLastPlayed) >= 0.1 or SpamAnimBypass or SpamAnimSpammingMode then
-            SpamAnimLastPlayed = os.clock(); SpamAnimBypass = false
-            PlayParryAnimation()
-        end
-    end
-end
-
-spawnTracked(function()
-    while true do SpamAnimSpammingMode = (SpamAnimParries > 1); task.wait(0.1) end
-end)
-
 local _tbLastFire, _apLastFire = 0, 0
-local function _shouldTouchParryAnim()
-    if Spam_On and AnimFix_Spam then return true end
-    if TB_On and AnimFix_TB then return (os.clock() - _tbLastFire) < 0.5 end
-    if AP_On and AnimFix_AP then return (os.clock() - _apLastFire) < 0.5 end
-    return false
-end
 local function StopParryGrabTracks()
     local char = LocalPlayer.Character; if not char then return end
     local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
@@ -961,44 +973,25 @@ local function StopParryGrabTracks()
         end
     end
 end
-
 pcall(function()
     ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
-        if SpamAnimParries < 5 then
-            SpamAnimParries += 1
-            task.delay(0.05, function() if SpamAnimParries > 0 then SpamAnimParries -= 1 end end)
-        end
-        SpamAnimBypass = true
-        if not _shouldTouchParryAnim() then return end
-        StopParryGrabTracks()
-    end)
-end)
-pcall(function()
-    ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function()
-        if not _shouldTouchParryAnim() then return end
+        Bypass_Cd = true
         StopParryGrabTracks()
     end)
 end)
 
--- ============================================================
--- BALL SYSTEM (event-driven cache)
--- ============================================================
+-- Ball cache
 local _ballCache = {}
 local _ballCacheDirty = true
 local _ballCanCollideSet = setmetatable({}, {__mode = "k"})
 local function _markBallsDirty() _ballCacheDirty = true end
-
--- [RESPAWN RESET] A ball "respawns" whenever its realBall attribute
--- flips to true (fresh instance, or a pooled Instance being reused).
--- Every subsystem that keeps per-ball state registers a handler here.
 local _ballRespawnHandlers = {}
 local function _onBallRespawn(ball)
-    _ballCacheDirty = true                -- force cache rebuild
+    _ballCacheDirty = true
     for i = 1, #_ballRespawnHandlers do
         pcall(_ballRespawnHandlers[i], ball)
     end
 end
-
 spawnTracked(function()
     local function watchFolder(folder)
         if not folder then return end
@@ -1013,7 +1006,6 @@ spawnTracked(function()
         folder.ChildAdded:Connect(function(child)
             _markBallsDirty()
             hookRealBall(child)
-            -- Already active at spawn time -> fire reset immediately.
             if child:GetAttribute('realBall') then _onBallRespawn(child) end
         end)
         folder.ChildRemoved:Connect(_markBallsDirty)
@@ -1028,7 +1020,6 @@ spawnTracked(function()
     watchFolder(Workspace:WaitForChild('Balls', 9e9))
     watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
 end)
-
 local function _scanBallsInto(folder, startN)
     if not folder then return startN end
     local n = startN
@@ -1059,9 +1050,6 @@ local function getBall()
     return _ballCache[1]
 end
 local function getAllBalls() refreshBallCache(); return _ballCache end
--- Returns all balls currently targeting the local player. Reuses the
--- passed table if given, so callers can keep a scratch buffer and avoid
--- allocating every frame.
 local function getTargetingBalls(out)
     refreshBallCache()
     out = out or {}
@@ -1075,15 +1063,12 @@ local function getTargetingBalls(out)
     return out
 end
 
--- ============================================================
--- [FIX 1] PING — rolling minimum over last N samples
--- ============================================================
+-- Ping (rolling minimum)
 local PING_SAMPLES = 12
 local _pingRing = {}
 local _pingRingN = 0
 local _pingRingHead = 0
 local _pingTime = 0
-
 local function getPing()
     local n = tick()
     if (n - _pingTime) > 0.1 then
@@ -1105,10 +1090,7 @@ local function getPing()
     return m
 end
 
--- ============================================================
--- CURVE DETECTION
--- ============================================================
--- Per-ball curve state. Weak-keyed by ball so destroyed balls don't leak.
+-- Curve detection
 local CurveState = setmetatable({}, {__mode = "k"})
 local function _newCurveState()
     return {
@@ -1125,11 +1107,9 @@ end
 local function _resetCurveState(ball)
     if ball then CurveState[ball] = _newCurveState() end
 end
-
 table.insert(_ballRespawnHandlers, function(ball)
     pcall(_resetCurveState, ball)
 end)
-
 local lastTornadoCheck, tornadoActive = 0, false
 local function checkTornadoActive(ball)
     local now = os.clock()
@@ -1149,7 +1129,6 @@ local function checkTornadoActive(ball)
     tornadoActive = false
     return false
 end
-
 local function isCurved(ball)
     ball = ball or getBall()
     if not ball then return false end
@@ -1176,15 +1155,12 @@ local function isCurved(ball)
     local rt = dist / spd - ping
     local st = math.min(spd / 100, 40)
     local bdt = 15 - math.min(dist / 1000, 15) + st
-
     local head = (CP.__prev_vel_head % 4) + 1
     CP.__prev_vel[head] = vel
     CP.__prev_vel_head = head
     if CP.__prev_vel_n < 4 then CP.__prev_vel_n = CP.__prev_vel_n + 1 end
-
     if ball:FindFirstChild('AeroDynamicSlashVFX') then CP.__tornado_time = tick() end
     if checkTornadoActive(ball) then return true end
-
     if spd > 160 and rt > (getPing() / 10) then
         if spd < 300 then bdt = math.max(bdt - 15, 15)
         elseif spd < 600 then bdt = math.max(bdt - 16, 16)
@@ -1193,7 +1169,6 @@ local function isCurved(ball)
         else bdt = math.max(bdt - 20, 20) end
     end
     if dist < bdt then return false end
-
     if spd < 300 then
         if (tick() - (CP.__curving or 0)) < (rt / 1.2) then return true end
     elseif spd < 450 then
@@ -1203,12 +1178,10 @@ local function isCurved(ball)
     else
         if (tick() - (CP.__curving or 0)) < (rt / 1.5) then return true end
     end
-
     local dthr = 0.5 - ping
     local cd = math.clamp(dot, -1, 1)
     local rad = math.deg(math.asin(cd))
     CP.__lerp_radians = (CP.__lerp_radians or 0) + (rad - (CP.__lerp_radians or 0)) * 0.8
-
     if spd < 300 then
         if CP.__lerp_radians < 0.02 then CP.__last_warping = tick() end
         if (tick() - (CP.__last_warping or 0)) < (rt / 1.19) then return true end
@@ -1216,7 +1189,6 @@ local function isCurved(ball)
         if CP.__lerp_radians < 0.018 then CP.__last_warping = tick() end
         if (tick() - (CP.__last_warping or 0)) < (rt / 1.5) then return true end
     end
-
     if CP.__prev_vel_n == 4 then
         local pv1 = CP.__prev_vel[((CP.__prev_vel_head - 1 - 1) % 4) + 1]
         local pv2 = CP.__prev_vel[((CP.__prev_vel_head - 1 - 2) % 4) + 1]
@@ -1226,7 +1198,6 @@ local function isCurved(ball)
             if (dot - dir:Dot(d1)) < dthr or (dot - dir:Dot(d2)) < dthr then return true end
         end
     end
-
     local hz = Vector3.new(pos.X - bpos.X, 0, pos.Z - bpos.Z)
     if hz.Magnitude > 0 then hz = hz.Unit end
     local away = -hz
@@ -1237,7 +1208,6 @@ local function isCurved(ball)
     end
     return dot < (dthr - 0.25)
 end
-
 local _curveCache, _curveCacheTime = {}, 0
 local CURVE_INTERVAL = 1 / 30
 local function isCurvedCached(ball)
@@ -1249,16 +1219,10 @@ local function isCurvedCached(ball)
     _curveCache[ball] = result
     return result
 end
-
 local function horizDist(a, b)
     local dx, dz = a.X - b.X, a.Z - b.Z
     return math.sqrt(dx * dx + dz * dz)
 end
-
--- Ray-cylinder closest-point-of-approach. Answers the question AP actually
--- needs: "will this ball's current trajectory pass near me soon?"
--- Robust to a ball whose velocity is momentarily tangential (mid-curve):
--- if the projected path still clips the player, this returns true.
 local function isApproachingPlayer(ball, playerPos, hitRadius, lookahead)
     if not ball or not ball.Parent then return false end
     local z = ball:FindFirstChild("zoomies")
@@ -1266,13 +1230,9 @@ local function isApproachingPlayer(ball, playerPos, hitRadius, lookahead)
     local vel = z.VectorVelocity
     local spd = vel.Magnitude
     if spd < 5 then return false end
-
     local bpos = ball.Position
     local velH = Vector3.new(vel.X, 0, vel.Z)
     local spdH = velH.Magnitude
-
-    -- Nearly-straight-down drop: horizontal projection is degenerate.
-    -- Fall back to full 3D so we don't wrongly reject an overhead ball.
     if spdH < 1 then
         local toPlayer = playerPos - bpos
         local t = toPlayer:Dot(vel) / (spd * spd)
@@ -1280,20 +1240,15 @@ local function isApproachingPlayer(ball, playerPos, hitRadius, lookahead)
         local closest = bpos + vel * t
         return (closest - playerPos).Magnitude <= (hitRadius or 8)
     end
-
     local toH = Vector3.new(playerPos.X - bpos.X, 0, playerPos.Z - bpos.Z)
     local t = toH:Dot(velH) / (spdH * spdH)
     if t < 0 or t > (lookahead or 0.4) then return false end
-
     local cx = bpos.X + velH.X * t
     local cz = bpos.Z + velH.Z * t
     return horizDist(Vector3.new(cx, 0, cz), playerPos) <= (hitRadius or 8)
 end
 
--- ============================================================
--- [FIX 7] TARGET TRACKING — reset curve buffers on ball change
--- ============================================================
--- Per-ball sender tracking. Weak-keyed by ball so destroyed balls don't leak.
+-- Sender tracking
 local Sender = setmetatable({}, {__mode = "k"})
 local function trackBall(ball)
     if not ball then return end
@@ -1316,6 +1271,7 @@ end
 
 local function findPart(name)
     if not name or name == "" or name == LocalPlayer.Name then return nil end
+    if not Players:FindFirstChild(name) then return nil end
     local af = Workspace:FindFirstChild("Alive")
     if af then local c = af:FindFirstChild(name); if c then return c.PrimaryPart or c:FindFirstChild("HumanoidRootPart") end end
     local p = Players:FindFirstChild(name)
@@ -1325,16 +1281,8 @@ end
 local LockEnabled, LockTarget = false, "None"
 local HLEnabled, HLColor = false, Color3.fromRGB(255, 60, 60)
 
--- ============================================================
--- LOCK INDICATOR — corner brackets drawn around the locked player.
--- Replaces the old Highlight instance entirely. Pure screen-space
--- Frames in a ScreenGui; nothing touches the world.
--- ============================================================
-local LockIndicator = {
-    gui   = nil,
-    lines = {},   -- 8 frames: 4 corners x (horizontal + vertical)
-}
-
+-- Lock indicator (corner brackets)
+local LockIndicator = { gui = nil, lines = {} }
 local function ensureLockIndicator()
     if LockIndicator.gui and LockIndicator.gui.Parent then return end
     LockIndicator.gui = nil
@@ -1356,7 +1304,6 @@ local function ensureLockIndicator()
         LockIndicator.lines[i] = f
     end
 end
-
 local function hideLockIndicator()
     if not LockIndicator.gui then return end
     for i = 1, 8 do
@@ -1364,37 +1311,18 @@ local function hideLockIndicator()
         if f then f.Visible = false end
     end
 end
-
 local function drawLockIndicator()
-    if not HLEnabled or LockTarget == "None" then
-        hideLockIndicator()
-        return
-    end
+    if not HLEnabled or LockTarget == "None" then hideLockIndicator(); return end
     local part = findPart(LockTarget)
-    if not part or not part.Parent then
-        hideLockIndicator()
-        return
-    end
+    if not part or not part.Parent then hideLockIndicator(); return end
     local char = part.Parent
-    if not char or not char:IsA("Model") then
-        hideLockIndicator()
-        return
-    end
-
-    -- Get the character's real 3D bounding box (includes accessories,
-    -- hair, arms, feet — everything visibly attached).
+    if not char or not char:IsA("Model") then hideLockIndicator(); return end
     local ok, cf, size = pcall(function()
         local c, s = char:GetBoundingBox()
         return c, s
     end)
-    if not ok or not cf or not size then
-        hideLockIndicator()
-        return
-    end
-
+    if not ok or not cf or not size then hideLockIndicator(); return end
     local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
-
-    -- Project all 8 corners to screen and take the 2D AABB.
     local minX, minY = math.huge, math.huge
     local maxX, maxY = -math.huge, -math.huge
     local visibleCorners = 0
@@ -1413,67 +1341,40 @@ local function drawLockIndicator()
             end
         end
     end
-
-    -- Need at least a couple of corners to make a sensible box.
-    if visibleCorners < 2 then
-        hideLockIndicator()
-        return
-    end
-
-    -- If the box is absurdly large (character right on top of the camera,
-    -- or a giant sword VFX parented to the model), cap it so we don't draw
-    -- off-screen brackets.
+    if visibleCorners < 2 then hideLockIndicator(); return end
     local vp = Camera.ViewportSize
-    if (maxX - minX) > vp.X * 3 or (maxY - minY) > vp.Y * 3 then
-        hideLockIndicator()
-        return
-    end
-
-    -- Small padding so brackets sit just outside the model's silhouette.
+    if (maxX - minX) > vp.X * 3 or (maxY - minY) > vp.Y * 3 then hideLockIndicator(); return end
     local padX = (maxX - minX) * 0.06 + 2
     local padY = (maxY - minY) * 0.06 + 2
     minX -= padX; maxX += padX
     minY -= padY; maxY += padY
-
     local w = maxX - minX
     local h = maxY - minY
     local cornerLen = math.min(w, h) * 0.22
     local t = 2
-
     ensureLockIndicator()
     local L = LockIndicator.lines
-
-    -- Top-left
     L[1].Position = UDim2.fromOffset(minX, minY)
     L[1].Size     = UDim2.fromOffset(cornerLen, t)
     L[2].Position = UDim2.fromOffset(minX, minY)
     L[2].Size     = UDim2.fromOffset(t, cornerLen)
-
-    -- Top-right
     L[3].Position = UDim2.fromOffset(maxX - cornerLen, minY)
     L[3].Size     = UDim2.fromOffset(cornerLen, t)
     L[4].Position = UDim2.fromOffset(maxX - t, minY)
     L[4].Size     = UDim2.fromOffset(t, cornerLen)
-
-    -- Bottom-right
     L[5].Position = UDim2.fromOffset(maxX - cornerLen, maxY - t)
     L[5].Size     = UDim2.fromOffset(cornerLen, t)
     L[6].Position = UDim2.fromOffset(maxX - t, maxY - cornerLen)
     L[6].Size     = UDim2.fromOffset(t, cornerLen)
-
-    -- Bottom-left
     L[7].Position = UDim2.fromOffset(minX, maxY - t)
     L[7].Size     = UDim2.fromOffset(cornerLen, t)
     L[8].Position = UDim2.fromOffset(minX, maxY - cornerLen)
     L[8].Size     = UDim2.fromOffset(t, cornerLen)
-
     for i = 1, 8 do
         L[i].Visible          = true
         L[i].BackgroundColor3 = HLColor
     end
 end
-
-addRenderHandler(drawLockIndicator, 7)
 
 local function closestToCursor()
     local ml; pcall(function() ml = UserInputService:GetMouseLocation() end)
@@ -1482,7 +1383,7 @@ local function closestToCursor()
     local af = Workspace:FindFirstChild("Alive")
     if af then
         for _, v in pairs(af:GetChildren()) do
-            if v ~= LocalPlayer.Character and v.PrimaryPart then
+            if v ~= LocalPlayer.Character and v.PrimaryPart and isRealPlayerModel(v) then
                 local sp, on = Camera:WorldToScreenPoint(v.PrimaryPart.Position)
                 if on then local d = (Vector2.new(sp.X, sp.Y) - c).Magnitude; if d < best then best = d; bp = v.Name end end
             end
@@ -1515,15 +1416,12 @@ local function syncLockDD()
     end) end)
 end
 
--- ============================================================
--- CURVE CFRAME
--- ============================================================
+-- Curve CFrame
 local CURVES = {"Camera", "Dot", "Nearest", "Random", "Accel", "Backwards", "Slow", "High", "Normal", "Speed", "Down", "Left", "Right"}
 local CurveMode = "Camera"
 local lastCFCalcFrame, cachedCF = 0, nil
 local _frameBlockOk = nil
 local _frameEd, _frameEdFrame = nil, 0
-
 local function IsBlockLegit()
     local c = LocalPlayer.Character
     if not c or not c.Parent then return false end
@@ -1539,7 +1437,6 @@ local function IsBlockLegit()
     if lobbyParry and LocalPlayer:GetAttribute("InLobbyParryCooldown") then return false end
     return true
 end
-
 local _cachedCFBall = nil
 local function getCurveCF(ballArg)
     if cachedCF and frameCount == lastCFCalcFrame and _cachedCFBall == ballArg then return cachedCF end
@@ -1561,6 +1458,7 @@ local function getCurveCF(ballArg)
         local af = Workspace:FindFirstChild("Alive")
         local function chk(m)
             if m == LocalPlayer.Character or not m.PrimaryPart then return end
+            if not isRealPlayerModel(m) then return end
             local p = m.PrimaryPart.Position
             local sp, on = Camera:WorldToScreenPoint(p)
             if on then local d = (Vector2.new(sp.X, sp.Y) - c).Magnitude; if d < bs then bs = d; st2 = m.PrimaryPart end end
@@ -1598,24 +1496,11 @@ local function getCurveCF(ballArg)
     return cachedCF
 end
 
--- ============================================================
--- REMOTE FIRE
--- ============================================================
--- [[ GLOBAL AP/TB LOCKOUT — ported from angeli ]]
--- After any successful AP or TB fire, ALL AP/TB fires are blocked until the
--- parried ball's `target` attribute no longer equals the local player, OR
--- 1.0 second elapses (hard timeout). This replaces the old per-ball
--- `parryLockouts` / `firedForCycle` trackers so the two systems can't clash.
---
--- Allocation notes:
---   * at most ONE connection is alive at any time (_apLockedConn)
---   * no per-ball tables that grow with ball count
---   * isAPLocked() is allocation-free (reads 2 locals + os.clock())
+-- Remote fire
 local _apLocked      = false
 local _apLockedUntil = 0
 local _apLockedBall  = nil
 local _apLockedConn  = nil
-
 local function clearAPLockout()
     _apLocked      = false
     _apLockedUntil = 0
@@ -1625,7 +1510,6 @@ local function clearAPLockout()
         _apLockedConn = nil
     end
 end
-
 local function setAPLockout(ball)
     clearAPLockout()
     _apLocked      = true
@@ -1633,13 +1517,10 @@ local function setAPLockout(ball)
     _apLockedBall  = ball
     if ball then
         _apLockedConn = ball:GetAttributeChangedSignal('target'):Connect(function()
-            if ball:GetAttribute('target') ~= _lpName then
-                clearAPLockout()
-            end
+            if ball:GetAttribute('target') ~= _lpName then clearAPLockout() end
         end)
     end
 end
-
 local function isAPLocked()
     if not _apLocked then return false end
     if os.clock() >= _apLockedUntil then
@@ -1648,7 +1529,6 @@ local function isAPLocked()
     end
     return true
 end
-
 local function fireRemote(ball)
     if not ball or not ball.Parent then return false end
     if not _remote or not _args or not _tokenFound then return false end
@@ -1681,25 +1561,11 @@ local function fireRemote(ball)
         _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
     end)
     if not ok then return false end
-    -- Lockout is NOT set here. Callers (tryAPForBall / tryTBForBall) call
-    -- setAPLockout() after a successful fire. Spam deliberately skips it.
     return true
 end
 
--- ============================================================
--- AUTOPARRY
--- ============================================================
 local AP_Acc, AP_Div = 50, 1.1
 local RandAcc, AutoAbility = false, false
-
--- Shared parry-range calculation. Used by both the AP engine and the
--- range visualizer so the drawn ring always matches what AP actually uses.
---
--- Time-to-impact formulation. Equivalent trigger condition:
---   tti           = dist / max(spd, 1)
---   effective_tti = tti - ping/1000 - 0.03
---   fire when effective_tti <= reaction
--- The returned value is the distance at which that condition becomes true.
 local function computeTriggerDist(spd, ping, curved, acc)
     local reaction = 0.10 + ((acc or 50) - 1) * (0.08 / 99)
     if curved then reaction = reaction * 1.25 end
@@ -1707,7 +1573,6 @@ local function computeTriggerDist(spd, ping, curved, acc)
 end
 local function updDiv() AP_Div = 0.7 + (AP_Acc - 1) * (0.9 / 99) end
 updDiv()
-
 spawnTracked(function()
     while task.wait(1) do
         if RandAcc then
@@ -1722,19 +1587,15 @@ end)
 
 local InfOn, DSOn, THOn, SFOn = false, false, false, false
 local InfDet, DSDet, THDet, SFDet = false, false, false, false
-
+local function isInfinityActive()      return InfOn end
+local function isDeathSlashActive()    return DSOn end
+local function isTimeHoleActive()      return THOn end
+local function isSlashesOfFuryActive() return SFOn end
 pcall(function()
-    -- Death Slash: FlyteBB only tracks the event when the activating
-    -- player is the local player. The old version ignored the player
-    -- argument, so any player's DeathBall toggled DSOn for us.
     ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(who, on)
         if who ~= LocalPlayer and who ~= LocalPlayer.Name then return end
         DSOn = (on == true)
     end)
-
-    -- Infinity: FlyteBB gates activation on the local player actually
-    -- having Infinity equipped and the ability model enabled, so we
-    -- never arm InfOn from another player's Infinity shield.
     ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on)
         if on then
             local char = LocalPlayer.Character
@@ -1748,10 +1609,12 @@ pcall(function()
             InfOn = false
         end
     end)
+    ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on)
+        InfinityBallRaw = on == true
+    end)
 end)
-
 local _lpName = LocalPlayer.Name
-local function _argsContainMe(a)
+local _argsContainMe = function(a)
     for i = 1, #a do
         local v = a[i]
         if v == LocalPlayer then return true end
@@ -1764,7 +1627,6 @@ local function _argsContainMe(a)
     end
     return false
 end
-
 local _netModule = nil
 do
     pcall(function() _netModule = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net end)
@@ -1796,56 +1658,30 @@ local function _hookNetEvent(name, onFire)
     end
     if not hooked then warn("[qzxp] detection: could not hook net event " .. name) end
 end
--- TimeHole: FlyteBB reads the first argument directly and compares it
--- to the local player. _argsContainMe was walking every argument which
--- gave false positives on events with player-y objects in later slots.
 _hookNetEvent("RE/TimeHoleActivate", function(a)
     local who = a[1]
     if who == LocalPlayer or who == LocalPlayer.Name then THOn = true end
 end)
-_hookNetEvent("RE/TimeHoleDeactivate", function(a)
-    THOn = false
-end)
-
--- Slashes of Fury: FlyteBB tracks Catch (fires only on the client that
--- actually caught a ball with SoF) in addition to Activate. Keeping
--- both means we arm SFOn the instant the ability goes active, and stay
--- armed through any subsequent catch. The End event disarms it.
+_hookNetEvent("RE/TimeHoleDeactivate", function() THOn = false end)
 _hookNetEvent("RE/SlashesOfFuryActivate", function(a)
     local who = a[1]
     if who == LocalPlayer or who == LocalPlayer.Name then SFOn = true end
 end)
-_hookNetEvent("RE/SlashesOfFuryCatch", function(a)
-    SFOn = true
-end)
-_hookNetEvent("RE/SlashesOfFuryEnd", function(a)
-    SFOn = false
-end)
+_hookNetEvent("RE/SlashesOfFuryCatch", function() SFOn = true end)
+_hookNetEvent("RE/SlashesOfFuryEnd", function() SFOn = false end)
 
--- ============================================================
--- [FIX 3] AP / TB / Spam as RenderStepped handlers
--- ============================================================
 do
 addRenderHandler(function()
     frameCount += 1
     _frameBlockOk = nil
 end, 1)
 
--- ============================================================
--- AUTOPARRY — ported from oxy
---   · target-based CFrame (aims at picked mouse-target, not the ball's sender)
---   · ball position prediction via URE/ReplicateBallPosition
---   · global 1s debounce after any successful AP fire
---   · accuracy formula: (slider-1) * 0.015151...
--- ============================================================
 local _apState = {
     AerodynamicTime = tick(),
     LastWarping     = tick(),
     LerpRadians     = 0,
     Curving         = tick(),
 }
-
--- ---- ball position prediction (URE/ReplicateBallPosition) ----
 local _apPositions  = {}
 local _apReplicator = nil
 do
@@ -1870,7 +1706,6 @@ if _apReplicator then
         end
     end)
 end
-
 local function apFirstBall()
     local all = getAllBalls()
     return all[1]
@@ -1880,16 +1715,13 @@ local function apPosition(ball)
     if b then return _apPositions[b] or b.Position end
     return Vector3.zero
 end
-
--- ---- target picking (ported from oxy tbl27) ----
 local _apTarget = { current = nil, visited = {} }
-
 local function apPickRandom()
     local list = {}
     local af = Workspace:FindFirstChild("Alive")
     if af then
         for _, m in ipairs(af:GetChildren()) do
-            if m.Name ~= _lpName and m.PrimaryPart then table.insert(list, m) end
+            if m.Name ~= _lpName and m.PrimaryPart and isRealPlayerModel(m) then table.insert(list, m) end
         end
     end
     if #list == 0 then _apTarget.current = nil; return end
@@ -1911,9 +1743,7 @@ local function apPickRandom()
     _apTarget.visited[picked.Name] = true
     _apTarget.current = picked
 end
-
 local function apByMouse()
-    -- [PARRY LOCK] When locked, always target the locked player.
     if LockEnabled and LockTarget ~= "None" then
         local lp = findPart(LockTarget)
         if lp and lp.Parent then
@@ -1925,7 +1755,7 @@ local function apByMouse()
     local af = Workspace:FindFirstChild("Alive")
     if af then
         for _, m in ipairs(af:GetChildren()) do
-            if m.Name ~= _lpName and m.PrimaryPart then table.insert(list, m) end
+            if m.Name ~= _lpName and m.PrimaryPart and isRealPlayerModel(m) then table.insert(list, m) end
         end
     end
     if #list == 0 then _apTarget.current = nil; return nil end
@@ -1956,29 +1786,21 @@ local function apByMouse()
     _apTarget.current = bestModel
     return bestModel
 end
-
--- ---- CFrame build (ported from oxy tbl28.get_cframe, extended to
---      cover qzxp's wider set of curve modes) ----
 local function apGetCurveCF()
     local cam  = Workspace.CurrentCamera
     local cf   = cam.CFrame
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return cf end
-    -- [PARRY LOCK] When locked, aim CFrame directly at the target,
-    -- matching fireRemote's behavior for TB/Spam (overrides curve mode).
     if LockEnabled and LockTarget ~= "None" then
         local lockPart = findPart(LockTarget)
-        if lockPart then
-            return CFrame.new(root.Position, lockPart.Position)
-        end
+        if lockPart then return CFrame.new(root.Position, lockPart.Position) end
     end
     local tp        = _apTarget.current and _apTarget.current.PrimaryPart
     local targetPos = tp and tp.Position or (root.Position + cf.LookVector * 1000)
     local delta     = targetPos - root.Position
     local unit      = delta.Magnitude > 0.001 and delta.Unit or root.CFrame.LookVector
     local method    = tostring(CurveMode or "Camera"):lower()
-
     if method == "dot" then
         return CFrame.lookAt(root.Position, targetPos + Vector3.new(0, 1.75, 0))
     elseif method == "backwards" then
@@ -2007,9 +1829,7 @@ local function apGetCurveCF()
     end
     return cf
 end
-
--- ---- fire (ported from oxy tbl30.fire, wired to qzxp's
---      captured remote + _tokenize) ----
+local _apFireCount = 0
 local function apFire()
     apByMouse()
     local cam = Workspace.CurrentCamera
@@ -2042,10 +1862,13 @@ local function apFire()
         _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]),
             0.5, rcf, ed, mp, false)
     end)
+    if _apFireCount > 7 then return false end
+    _apFireCount += 1
+    task.delay(0.5, function()
+        if _apFireCount > 0 then _apFireCount -= 1 end
+    end)
     return ok
 end
-
--- ---- curve detection (ported from oxy tbl23.curved) ----
 local function apCurved(ball)
     local b = ball or apFirstBall()
     if not b then return false end
@@ -2071,7 +1894,6 @@ local function apCurved(ball)
     local n34   = 15 - math.min(dist / 1000, 15) + v90
     _apState.LerpRadians = _apState.LerpRadians
         + (math.rad(math.asin(math.clamp(dot, -1, 1))) - _apState.LerpRadians) * 0.8
-
     if spd > 100 and n33 > ping / 10 then
         n34 = math.max(n34 - 15, 15)
     end
@@ -2084,106 +1906,154 @@ local function apCurved(ball)
     if now - _apState.Curving    < n33 / 1.5 then return true end
     return dot < n32
 end
-
--- slider 1..100 -> 0..1.5 (matches oxy's tbl31.accuracy)
 local function apAccuracy()
     return (AP_Acc - 1) * 0.015151515151515152
 end
-
--- ---- 1s debounce after any successful fire ----
 local _apDebounce = false
 local _apUntilAt  = 0
+getgenv().qzxp_resetAPState = function()
+    _apDebounce    = false
+    _apUntilAt     = 0
+    AnimLastPlayed = 0
+    pcall(function() clearAPLockout() end)
+end
 
--- ---- [MULTI-BALL] the check ----
--- Scans EVERY ball targeting the local player, skips curved ones (which
--- need different timing), and fires one parry for whichever is closest
--- to impact. The 1s debounce still applies globally so the server gets
--- one parry per hit — but the ball chosen is now the most urgent one.
+local function getClosestPlayer()
+    local alive = Workspace:FindFirstChild("Alive")
+    if not alive then return nil end
+    local char = LocalPlayer.Character
+    if not char or char.Parent ~= alive or not char.PrimaryPart then return nil end
+    local closest, closestDist = nil, math.huge
+    for _, child in ipairs(alive:GetChildren()) do
+        if child ~= char and child.Name ~= LocalPlayer.Name
+           and child:FindFirstChild("HumanoidRootPart")
+           and isRealPlayerModel(child) then
+            local dist = (char.PrimaryPart.Position - child.HumanoidRootPart.Position).Magnitude
+            if dist < closestDist then
+                closestDist = dist
+                closest = child
+            end
+        end
+    end
+    return closest
+end
+
+local function getEntityProperties()
+    local closest = getClosestPlayer()
+    if not closest then return nil end
+    local char = LocalPlayer.Character
+    if not char or not char.PrimaryPart then return nil end
+    local root  = char.PrimaryPart
+    local other = closest.HumanoidRootPart
+    return {
+        Velocity  = other.AssemblyLinearVelocity,
+        Direction = (root.Position - other.Position).Unit,
+        Distance  = (root.Position - other.Position).Magnitude,
+    }
+end
+
+local function getBallProperties(ball)
+    if not ball then return nil end
+    local z = ball:FindFirstChild("zoomies")
+    if not z then return nil end
+    local char = LocalPlayer.Character
+    if not char or not char.PrimaryPart then return nil end
+    local vel     = z.VectorVelocity
+    local rootPos = char.PrimaryPart.Position
+    local pos     = ball.Position
+    local unit    = (rootPos - pos).Unit
+    return {
+        Speed     = vel.Magnitude,
+        Velocity  = vel,
+        Direction = unit,
+        Distance  = (rootPos - pos).Magnitude,
+        Dot       = unit:Dot(vel.Unit),
+    }
+end
+
+local function spamService(ball, ping)
+    if not ball then return 0 end
+    local z = ball:FindFirstChild("zoomies")
+    if not z then return 0 end
+    local char = LocalPlayer.Character
+    if not char or not char.PrimaryPart then return 0 end
+    local vel   = z.VectorVelocity
+    local speed = vel.Magnitude
+    local rootPos = char.PrimaryPart.Position
+    local pos     = ball.Position
+    local dot     = (rootPos - pos).Unit:Dot(vel.Unit)
+    -- Changed math to increase the base distance and make it more forgiving
+    local threshold = ping + math.min(speed / 4.5, 120) + 6 
+    local ballProps   = getBallProperties(ball)
+    local entityProps = getEntityProperties()
+    if not ballProps or not entityProps then return 0 end
+    if entityProps.Distance > threshold or ballProps.Distance > threshold then return 0 end
+    local mult = 8 - math.min(speed / 4, 8)
+    return (threshold + 6) - math.clamp(dot, -1, 0) * mult
+end
+
 local function apCheck()
     if not AP_On or TB_On or Spam_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
-
-    -- [DETECTION GATE] Bail out before scanning if any enabled detection
-    -- is currently active. The old AP check silently skipped these, so
-    -- AP would keep firing while Infinity / Death Slash / Time Hole /
-    -- Slashes of Fury was on.
-    if InfDet and InfOn then return end
-    if DSDet and DSOn then return end
-    if THDet and THOn then return end
-    if SFDet and SFOn then return end
-
+    if InfDet and isInfinityActive()      then return end
+    if DSDet  and isDeathSlashActive()    then return end
+    if THDet  and isTimeHoleActive()      then return end
+    if SFDet  and isSlashesOfFuryActive() then return end
     local char = LocalPlayer.Character
-    if not char or not char.PrimaryPart then return end
-
+    local root = char and char.PrimaryPart
+    if not root then return end
     local now = tick()
     if _apDebounce or now < _apUntilAt then return end
-
-    local pos       = char.PrimaryPart.Position
+    local pos       = root.Position
     local pingDist  = math.clamp(getPing() / 100, 5, 17)
-    local allBalls  = getAllBalls()
-    local runtime   = Workspace:FindFirstChild("Runtime")
-    local tornado   = runtime and runtime:FindFirstChild("Tornado")
-    local tornadoT  = tornado and (tornado:GetAttribute("TornadoTime") or 1)
-
-    -- Tornado blocks every parry (matches original behavior).
-    if tornado and now - _apState.AerodynamicTime < tornadoT + 0.314159 then
-        return
-    end
-
-    -- [MULTI-BALL] Candidate scan. Nothing fires inside the loop —
-    -- we only collect the best candidate and fire once at the end.
-    local urgentBall = nil
-    local urgentDist = math.huge
-
-    for _, ball in ipairs(allBalls) do
+    local firstBall = apFirstBall()
+    local firstTarget = firstBall and firstBall:GetAttribute("target")
+    local runtime  = Workspace:FindFirstChild("Runtime")
+    local tornado  = runtime and runtime:FindFirstChild("Tornado")
+    local tornadoT = tornado and (tornado:GetAttribute("TornadoTime") or 1)
+    local acc = apAccuracy()
+    for _, ball in ipairs(getAllBalls()) do
+        if not ball then return end
         local z = ball:FindFirstChild("zoomies")
-        if z then
-            -- Per-ball AeroDynamicSlashVFX cleanup, as before.
-            if ball:FindFirstChild("AeroDynamicSlashVFX") then
-                ball.AeroDynamicSlashVFX:Destroy()
-                _apState.AerodynamicTime = now
-            end
+        if not z then return end
+        local target = ball:GetAttribute("target")
+        local spd    = z.VectorVelocity.Magnitude
+        local dist   = (pos - apPosition(ball)).Magnitude
+        local n31    = (2.4 + math.min(math.max(spd - 9.5, 0), 650) * 0.002) * acc
+        if ball:FindFirstChild("AeroDynamicSlashVFX") then
+            ball.AeroDynamicSlashVFX:Destroy()
+            _apState.AerodynamicTime = now
+        end
+        if tornado and now - _apState.AerodynamicTime < tornadoT + 0.314159 then
+            return
+        end
+        if firstTarget == _lpName and apCurved(ball) then
+            return
+        end
+        if target == _lpName
+           and dist <= pingDist + math.max(spd / n31, 9.5)
+           and acc * 0.8 then
+            if apFire() then
+                _apLastFire = os.clock()
+                if AnimFix_AP then PlaySingleParryAnimation() end
+                _apDebounce = true
+                _apUntilAt  = now + 1
 
-            local target = ball:GetAttribute("target")
-            if target == _lpName then
-                local spd  = z.VectorVelocity.Magnitude
-                local dist = (pos - apPosition(ball)).Magnitude
-                local acc  = apAccuracy()
-                local n31  = (2.4 + math.min(math.max(spd - 9.5, 0), 650) * 0.002) * acc
-                local triggerDist = pingDist + math.max(spd / n31, 9.5)
-
-                if dist <= triggerDist then
-                    -- [MULTI-BALL FIX] skip this ball if it is curved, but
-                    -- DO NOT abort the whole scan. A straight ball from a
-                    -- different sender further down the list can still be
-                    -- parried this frame.
-                    if apCurved(ball) then
-                        continue
-                    end
-                    -- Prioritise the ball whose impact is closest.
-                    if dist < urgentDist then
-                        urgentDist = dist
-                        urgentBall = ball
-                    end
+                local sr = spamService(ball, math.clamp(getPing() / 10, 5, 17))
+                if sr and sr ~= 0 then
+                    task.delay(0.65, function()
+                        if Parries >= 7 then return end
+                        Parries += 1
+                        task.delay(0.5, function()
+                            if Parries > 0 then Parries -= 1 end
+                        end)
+                    end)
                 end
             end
         end
     end
-
-    -- [MULTI-BALL FIX] only arm debounce after a successful fire. A failed
-    -- fire (no remote, token missing, etc.) no longer locks parry for 1s.
-    if urgentBall then
-        if apFire() then
-            _apLastFire = os.clock()
-            if AnimFix_AP then PlaySingleParryAnimation() end
-            _apDebounce = true
-            _apUntilAt  = now + 1
-        end
-    end
 end
-
--- ---- reset debounce on ball state changes ----
 do
     local function watchBalls(folder)
         if not folder then return end
@@ -2211,8 +2081,6 @@ do
     watchBalls(Workspace:FindFirstChild("Balls"))
     watchBalls(Workspace:FindFirstChild("TrainingBalls"))
 end
-
--- ---- ParrySuccessAll hook: seed Curving state (ported from oxy) ----
 pcall(function()
     ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(_, hitPart)
         local char = LocalPlayer.Character
@@ -2235,33 +2103,54 @@ pcall(function()
         end
     end)
 end)
-
--- ---- register with the shared RenderStepped dispatcher ----
 addRenderHandler(apCheck, 2)
 
-end -- AP scope
+addRenderHandler(function()
+    if not AutoSpam_On or not AP_On then return end
+    local char = LocalPlayer.Character
+    if not char or not char.PrimaryPart then return end
+    if char.Parent ~= Workspace:FindFirstChild("Alive") then return end
 
--- ============================================================
--- PARRY RANGE VISUALIZER
--- ============================================================
--- Collapsed into a single table to keep the enclosing function
--- under Luau's 200-register ceiling. Table methods do not consume
--- a local register slot, only the `PRV` binding does.
+    local hotbar = LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Hotbar")
+    local visible = hotbar and hotbar:FindFirstChild("Ability")
+        and hotbar.Ability:FindFirstChild("Duration") and hotbar.Ability.Duration.Visible
+    local abilities = char:FindFirstChild("Abilities")
+    local infinity = abilities and abilities:FindFirstChild("Infinity")
+    infinity = infinity and infinity.Enabled and visible and InfinityBallRaw
+    if infinity then Parries = 0; return end
+    local timeHole = abilities and abilities:FindFirstChild("Time Hole")
+    timeHole = timeHole and timeHole.Enabled and visible
+    if timeHole then Parries = 0; return end
+
+    local ball = getBall()
+    if not ball or not ball:FindFirstChild("zoomies") then return end
+
+    local ping     = math.clamp(getPing() / 10, 10, 16.5)
+    local spamDist = spamService(ball, ping)
+    if spamDist == 0 then return end
+
+    if (char.PrimaryPart.Position - ball.Position).Magnitude <= spamDist
+       and Parries >= ClashingThreshold then
+        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+            PlayParryAnimation()
+        else
+            Animation_Fix()
+        end
+        fireRemote(ball)
+    end
+end, 5)
+end
+
+-- Parry range visualizer
 local PRV = {
-    On           = false,
-    Model        = nil,
-    Segments     = {},
-    SEG_COUNT    = 48,
-    COLOR        = Color3.fromRGB(255, 255, 255),
-    TRANSPARENCY = 0.35,
+    On = false, Model = nil, Segments = {}, SEG_COUNT = 48,
+    COLOR = Color3.fromRGB(255, 255, 255), TRANSPARENCY = 0.35,
 }
-
 function PRV.Destroy()
     if PRV.Model then pcall(function() PRV.Model:Destroy() end) end
     PRV.Model = nil
     PRV.Segments = {}
 end
-
 function PRV.Ensure()
     if PRV.Model then return end
     local m = Instance.new("Model")
@@ -2286,7 +2175,6 @@ function PRV.Ensure()
         PRV.Segments[i] = p
     end
 end
-
 function PRV.Draw(center, radius)
     PRV.Ensure()
     if not PRV.Model or #PRV.Segments == 0 then return end
@@ -2302,7 +2190,6 @@ function PRV.Draw(center, radius)
         seg.CFrame = CFrame.new(x, y, z) * CFrame.Angles(0, -phi, 0)
     end
 end
-
 addRenderHandler(function()
     if not PRV.On then
         if PRV.Model then PRV.Destroy() end
@@ -2321,12 +2208,9 @@ addRenderHandler(function()
     if PRV.Model and PRV.Model.Parent ~= Workspace then PRV.Model.Parent = Workspace end
 end, 6)
 
--- ============================================================
--- TRIGGERBOT
--- ============================================================
+-- Triggerbot
 local function tryTBForBall(ball)
     if not TB_On or Spam_On or not ball or not ball.Parent then return end
-    -- [[ GLOBAL AP/TB LOCKOUT ]] shared with AP (AP and TB are mutually exclusive)
     if isAPLocked() then return end
     if ball:GetAttribute('target') ~= _lpName then return end
     if not IsBlockLegit() then return end
@@ -2335,23 +2219,21 @@ local function tryTBForBall(ball)
     if not root or root:FindFirstChild('SingularityCape') then return end
     if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
     if ball:FindFirstChild('ComboCounter') then return end
-    if InfDet and InfOn then return end
-    if DSDet and DSOn then return end
-    if THDet and THOn then return end
-    if SFDet and SFOn then return end
+    if InfDet and isInfinityActive()      then return end
+    if DSDet  and isDeathSlashActive()    then return end
+    if THDet  and isTimeHoleActive()      then return end
+    if SFDet  and isSlashesOfFuryActive() then return end
     local fired = fireRemote(ball)
     if fired then
         _tbLastFire = os.clock()
-        setAPLockout(ball)   -- [[ GLOBAL AP/TB LOCKOUT ]]
+        setAPLockout(ball)
         if AnimFix_TB then PlaySingleParryAnimation() end
     end
 end
-
 addRenderHandler(function()
     if not TB_On or Spam_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
-    -- [[ GLOBAL AP/TB LOCKOUT ]]
     if isAPLocked() then return end
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -2360,20 +2242,19 @@ addRenderHandler(function()
     for _, ball in pairs(balls) do
         if ball:GetAttribute('target') ~= _lpName then continue end
         if ball:FindFirstChild('ComboCounter') then continue end
-        if InfDet and InfOn then continue end
-        if DSDet and DSOn then continue end
-        if THDet and THOn then continue end
-        if SFDet and SFOn then continue end
+        if InfDet and isInfinityActive()      then continue end
+        if DSDet  and isDeathSlashActive()    then continue end
+        if THDet  and isTimeHoleActive()      then continue end
+        if SFDet  and isSlashesOfFuryActive() then continue end
         local fired = fireRemote(ball)
         if fired then
             _tbLastFire = os.clock()
-            setAPLockout(ball)   -- [[ GLOBAL AP/TB LOCKOUT ]]
+            setAPLockout(ball)
             if AnimFix_TB then PlaySingleParryAnimation() end
-            break                -- lockout is now armed → stop scanning
+            break
         end
     end
 end, 3)
-
 local _tbConns = setmetatable({}, {__mode = "k"})
 local function _attachTB(ball)
     if not ball or _tbConns[ball] then return end
@@ -2417,16 +2298,14 @@ spawnTracked(function()
     watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
 end)
 
--- ============================================================
--- SPAM ENGINE
--- ============================================================
+-- Spam engine
 local SpamRPS, SpamInt, SpamDetect = 100, 0.01, true
 local function spamOk()
     if not SpamDetect then return true end
-    if InfDet and InfOn then return false end
-    if DSDet and DSOn then return false end
-    if THDet and THOn then return false end
-    if SFDet and SFOn then return false end
+    if InfDet and isInfinityActive()      then return false end
+    if DSDet  and isDeathSlashActive()    then return false end
+    if THDet  and isTimeHoleActive()      then return false end
+    if SFDet  and isSlashesOfFuryActive() then return false end
     return true
 end
 local timeAccumulator = 0
@@ -2448,14 +2327,14 @@ addRenderHandler(function(dt)
         if ball then
             for _ = 1, fires do fireRemote(ball) end
         end
-        if AnimFix_Spam then SpamParryAnimation() end
+        if AnimFix_Spam then PlaySingleParryAnimation() end
     end
 end, 4)
 
 -- ============================================================
--- SWORD CHANGER
+-- SWORD CHANGER (fixed revert + real-sword tracking)
 -- ============================================================
-do
+task.spawn(function()
 local SKIN_KEY = "Skin.LastEquippedSword"
 local CFG_FILE = "qzxp/auto_config.json"
 local function readCfg()
@@ -2475,25 +2354,50 @@ getgenv().saveLastEquippedSword = function(n)
     local d = readCfg(); d[SKIN_KEY] = n; writeCfg(d)
 end
 do
-    local s = loadSaved()
-    getgenv().skinChanger = getgenv().skinChanger or s ~= ""
+    getgenv().skinChanger = false
     getgenv().swordModel = type(getgenv().swordModel) == "string" and getgenv().swordModel ~= "" and getgenv().swordModel or s
     getgenv().swordAnimations = type(getgenv().swordAnimations) == "string" and getgenv().swordAnimations ~= "" and getgenv().swordAnimations or s
     getgenv().swordFX = type(getgenv().swordFX) == "string" and getgenv().swordFX ~= "" and getgenv().swordFX or s
 end
 
+-- Track the TRUE server-side sword. Only updates when neither feature
+-- is overriding, so fake equips don't pollute this value.
 local realSword = ""
 local _realSwordConn = nil
 local function trackReal()
     local c = LocalPlayer.Character; if not c then return end
-    realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
     if _realSwordConn then pcall(function() _realSwordConn:Disconnect() end) end
     _realSwordConn = c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
-        if not getgenv().skinChanger then realSword = c:GetAttribute("CurrentlyEquippedSword") or "" end
+        if not getgenv().skinChanger and not getgenv().qzxp_unlockAllActive then
+            realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
+            getgenv().qzxp_realSword = realSword
+        end
     end)
 end
-LocalPlayer.CharacterAdded:Connect(function() task.wait(0.5); trackReal() end)
-if LocalPlayer.Character then trackReal() end
+-- Initial capture from the server before any feature can override.
+local function captureRealSword()
+    local c = LocalPlayer.Character; if not c then return end
+    local s = c:GetAttribute("CurrentlyEquippedSword")
+    if s and s ~= "" and (not realSword or realSword == "") then
+        realSword = s
+        getgenv().qzxp_realSword = s
+    end
+end
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.defer(function()
+        task.wait(0.2)
+        if not char or not char.Parent then return end
+        captureRealSword()
+        trackReal()
+    end)
+end)
+if LocalPlayer.Character then
+    task.defer(function()
+        task.wait(0.2)
+        captureRealSword()
+        trackReal()
+    end)
+end
 
 local rs = ReplicatedStorage
 local sc
@@ -2522,25 +2426,17 @@ local function refreshSlash()
 end
 refreshSlash()
 
+-- Equip: client-only by default. Callers pass notifyServer explicitly.
 local function equip(name, notifyServer)
-    -- Unlock-all uses client-only equip (server would reject for unowned
-    -- swords). Skin changer keeps notifying the server so its state stays
-    -- in sync.
     if not name or name == "" then return false end
-    if notifyServer == nil then
-        notifyServer = not getgenv().qzxp_unlockAllActive
-    end
+    if notifyServer == nil then notifyServer = false end
     if not LocalPlayer.Character then return false end
     local exact = resolve(name)
     LocalPlayer:SetAttribute("CurrentlyEquippedSword", exact)
     LocalPlayer.Character:SetAttribute("CurrentlyEquippedSword", exact)
     pcall(function()
-        -- Metatable-aware access — rawget can be nil if EquipSwordTo lives on __index
         local f = swordModule.EquipSwordTo or rawget(swordModule, "EquipSwordTo")
         if type(f) == "function" then
-            -- Match oxy: only clear booleans whose value is `true`.
-            -- The first `true` upvalue is the guard/ownership flag that
-            -- otherwise causes EquipSwordTo to silently bail on unowned swords.
             for k, v in pairs(getupvalues(f)) do
                 if v == true then setupvalue(f, k, false); break end
             end
@@ -2553,8 +2449,6 @@ local function equip(name, notifyServer)
         if not sc then return end
         pcall(function() if sc.SetSword then sc:SetSword(exact) end end)
         pcall(function()
-            -- Do NOT notify the server for unowned swords — it will reject
-            -- and may reset our client-side state. Oxy never notifies.
             if notifyServer and rs.Remotes:FindFirstChild("FireSwordInfo") then
                 rs.Remotes.FireSwordInfo:FireServer(exact)
             end
@@ -2569,20 +2463,41 @@ getgenv().updateSword = function()
     AnimFix_Cache = {}
     if getgenv().skinChanger and getgenv().swordModel ~= "" then
         getgenv().saveLastEquippedSword(getgenv().swordModel)
-        equip(getgenv().swordModel)          -- skin changer: server-aware
+        -- Skin changer is client-only — the fake sword may be unowned.
+        equip(getgenv().swordModel, false)
     end
 end
+-- Proper revert:
+--   · If UA is still active, hand control to UA's selected sword.
+--   · Otherwise revert to the tracked true server sword AND notify server.
 getgenv().revertSword = function()
-    if realSword ~= "" then equip(realSword) end
+    getgenv().skinChanger = false
+    getgenv().skinChangerEnabled = false
     AnimFix_Cache = {}
+    if getgenv().qzxp_unlockAllActive then
+        local ua = getgenv().qzxp_UA
+        if ua and ua.selected_sword and ua.selected_sword ~= "" then
+            getgenv().swordModel = ua.selected_sword
+            getgenv().swordAnimations = ua.selected_sword
+            getgenv().swordFX = ua.selected_sword
+            refreshSlash()
+            equip(ua.selected_sword, false)
+        end
+    elseif realSword ~= "" then
+        getgenv().swordModel = realSword
+        getgenv().swordAnimations = realSword
+        getgenv().swordFX = realSword
+        refreshSlash()
+        equip(realSword, true)
+    end
 end
 
--- Watchdog: the game's FireSwordInfo broadcast can reset CurrentlyEquippedSword
--- back to the real sword mid-life. Re-assert the fake one so the VFX hooker
--- and the anim resolver both keep showing the unlock-all sword.
+-- Watchdog: re-assert skin changer sword on attribute reset. Only fires
+-- when skinChanger is on — UA handles its own re-assertion via
+-- `sword_attr_connection` in the unlock-all block below.
 spawnTracked(function()
     while task.wait(0.5) do
-        if getgenv().qzxp_unlockAllActive and getgenv().swordModel ~= "" then
+        if getgenv().skinChanger and getgenv().swordModel ~= "" then
             local char = LocalPlayer.Character
             if char then
                 local want = resolve(getgenv().swordModel)
@@ -2601,7 +2516,6 @@ local vfxConns = getgenv().qzxp_VFXConns
 local vfxDisabled = getgenv().qzxp_VFXDisabled
 local lastPlaySoundTime = 0
 local _vfxScanConn = nil
-
 spawnTracked(function()
     local remotes = {"ParrySuccessAll", "ParryAttempt", "ParrySuccess", "PlaySound", "PlayVisuals"}
     local scanned = {}
@@ -2649,7 +2563,6 @@ spawnTracked(function()
                                     if fx ~= "" and not slF and type(args[1]) == "string" then args[1] = getgenv().slashName end
                                     if fx ~= "" and not sf and type(args[3]) == "string" then args[3] = fx end
                                 end
-                                -- [FIX 5] Thread identity NOT lowered. Just call the target.
                                 pcall(target, unpack(args))
                             end
                             hooked[ours] = true
@@ -2663,6 +2576,8 @@ spawnTracked(function()
     end
 end)
 
+-- Character respawn: re-equip client-only (skin changer / UA will re-assert
+-- their own state on their own schedule — no server notify here).
 LocalPlayer.CharacterAdded:Connect(function()
     if (getgenv().skinChanger or getgenv().qzxp_unlockAllActive) and getgenv().swordModel ~= "" then
         task.wait(2)
@@ -2670,8 +2585,8 @@ LocalPlayer.CharacterAdded:Connect(function()
         if char then
             local exact = resolve(getgenv().swordModel)
             if exact and exact ~= "" then
-                if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact then equip(exact) end
-                if not char:FindFirstChild(exact) then equip(exact) end
+                if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact then equip(exact, false) end
+                if not char:FindFirstChild(exact) then equip(exact, false) end
                 for _, v in pairs(char:GetChildren()) do
                     if v:IsA("Model") and v.Name ~= exact and SwordRegistryReverse[v.Name] then
                         pcall(function() v:Destroy() end)
@@ -2693,7 +2608,6 @@ LocalPlayer.CharacterAdded:Connect(function()
     end
 end)
 
--- exposed for the Unlock All module
 getgenv().qzxp_equipSword   = equip
 getgenv().qzxp_resolveSword = resolve
 getgenv().qzxp_forceEquipSword = function(name)
@@ -2707,12 +2621,14 @@ getgenv().qzxp_forceEquipSword = function(name)
     equip(name, false)
     return true
 end
-end -- sword changer scope
+end) -- sword changer scope
 
 -- ============================================================
--- UNLOCK ALL (SWORDS) — ported from oxy (tbl27)
+-- UNLOCK ALL (fixed revert + ownership detection)
 -- ============================================================
-local UA = {
+local UA
+task.spawn(function()
+UA = {
     enabled            = false,
     ready              = false,
     shop_controller    = nil,
@@ -2742,13 +2658,6 @@ local UA = {
     _savedButtonState  = {},
     original_buy_conns = {},
 }
-
--- Capture the game's original FireSwordInfo / ParrySuccessAll handlers
--- up front, before anything hooks them. `sword_fn` is called directly in
--- equip_sword to refresh local state (sc.currentSword, SwordFX, sounds,
--- etc.) without a server round-trip. `play_parry` is captured for
--- potential direct VFX calls (VFX hooker handles the actual parry
--- substitution, so UA won't wire ParrySuccessAll itself).
 do
     local remotes = ReplicatedStorage:FindFirstChild("Remotes")
     if remotes then
@@ -2780,11 +2689,6 @@ do
         end
     end
 end
-
--- oxy's set_sword_override. Disables the game's FireSwordInfo handlers so
--- server broadcasts can't revert the fake equip while UA is active.
--- (ParrySuccessAll is handled by the qzxp VFX hooker, so we leave it
--- alone here to avoid double-fire.)
 function UA.set_sword_override(_, on)
     for _, c in ipairs(UA.fire_connections) do
         pcall(function()
@@ -2792,8 +2696,6 @@ function UA.set_sword_override(_, on)
         end)
     end
 end
-
--- oxy's apply_chroma
 function UA.apply_chroma(_, model, sword)
     local colorConfig = sword.ColorConfig or sword.TweenColorConfig
     if not colorConfig and (sword.Name:find("Chroma") or sword.Name:find("Rainbow")) then
@@ -2806,15 +2708,12 @@ function UA.apply_chroma(_, model, sword)
         end)
     end
 end
-
--- oxy's set_category_unlock
 function UA.set_category_unlock(_, category, unlock)
     if not UA.shop_controller then return end
     local virtual = UA.shop_controller._virtualItems[category]
     local page    = UA.shop_controller._inventoryPages[category]
     if type(virtual) ~= "table" then return end
     if page and page.BeginBatch then pcall(page.BeginBatch, page) end
-
     if unlock then
         UA.unlocked[category] = true
         local backed = {}
@@ -2857,12 +2756,9 @@ function UA.set_category_unlock(_, category, unlock)
             end
         end
     end
-
     if page and page.MarkDirty then pcall(page.MarkDirty, page, nil, true, true) end
     if page and page.EndBatch then pcall(page.EndBatch, page) end
 end
-
--- oxy's set_modern_unlock
 function UA.set_modern_unlock(_, category, unlock)
     local api = UA.shop_api
     local bases = api and api.OwnedBases and api.OwnedBases[category]
@@ -2901,8 +2797,6 @@ function UA.set_modern_unlock(_, category, unlock)
         end
     end
 end
-
--- oxy's expected_size
 function UA.expected_size(_, category)
     local n = 0
     if category == "Sword" and UA.swords then
@@ -2921,8 +2815,6 @@ function UA.expected_size(_, category)
     end
     return n
 end
-
--- oxy's schedule_refresh
 function UA.schedule_refresh(_, category)
     UA.refresh_generation[category] = (UA.refresh_generation[category] or 0) + 1
     local myGen = UA.refresh_generation[category]
@@ -2956,14 +2848,10 @@ function UA.schedule_refresh(_, category)
     end)
 end
 
--- oxy's equip_sword (exact port). Patches EquipSwordTo's boolean guard,
--- sets the attribute, calls EquipSwordTo, applies chroma, then calls the
--- game's own FireSwordInfo handler (`sword_fn`) to refresh local state.
--- Was the local player really (server-side) owning this sword before
--- unlock-all touched the shop? Uses the pre-modification state captured
--- by set_category_unlock / set_modern_unlock.
+-- Ownership check against PRE-modification state. If we're mid-revert,
+-- `unlock_originals` may have already been cleared, so fall through to
+-- `item.Section == "Owned"` which reflects the restored original state.
 function UA.is_actually_owned(_, swordName)
-    -- Legacy shop: check the item's original Section (Owned vs Unowned).
     local virtual = UA.shop_controller
         and UA.shop_controller._virtualItems
         and UA.shop_controller._virtualItems["Sword"]
@@ -2976,8 +2864,6 @@ function UA.is_actually_owned(_, swordName)
             end
         end
     end
-
-    -- Modern shop API: check the pre-unlock OwnedCopies value.
     local api = UA.shop_api
     if api and api.OwnedBases and api.OwnedBases["Sword"] then
         local base = api.OwnedBases["Sword"][swordName]
@@ -2996,41 +2882,41 @@ function UA.is_actually_owned(_, swordName)
             end
         end
     end
-
     return false
 end
 
+-- Equip: captures original_sword from realSword (true server state),
+-- and notifies the server when the sword is genuinely owned (equip or
+-- restore). Unowned swords remain client-only to avoid rejection.
 function UA.equip_sword(_, swordName, restore)
     if type(swordName) ~= "string" or swordName == "" then return false end
     if not UA.swords then return false end
     local isEquip = not restore
-    -- For genuinely-owned swords, use the normal server-notify path so
-    -- the equip persists (survives death, other players see it).
-    -- For unowned swords, stay client-only.
     local isOwned = UA:is_actually_owned(swordName)
-
     if isEquip and UA:is_deleted("Sword", swordName) then
         UA:undelete_item("Sword", swordName)
     end
-
     local sword = UA.swords:GetSword(swordName)
     if not sword then return false end
     local character = LocalPlayer.Character
     if not character then return false end
-
     if isEquip and not UA.original_sword then
-        UA.original_sword = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
-                         or character:GetAttribute("CurrentlyEquippedSword")
+        -- Prefer the tracked true server sword so we don't capture a fake
+        -- state left by the skin changer.
+        local scReal = getgenv().qzxp_realSword
+        if scReal and scReal ~= "" then
+            UA.original_sword = scReal
+        else
+            UA.original_sword = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+                             or character:GetAttribute("CurrentlyEquippedSword")
+                             or ""
+        end
     end
-
     if restore then
         UA.selected_sword = nil
     else
         UA.selected_sword = sword.Name
         UA.last_equipped_sword = sword.Name
-        -- Only disable the game's FireSwordInfo handlers for unowned swords.
-        -- For owned swords we want them active so the server response updates
-        -- the character model normally.
         UA:set_sword_override(not isOwned)
         getgenv().qzxp_unlockAllActive = true
         getgenv().swordModel      = sword.Name
@@ -3038,10 +2924,8 @@ function UA.equip_sword(_, swordName, restore)
         getgenv().swordFX         = sword.Name
         pcall(getgenv().saveLastEquippedSword, sword.Name)
     end
-
     LocalPlayer:SetAttribute("CurrentlyEquippedSword", sword.Name)
     character:SetAttribute("CurrentlyEquippedSword", sword.Name)
-
     pcall(function()
         local equipSwordTo = UA.swords.EquipSwordTo
         for k, v in pairs(getupvalues(equipSwordTo)) do
@@ -3051,64 +2935,59 @@ function UA.equip_sword(_, swordName, restore)
             end
         end
     end)
-
-    if not pcall(function()
-        UA.swords:EquipSwordTo(character, sword.Name)
-    end) then
+    if not pcall(function() UA.swords:EquipSwordTo(character, sword.Name) end) then
         return false
     end
-
     local model = character:FindFirstChild(sword.Name)
-    if model then
-        UA:apply_chroma(model, sword)
-    end
-
-    -- Owned swords: notify the server so it becomes the real equipped
-    -- sword (survives death, replicated to other players).
-    -- Unowned swords: skip — server would reject and may reset state.
-    if isEquip and isOwned then
+    if model then UA:apply_chroma(model, sword) end
+    -- Notify server whenever the sword is genuinely owned (equip OR restore).
+    if isOwned then
         if ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo") then
             pcall(function()
                 ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo"):FireServer(sword.Name)
             end)
         end
     end
-
-    if UA.sword_fn then
-        pcall(UA.sword_fn, sword.Name)
-    end
-
+    if UA.sword_fn then pcall(UA.sword_fn, sword.Name) end
     return true
 end
 
--- oxy's restore_sword
+-- Revert:
+--   · Re-enable FireSwordInfo handlers FIRST so server round-trip works.
+--   · If skin changer is on, defer to it (it will re-assert its own target).
+--   · Otherwise restore original sword (server notify happens inside
+--     equip_sword because the original was owned).
 function UA.restore_sword(_)
-    if UA.original_sword and UA.original_sword ~= "" then
-        UA:equip_sword(UA.original_sword, true)
-    else
-        UA.selected_sword = nil
-    end
+    local prev = UA.original_sword
     UA.original_sword = nil
+    UA.selected_sword = nil
     UA:set_sword_override(false)
     getgenv().qzxp_unlockAllActive = false
+    if getgenv().skinChanger and getgenv().swordModel ~= "" then
+        pcall(getgenv().updateSword)
+    elseif prev and prev ~= "" then
+        UA:equip_sword(prev, true)
+        getgenv().swordModel      = prev
+        getgenv().swordAnimations = prev
+        getgenv().swordFX         = prev
+        if getgenv().slashName ~= nil then
+            pcall(function() getgenv().slashName = prev end)
+        end
+    end
 end
 
 function UA.is_deleted(_, category, name)
     if category == "Sword" then return UA.deleted_swords[name] == true end
     return false
 end
-
 function UA.undelete_item(_, category, name)
     if category == "Sword" then UA.deleted_swords[name] = nil end
     UA:refresh_selected()
 end
-
--- oxy's refresh_selected. Turns Buy → Equip for the selected sword.
 function UA.refresh_selected(_)
     if not UA.shop_controller or not UA.shop then return end
     local selectedItem = UA.shop_controller._selectedItem
     if not selectedItem then return end
-
     local holder   = UA.shop:FindFirstChild("Holder")
     local infoBG   = holder and holder:FindFirstChild("InfoBG")
     local buyButton = infoBG and infoBG:FindFirstChild("BuyButton")
@@ -3117,12 +2996,7 @@ function UA.refresh_selected(_)
     if not pt then return end
     local tl = pt:FindFirstChild("TextLabel")
     local pr = pt:FindFirstChild("Price")
-
     if not UA.enabled or not UA.unlocked[selectedItem.type] then
-        -- Restore ONLY if we had previously modified this item's button.
-        -- This is what was causing owned items to show "Equip + coin price":
-        -- we were unconditionally setting Price.Visible = true, which is
-        -- wrong for owned items (their price is naturally hidden).
         local saved = UA._savedButtonState[selectedItem.name]
         if saved then
             buyButton.Visible = saved.buttonVisible
@@ -3130,25 +3004,18 @@ function UA.refresh_selected(_)
             if pr then pr.Visible = saved.priceVisible end
             UA._savedButtonState[selectedItem.name] = nil
         end
-        -- No saved state → we never touched this item's button → leave it
-        -- alone so the game's native rendering is preserved.
         return
     end
-
     if selectedItem.type ~= "Sword" and selectedItem.type ~= "Explosion" then return end
-
     local virtItem = nil
     local virtual = UA.shop_controller._virtualItems and UA.shop_controller._virtualItems[selectedItem.type]
     if virtual then
         virtItem = virtual[selectedItem.key or selectedItem.name]
     end
-
     if UA:is_deleted(selectedItem.type, selectedItem.name) or (virtItem and virtItem.Section == "Unowned") then
         buyButton.Visible = false
         return
     end
-
-    -- Save the exact pre-modification state ONCE per item.
     if not UA._savedButtonState[selectedItem.name] then
         UA._savedButtonState[selectedItem.name] = {
             text         = tl and tl.Text or "",
@@ -3157,13 +3024,10 @@ function UA.refresh_selected(_)
             buttonVisible = buyButton.Visible,
         }
     end
-
     buyButton.Visible = true
     if tl then tl.Visible = true; tl.Text = "Equip" end
     if pr then pr.Visible = false end
 end
-
--- oxy's hook_modern_shop
 function UA.hook_modern_shop(_)
     local api = UA.shop_api
     if not api or UA.original_set_equipped then return end
@@ -3184,9 +3048,6 @@ function UA.hook_modern_shop(_)
         return UA.original_set_equipped(self, unpack(args))
     end
 end
-
--- oxy's hook_shop. Wires BuyButton (capture + replace), itemSelected,
--- GuiService.SelectedObject, and shop Enabled.
 function UA.hook_shop(_)
     local pg   = LocalPlayer:WaitForChild("PlayerGui")
     local shop = pg:FindFirstChild("Shop")
@@ -3201,7 +3062,6 @@ function UA.hook_shop(_)
         return false
     end
     if UA._hookedBuy and UA.shop == shop then return true end
-
     local holder   = shop:FindFirstChild("Holder")
     local infoBG   = holder and holder:FindFirstChild("InfoBG")
     local buyButton = infoBG and infoBG:FindFirstChild("BuyButton")
@@ -3215,16 +3075,10 @@ function UA.hook_shop(_)
         end
         return false
     end
-
     if UA._shopWatchConn then pcall(function() UA._shopWatchConn:Disconnect() end); UA._shopWatchConn = nil end
     if UA._shopChildConn then pcall(function() UA._shopChildConn:Disconnect() end); UA._shopChildConn = nil end
-
     UA._hookedBuy = true
     UA.shop = shop
-
-    -- Capture the game's original BuyButton handlers. Do NOT disable yet —
-    -- `set_enabled` will disable them only while UA is active. This keeps
-    -- the native UI re-rendering working when UA is off.
     local ok, conns = pcall(getconnections, buyButton.Activated)
     if ok and type(conns) == "table" then
         for _, c in ipairs(conns) do
@@ -3234,10 +3088,6 @@ function UA.hook_shop(_)
             end
         end
     end
-
-    -- oxy's replacement BuyButton handler.
-    -- When UA is off, the native handlers (re-enabled by set_enabled) do
-    -- the work — we return early to avoid double-firing.
     buyButton.Activated:Connect(function()
         if not UA.enabled then return end
         local sel = UA.shop_controller and UA.shop_controller._selectedItem
@@ -3252,11 +3102,8 @@ function UA.hook_shop(_)
                 return
             end
         end
-        -- UA on but item not unlocked yet: run the originals manually
         for _, fn in ipairs(UA.original_buy_fns) do spawnTracked(fn) end
     end)
-
-    -- oxy's itemSelected handler
     if UA.shop_controller.itemSelected then
         UA.shop_controller.itemSelected:Connect(function(sel)
             if sel and UA.unlocked[sel.type] then
@@ -3265,16 +3112,12 @@ function UA.hook_shop(_)
             task.defer(function() UA:refresh_selected() end)
         end)
     end
-
-    -- oxy's GuiService.SelectedObject handler (gamepad nav)
     pcall(function()
         game:GetService("GuiService"):GetPropertyChangedSignal("SelectedObject"):Connect(function()
             if not UA.enabled or not UA.shop or not UA.shop.Enabled then return end
             task.defer(function() UA:refresh_selected() end)
         end)
     end)
-
-    -- oxy's shop-Enabled handler
     shop:GetPropertyChangedSignal("Enabled"):Connect(function()
         if not shop.Enabled or not UA.enabled then return end
         for _, cat in ipairs({"Sword", "Explosion"}) do
@@ -3288,24 +3131,20 @@ function UA.hook_shop(_)
             end
         end)
     end
-
     return true
 end
-
--- oxy's hook_chroma + setup_character. Respawn re-equip + attribute
--- persistence (in case the game rewrites CurrentlyEquippedSword mid-life).
 function UA.hook_chroma(_)
     if UA.chroma_bound then return end
     UA.chroma_bound = true
-
     UA.added_connection = LocalPlayer.CharacterAdded:Connect(function(character)
         UA:setup_character(character)
     end)
     if LocalPlayer.Character then
         task.defer(function() UA:setup_character(LocalPlayer.Character) end)
     end
-
+    -- Do not re-assert while the skin changer is on — it has priority.
     UA.sword_attr_connection = LocalPlayer:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
+        if getgenv().skinChanger then return end
         local selected = UA.selected_sword
         if not UA.enabled or not selected then return end
         if LocalPlayer:GetAttribute("CurrentlyEquippedSword") == selected then return end
@@ -3316,15 +3155,12 @@ function UA.hook_chroma(_)
         if UA.sword_fn then pcall(UA.sword_fn, selected) end
     end)
 end
-
 function UA.setup_character(_, character)
     if UA.character_connection then
         pcall(function() UA.character_connection:Disconnect() end)
         UA.character_connection = nil
     end
     if not character then return end
-
-    -- oxy: re-equip last_equipped_sword on character spawn
     if UA.enabled and UA.last_equipped_sword ~= "" then
         task.defer(function()
             if UA.enabled and UA.last_equipped_sword ~= "" then
@@ -3332,7 +3168,6 @@ function UA.setup_character(_, character)
             end
         end)
     end
-
     local function checkChild(child)
         if not UA.enabled or not child:IsA("Model") or not UA.swords or not UA.selected_sword then return end
         local sword = UA.swords:GetSword(child.Name)
@@ -3355,14 +3190,10 @@ function UA.setup_character(_, character)
             end
         end
     end
-
     UA.character_connection = character.ChildAdded:Connect(checkChild)
     for _, child in ipairs(character:GetChildren()) do checkChild(child) end
 end
-
--- oxy's initialize
 function UA.initialize(_)
-    -- Resolve Swords module directly (like oxy)
     local shared = ReplicatedStorage:FindFirstChild("Shared")
     shared = shared and shared:FindFirstChild("ReplicatedInstances")
     shared = shared and shared:FindFirstChild("Swords")
@@ -3370,16 +3201,11 @@ function UA.initialize(_)
         local ok, res = pcall(require, shared)
         if ok then UA.swords = res end
     end
-
-    -- Resolve shop controllers
     local controllersRoot = ReplicatedStorage:FindFirstChild("Controllers")
     if not controllersRoot then
         pcall(function() controllersRoot = ReplicatedStorage:WaitForChild("Controllers", 5) end)
     end
-    if not controllersRoot then
-        UA._lastError = "no Controllers root"
-        return false
-    end
+    if not controllersRoot then UA._lastError = "no Controllers root"; return false end
     local ui = controllersRoot:FindFirstChild("UI")
     local scInst = ui and ui:FindFirstChild("ShopController")
     local saInst = ui and ui:FindFirstChild("ShopControllerAPI")
@@ -3390,10 +3216,7 @@ function UA.initialize(_)
             if scInst and saInst then break end
         end
     end
-    if not scInst and not saInst then
-        UA._lastError = "no ShopController/ShopControllerAPI"
-        return false
-    end
+    if not scInst and not saInst then UA._lastError = "no ShopController/ShopControllerAPI"; return false end
     local sc, sa
     if scInst then
         local ok, res = pcall(require, scInst)
@@ -3403,47 +3226,27 @@ function UA.initialize(_)
         local ok, res = pcall(require, saInst)
         if ok and type(res) == "table" then sa = res end
     end
-    if not sc and not sa then
-        UA._lastError = "require failed"
-        return false
-    end
-
+    if not sc and not sa then UA._lastError = "require failed"; return false end
     UA.shop_controller = sc
     UA.shop_api = sa
-
-    -- oxy calls hook_sword_fx + hook_chroma during init. hook_sword_fx's
-    -- ParrySuccessAll substitution is handled by the qzxp VFX hooker, so
-    -- only hook_chroma is required here. The FireSwordInfo handler capture
-    -- is done at module top (UA.sword_fn).
     UA:hook_chroma()
-
     if UA.shop_controller then UA:hook_shop() end
     if UA.shop_api then UA:hook_modern_shop() end
-
     UA.ready = true
-
     if getgenv().swordModel and getgenv().swordModel ~= "" and UA.last_equipped_sword == "" then
         UA.last_equipped_sword = getgenv().swordModel
     end
-
     UA:set_enabled(UA.enabled)
     return true
 end
-
--- oxy's set_enabled
 function UA.set_enabled(_, on)
     UA.enabled = on == true
     if not UA.ready then return end
-
-    -- Toggle the game's native BuyButton handlers. When UA is on, disable
-    -- them so only our fake-equip handler runs (no double-fire). When UA is
-    -- off, re-enable them so the shop UI re-renders and behaves normally.
     for _, c in ipairs(UA.original_buy_conns) do
         pcall(function()
             if UA.enabled then c:Disable() else c:Enable() end
         end)
     end
-
     for _, cat in ipairs({"Sword", "Explosion"}) do
         if UA.enabled then
             if UA.shop_controller then
@@ -3459,7 +3262,6 @@ function UA.set_enabled(_, on)
             UA:set_modern_unlock(cat, false)
         end
     end
-
     if not UA.enabled then
         UA:restore_sword()
     else
@@ -3473,7 +3275,6 @@ function UA.set_enabled(_, on)
         end
     end
 end
-
 task.spawn(function()
     for attempt = 1, 30 do
         if UA:initialize() then return end
@@ -3483,14 +3284,17 @@ task.spawn(function()
         task.wait(2)
     end
 end)
-
 getgenv().qzxp_UA = UA
+end)
 
 -- ============================================================
 -- HEADLESS / KORBLOX
 -- ============================================================
-local Headless, Korblox = false, false
-local headBak, kBuilt, legBak = nil, {}, {}
+local HK = {
+    Headless = false, Korblox = false,
+    headBak = nil, kBuilt = {}, legBak = {},
+}
+do
 local function rigType(c)
     if not c then return "R6" end
     local h = c:FindFirstChildOfClass("Humanoid")
@@ -3501,26 +3305,26 @@ end
 local function doHeadless()
     local c = LocalPlayer.Character; if not c then return end
     local h = c:FindFirstChild("Head"); if not h then return end
-    if headBak then
-        local b = headBak; headBak = nil
+    if HK.headBak then
+        local b = HK.headBak; HK.headBak = nil
         if b.p and b.p.Parent then pcall(function() b.p.Transparency = b.t; b.p.LocalTransparencyModifier = 0 end) end
         for _, e in ipairs(b.d) do if e.i and e.i.Parent then pcall(function() e.i.Transparency = e.t end) end end
     end
-    headBak = {p = h, t = h.Transparency, d = {}}
+    HK.headBak = {p = h, t = h.Transparency, d = {}}
     pcall(function() h.Transparency = 1; h.LocalTransparencyModifier = 1 end)
     for _, d in ipairs(h:GetChildren()) do
         if d:IsA("Decal") or d:IsA("Texture") then
-            table.insert(headBak.d, {i=d, t=d.Transparency}); pcall(function() d.Transparency = 1 end)
+            table.insert(HK.headBak.d, {i=d, t=d.Transparency}); pcall(function() d.Transparency = 1 end)
         end
     end
     for _, a in ipairs(c:GetChildren()) do
         if a:IsA("Accessory") then
             local hdl = a:FindFirstChild("Handle")
             if hdl and (hdl:FindFirstChild("FaceFrontAttachment") or hdl:FindFirstChild("FaceCenterAttachment")) then
-                table.insert(headBak.d, {i=hdl, t=hdl.Transparency}); pcall(function() hdl.Transparency = 1 end)
+                table.insert(HK.headBak.d, {i=hdl, t=hdl.Transparency}); pcall(function() hdl.Transparency = 1 end)
                 for _, d in ipairs(hdl:GetDescendants()) do
                     if d:IsA("Decal") or d:IsA("Texture") then
-                        table.insert(headBak.d, {i=d, t=d.Transparency}); pcall(function() d.Transparency = 1 end)
+                        table.insert(HK.headBak.d, {i=d, t=d.Transparency}); pcall(function() d.Transparency = 1 end)
                     end
                 end
             end
@@ -3528,20 +3332,20 @@ local function doHeadless()
     end
 end
 local function undoHeadless()
-    if not headBak then return end
-    local b = headBak; headBak = nil
+    if not HK.headBak then return end
+    local b = HK.headBak; HK.headBak = nil
     if b.p and b.p.Parent then pcall(function() b.p.Transparency = b.t; b.p.LocalTransparencyModifier = 0 end) end
     for _, e in ipairs(b.d) do if e.i and e.i.Parent then pcall(function() e.i.Transparency = e.t end) end end
 end
 local function clearK()
-    for _, e in ipairs(kBuilt) do if typeof(e) == "Instance" then pcall(function() e:Destroy() end) end end
-    kBuilt = {}
+    for _, e in ipairs(HK.kBuilt) do if typeof(e) == "Instance" then pcall(function() e:Destroy() end) end end
+    HK.kBuilt = {}
 end
 local function restoreLegs()
-    for _, e in ipairs(legBak) do
+    for _, e in ipairs(HK.legBak) do
         if e.p and e.p.Parent then pcall(function() e.p.Transparency = e.t; e.p.LocalTransparencyModifier = 0 end) end
     end
-    legBak = {}
+    HK.legBak = {}
 end
 local function cleanK(c)
     if not c then return end
@@ -3578,21 +3382,23 @@ local function doKorblox()
     weld.Name = "KorbloxWeld"; weld.Part0 = anchor; weld.Part1 = fake
     weld.C0 = CFrame.new(0, anchor.Size.Y / 2 - ty / 2, 0); weld.Parent = fake
     for _, p in ipairs(parts) do
-        table.insert(legBak, {p=p, t=p.Transparency}); pcall(function() p.Transparency = 1; p.LocalTransparencyModifier = 1 end)
+        table.insert(HK.legBak, {p=p, t=p.Transparency}); pcall(function() p.Transparency = 1; p.LocalTransparencyModifier = 1 end)
     end
-    table.insert(kBuilt, fake)
+    table.insert(HK.kBuilt, fake)
 end
 local function undoKorblox() clearK(); restoreLegs(); cleanK(LocalPlayer.Character) end
 LocalPlayer.CharacterAdded:Connect(function()
-    headBak = nil; kBuilt, legBak = {}, {}
+    HK.headBak = nil; HK.kBuilt, HK.legBak = {}, {}
     task.wait(1)
-    if Korblox then doKorblox() end
-    if Headless then doHeadless() end
+    if HK.Korblox then doKorblox() end
+    if HK.Headless then doHeadless() end
 end)
+HK.doHeadless = doHeadless; HK.undoHeadless = undoHeadless
+HK.doKorblox = doKorblox; HK.undoKorblox = undoKorblox
+end
 
 -- ============================================================
--- THUNDER DASH 0 COOLDOWN (Fallen)
--- Ported from angeli
+-- THUNDER DASH 0 COOLDOWN
 -- ============================================================
 local ThunderDash = {
     ability          = nil,
@@ -3600,7 +3406,6 @@ local ThunderDash = {
     originalReduction = nil,
     loopToken        = 0,
 }
-
 function ThunderDash.ensure()
     if ThunderDash.ability then return true end
     local shared    = ReplicatedStorage:FindFirstChild("Shared")
@@ -3614,7 +3419,6 @@ function ThunderDash.ensure()
     ThunderDash.originalReduction = result.cooldownReductionPerUpgrade
     return true
 end
-
 function ThunderDash.apply()
     if not ThunderDash.ensure() then return false end
     return pcall(function()
@@ -3622,7 +3426,6 @@ function ThunderDash.apply()
         ThunderDash.ability.cooldownReductionPerUpgrade = 0
     end)
 end
-
 function ThunderDash.restore()
     if not ThunderDash.ability then return end
     pcall(function()
@@ -3630,7 +3433,6 @@ function ThunderDash.restore()
         ThunderDash.ability.cooldownReductionPerUpgrade = ThunderDash.originalReduction
     end)
 end
-
 function ThunderDash.start()
     ThunderDash.loopToken += 1
     local token = ThunderDash.loopToken
@@ -3642,12 +3444,10 @@ function ThunderDash.start()
         end
     end)
 end
-
 function ThunderDash.stop()
     ThunderDash.loopToken += 1
     ThunderDash.restore()
 end
-
 getgenv().qzxp_thunderDashStop = function()
     pcall(ThunderDash.stop)
 end
@@ -3658,14 +3458,12 @@ end
 local ESP_On = false
 local espC = {}
 local espHeads = setmetatable({}, {__mode = "k"})
-
 local function clearESPFor(p)
     local d = espC[p]
     if d then pcall(function() d:Destroy() end) end
     espC[p] = nil
     espHeads[p] = nil
 end
-
 local function updateESP()
     if not ESP_On then
         for _, d in pairs(espC) do
@@ -3710,15 +3508,17 @@ local function updateESP()
                     if lbl then
                         local ab = p:GetAttribute("EquippedAbility")
                         lbl.Text = ab and (p.DisplayName .. " [" .. ab .. "]") or p.DisplayName
+                        if LockEnabled and LockTarget ~= "None" and LockTarget == p.Name then
+                            lbl.TextColor3 = Color3.fromRGB(255, 60, 60)
+                        else
+                            lbl.TextColor3 = Color3.new(1, 1, 1)
+                        end
                     end
                 end
             end
         end
     end
 end
-
--- Drop the cached BB / head the instant a player respawns, so the
--- rebuild goes against the fresh character instead of a dead one.
 local function attachESPRespawn(p)
     if p == LocalPlayer then return end
     p.CharacterAdded:Connect(function() clearESPFor(p) end)
@@ -3726,7 +3526,6 @@ end
 for _, p in ipairs(Players:GetPlayers()) do attachESPRespawn(p) end
 Players.PlayerAdded:Connect(attachESPRespawn)
 Players.PlayerRemoving:Connect(clearESPFor)
-
 spawnTracked(function()
     while true do
         task.wait(0.25)
@@ -3734,13 +3533,7 @@ spawnTracked(function()
     end
 end)
 
--- ============================================================
--- KEYBIND LIST & BALL STATS
--- ============================================================
--- Bundled into a single local to keep the top-level function under
--- Luau's 200-register ceiling. Same three flags live here; references
--- elsewhere use UIFlags.KBShow / UIFlags.BSOn / UIFlags.StatsShowFPS
--- / UIFlags.StatsShowPing.
+-- Keybind list & ball stats
 local UIFlags = {
     KBShow        = false,
     BSOn          = false,
@@ -3748,7 +3541,6 @@ local UIFlags = {
     StatsShowPing = false,
 }
 local kbF, bsF
-
 ;(function()
 local function MakeDrag(handle, frame)
     local drag, di, ds, sp = false, nil, nil, nil
@@ -3771,7 +3563,6 @@ end
 local kbGui = Instance.new("ScreenGui"); kbGui.Name = "q_KB"; kbGui.ResetOnSpawn = false; kbGui.IgnoreGuiInset = true; kbGui.DisplayOrder = 100; kbGui.Parent = CoreGui
 kbF = Instance.new("Frame"); kbF.Size = UDim2.new(0, 220, 0, 200); kbF.Position = UDim2.new(1, -235, 0.5, -100); kbF.BackgroundColor3 = Color3.fromRGB(17, 17, 19); kbF.Visible = false; kbF.Parent = kbGui; kbF.ClipsDescendants = true
 Instance.new("UICorner", kbF).CornerRadius = UDim.new(0, 10)
-local kbG = Instance.new("UIGradient"); kbG.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromRGB(22, 22, 26)), ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 10, 12))}); kbG.Rotation = 90; kbG.Parent = kbF
 local kbS = Instance.new("UIStroke"); kbS.Color = Color3.fromRGB(58, 58, 66); kbS.Transparency = 0.25; kbS.Parent = kbF
 local kbT = Instance.new("TextLabel"); kbT.Size = UDim2.new(1, 0, 0, 28); kbT.BackgroundColor3 = Color3.fromRGB(30, 30, 34); kbT.BackgroundTransparency = 0.2; kbT.Font = Enum.Font.GothamBold; kbT.TextSize = 13; kbT.TextColor3 = Color3.fromRGB(230, 230, 235); kbT.Text = "  Keybind List"; kbT.TextXAlignment = Enum.TextXAlignment.Left; kbT.Parent = kbF
 Instance.new("UICorner", kbT).CornerRadius = UDim.new(0, 8)
@@ -3797,7 +3588,6 @@ end
 local bsGui = Instance.new("ScreenGui"); bsGui.Name = "q_BS"; bsGui.ResetOnSpawn = false; bsGui.IgnoreGuiInset = true; bsGui.DisplayOrder = 100; bsGui.Parent = CoreGui
 bsF = Instance.new("Frame"); bsF.Size = UDim2.new(0, 220, 0, 120); bsF.Position = UDim2.new(1, -470, 0.5, -60); bsF.BackgroundColor3 = Color3.fromRGB(17, 17, 19); bsF.Visible = false; bsF.Parent = bsGui; bsF.ClipsDescendants = true
 Instance.new("UICorner", bsF).CornerRadius = UDim.new(0, 10)
-local bsG = Instance.new("UIGradient"); bsG.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromRGB(22, 22, 26)), ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 10, 12))}); bsG.Rotation = 90; bsG.Parent = bsF
 local bsStroke = Instance.new("UIStroke", bsF); bsStroke.Color = Color3.fromRGB(58, 58, 66); bsStroke.Transparency = 0.25
 local bsT = Instance.new("TextLabel"); bsT.Size = UDim2.new(1, 0, 0, 28); bsT.BackgroundColor3 = Color3.fromRGB(30, 30, 34); bsT.BackgroundTransparency = 0.2; bsT.Font = Enum.Font.GothamBold; bsT.TextSize = 13; bsT.TextColor3 = Color3.fromRGB(230, 230, 235); bsT.Text = "  Ball Stats"; bsT.TextXAlignment = Enum.TextXAlignment.Left; bsT.Parent = bsF
 Instance.new("UICorner", bsT).CornerRadius = UDim.new(0, 8)
@@ -3845,15 +3635,9 @@ addRenderHandler(function()
         end
     end
 end, 5)
-end)() -- kb/bs scope
+end)()
 
--- ============================================================
--- STATS HUD (FPS + Ping) — draggable, matches kb/bs styling
--- ============================================================
--- StatsShowFPS / StatsShowPing live in UIFlags (see KEYBIND LIST
--- & BALL STATS). No locals here — keeps the top-level under the
--- 200-register ceiling.
-
+-- Stats HUD
 ;(function()
 local function MakeDrag(handle, frame)
     local drag, di, ds, sp = false, nil, nil, nil
@@ -3873,16 +3657,12 @@ local function MakeDrag(handle, frame)
         end
     end)
 end
-
 local statsGui = Instance.new("ScreenGui")
 statsGui.Name = "qzxp_Stats"
 statsGui.ResetOnSpawn = false
 statsGui.IgnoreGuiInset = true
 statsGui.DisplayOrder = 100
 statsGui.Parent = CoreGui
-
--- Same visual language as kbF / bsF, and positioned in the same column:
--- sits just below the keybind list (which is at 0.5, -100 with height 200).
 local statsF = Instance.new("Frame")
 statsF.Size = UDim2.new(0, 220, 0, 78)
 statsF.Position = UDim2.new(1, -235, 0.5, 108)
@@ -3891,20 +3671,10 @@ statsF.Visible = false
 statsF.Parent = statsGui
 statsF.ClipsDescendants = true
 Instance.new("UICorner", statsF).CornerRadius = UDim.new(0, 10)
-
-local statsG = Instance.new("UIGradient")
-statsG.Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(22, 22, 26)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 10, 12)),
-})
-statsG.Rotation = 90
-statsG.Parent = statsF
-
 local statsS = Instance.new("UIStroke")
 statsS.Color = Color3.fromRGB(58, 58, 66)
 statsS.Transparency = 0.25
 statsS.Parent = statsF
-
 local statsT = Instance.new("TextLabel")
 statsT.Size = UDim2.new(1, 0, 0, 28)
 statsT.BackgroundColor3 = Color3.fromRGB(30, 30, 34)
@@ -3916,16 +3686,13 @@ statsT.Text = "  Stats"
 statsT.TextXAlignment = Enum.TextXAlignment.Left
 statsT.Parent = statsF
 Instance.new("UICorner", statsT).CornerRadius = UDim.new(0, 8)
-
 local statsC = Instance.new("Frame")
 statsC.Size = UDim2.new(1, -10, 1, -34)
 statsC.Position = UDim2.new(0, 5, 0, 31)
 statsC.BackgroundTransparency = 1
 statsC.Parent = statsF
 Instance.new("UIListLayout", statsC).Padding = UDim.new(0, 3)
-
 MakeDrag(statsT, statsF)
-
 local function mkStatLabel(order)
     local l = Instance.new("TextLabel")
     l.Size = UDim2.new(1, 0, 0, 18)
@@ -3939,15 +3706,12 @@ local function mkStatLabel(order)
     l.Parent = statsC
     return l
 end
-
 local fpsLbl  = mkStatLabel(1)
 local pingLbl = mkStatLabel(2)
-
 local _fpsAvg = 60
 local _statsLast = 0
 local _lastFpsTxt  = ""
 local _lastPingTxt = ""
-
 addRenderHandler(function(dt)
     if dt and dt > 0 then
         _fpsAvg = _fpsAvg * 0.9 + (1 / dt) * 0.1
@@ -3955,11 +3719,9 @@ addRenderHandler(function(dt)
     local now = os.clock()
     if now - _statsLast < 0.15 then return end
     _statsLast = now
-
     statsF.Visible = UIFlags.StatsShowFPS or UIFlags.StatsShowPing
     fpsLbl.Visible  = UIFlags.StatsShowFPS
     pingLbl.Visible = UIFlags.StatsShowPing
-
     if UIFlags.StatsShowFPS then
         local t = string.format("FPS: %d", math.floor(_fpsAvg + 0.5))
         if t ~= _lastFpsTxt then _lastFpsTxt = t; fpsLbl.Text = t end
@@ -3982,70 +3744,108 @@ end)()
 ;(function()
 do
     local s1 = Tabs.Main:AddSection("Autoparry")
-    s1:AddToggle("APToggle", {Title = "Enabled", Default = false, Callback = function(v) AP_On = v; notify({Title = "AP", Content = v and "On" or "Off", Duration = 2}) end})
-    s1:AddSlider("Accuracy", {Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 1, Callback = function(v) AP_Acc = v; updDiv() end})
-    s1:AddToggle("RandAccToggle", {Title = "Randomize Acc", Default = false, Callback = function(v) RandAcc = v end})
-    s1:AddDropdown("CurveMode", {Title = "Curve", Values = CURVES, Default = "Camera", Multi = false, Callback = function(v) CurveMode = v end})
-    s1:AddToggle("AbilityToggle", {Title = "Auto Ability", Default = false, Callback = function(v) AutoAbility = v end})
-    s1:AddToggle("AnimFixAP", {Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_AP = v end})
+    s1:AddToggle("APToggle", {Title = "Enabled", Default = false, Callback = function(v)
+        AP_On = v
+        notify({Title = "AP", Content = v and "On" or "Off", Duration = 2})
+    end})
     s1:AddKeybind("APKey", {Title = "Keybind", Default = "P", Callback = function()
         if Options.APToggle then Options.APToggle:SetValue(not AP_On) end
     end, ChangedCallback = function() end})
+    s1:AddSlider("Accuracy", {Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 1, Callback = function(v)
+        AP_Acc = v; updDiv()
+    end})
+    s1:AddToggle("RandAccToggle", {Title = "Randomize Acc", Default = false, Callback = function(v)
+        RandAcc = v
+    end})
+    s1:AddDropdown("CurveMode", {Title = "Curve", Values = CURVES, Default = "Camera", Multi = false, Callback = function(v)
+        CurveMode = v
+    end})
+    s1:AddToggle("AnimFixAP", {Title = "Anim Fix", Default = true, Callback = function(v)
+        AnimFix_AP = v
+    end})
+    s1:AddToggle("AbilityToggle", {Title = "Auto Ability", Default = false, Callback = function(v)
+        AutoAbility = v
+    end})
 end
 do
     local s2 = Tabs.Detection:AddSection("Detections")
-    s2:AddToggle("InfDet", {Title = "Infinity", Default = false, Callback = function(v) InfDet = v end})
-    s2:AddToggle("DSDet", {Title = "Death Slash", Default = false, Callback = function(v) DSDet = v end})
-    s2:AddToggle("THDet", {Title = "Time Hole", Default = false, Callback = function(v) THDet = v end})
-    s2:AddToggle("SFDet", {Title = "Slashes of Fury", Default = false, Callback = function(v) SFDet = v end})
+    s2:AddToggle("InfDet", {Title = "Infinity", Default = false, Callback = function(v)
+        InfDet = v
+    end})
+    s2:AddToggle("DSDet", {Title = "Death Slash", Default = false, Callback = function(v)
+        DSDet = v
+    end})
+    s2:AddToggle("THDet", {Title = "Time Hole", Default = false, Callback = function(v)
+        THDet = v
+    end})
+    s2:AddToggle("SFDet", {Title = "Slashes of Fury", Default = false, Callback = function(v)
+        SFDet = v
+    end})
 end
 do
     local s3 = Tabs.Spam:AddSection("Spam")
-    s3:AddToggle("SpamToggle", {Title = "Enabled", Default = false, Callback = function(v) Spam_On = v; notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2}) end})
-    local spamRPSSlider
-    spamRPSSlider = s3:AddSlider("SpamRPS", {
-        Title = "RPS", Default = 100, Min = 5, Max = 1000, Rounding = 0,
-        Callback = function(v)
-            local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
-            SpamRPS = snapped; SpamInt = 1 / snapped
-            if SpamAnimMatchRPS then SpamAnimRate = snapped end
-            if spamRPSSlider and spamRPSSlider.Value ~= snapped then
-                task.defer(function() pcall(function() spamRPSSlider:SetValue(snapped) end) end)
-            end
-        end,
-    })
-    s3:AddToggle("SpamAnimMatchRPS", {
-        Title = "Match Anim Rate to RPS",
-        Default = false,
-        Callback = function(v)
-            SpamAnimMatchRPS = v
-            SpamAnimRate = v and SpamRPS or 100
-        end,
-    })
-    s3:AddToggle("SpamDet", {Title = "Respect Detections", Default = true, Callback = function(v) SpamDetect = v end})
-    s3:AddToggle("AnimFixSpam", {Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_Spam = v end})
+    s3:AddToggle("SpamToggle", {Title = "Enabled", Default = false, Callback = function(v)
+        Spam_On = v
+        if not v and getgenv().qzxp_resetAPState then pcall(getgenv().qzxp_resetAPState) end
+        notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2})
+    end})
     s3:AddKeybind("SpamKey", {Title = "Keybind", Default = "E", Callback = function()
         if Options.SpamToggle then Options.SpamToggle:SetValue(not Spam_On) else Spam_On = not Spam_On end
     end, ChangedCallback = function() end})
+    local spamRPSSlider
+    spamRPSSlider = s3:AddSlider("SpamRPS", {Title = "RPS", Default = 100, Min = 5, Max = 1000, Rounding = 0, Callback = function(v)
+        local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
+        SpamRPS = snapped; SpamInt = 1 / snapped
+        if SpamAnimMatchRPS then SpamAnimRate = snapped end
+        if spamRPSSlider and spamRPSSlider.Value ~= snapped then
+            task.defer(function() pcall(function() spamRPSSlider:SetValue(snapped) end) end)
+        end
+    end})
+    s3:AddToggle("SpamAnimMatchRPS", {Title = "Match Anim Rate to RPS", Default = false, Callback = function(v)
+        SpamAnimMatchRPS = v
+        SpamAnimRate = v and SpamRPS or 100
+    end})
+    s3:AddToggle("AutoSpamToggle", {Title = "Auto Spam", Default = false, Callback = function(v)
+        AutoSpam_On = v
+    end})
+    s3:AddDropdown("ClashingThreshold", {Title = "Clashing Threshold", Values = {"1", "2", "3"}, Default = "1", Callback = function(v)
+        ClashingThreshold = tonumber(v) or 1
+    end})
+    s3:AddToggle("SpamDet", {Title = "Respect Detections", Default = true, Callback = function(v)
+        SpamDetect = v
+    end})
+    s3:AddToggle("AnimFixSpam", {Title = "Anim Fix", Default = true, Callback = function(v)
+        AnimFix_Spam = v
+    end})
 end
 do
     local s4 = Tabs.Trigger:AddSection("Triggerbot")
-    s4:AddToggle("TBToggle", {Title = "Enabled", Default = false, Callback = function(v) TB_On = v; notify({Title = "TB", Content = v and "On" or "Off", Duration = 2}) end})
-    s4:AddToggle("AnimFixTB", {Title = "Anim Fix", Default = true, Callback = function(v) AnimFix_TB = v end})
+    s4:AddToggle("TBToggle", {Title = "Enabled", Default = false, Callback = function(v)
+        TB_On = v
+        if not v and getgenv().qzxp_resetAPState then pcall(getgenv().qzxp_resetAPState) end
+        notify({Title = "TB", Content = v and "On" or "Off", Duration = 2})
+    end})
     s4:AddKeybind("TBKey", {Title = "Keybind", Default = "R", Callback = function()
         if Options.TBToggle then Options.TBToggle:SetValue(not TB_On) end
     end, ChangedCallback = function() end})
+    s4:AddToggle("AnimFixTB", {Title = "Anim Fix", Default = true, Callback = function(v)
+        AnimFix_TB = v
+    end})
 end
 do
     local s5 = Tabs.Skins:AddSection("Sword Changer")
     local skinRef = s5:AddToggle("SkinToggle", {Title = "Enabled", Default = false, Callback = function(v)
         getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
-        if v and getgenv().swordModel ~= "" then pcall(getgenv().updateSword)
-        elseif not v then pcall(getgenv().revertSword) end
+        if v and getgenv().swordModel ~= "" then
+            pcall(getgenv().updateSword)
+        elseif not v then
+            pcall(getgenv().revertSword)
+        end
     end})
     getgenv().setSkinUI = function(v)
         if skinRef and skinRef.Value ~= v then
-            skinRef:SetValue(v); getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
+            skinRef:SetValue(v)
+            getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
         end
     end
     s5:AddInput("ManualSword", {Title = "Sword Name", Default = "", Placeholder = "type sword name...", Callback = function(v)
@@ -4056,168 +3856,166 @@ do
         if getgenv().skinChanger and e ~= "" then pcall(getgenv().updateSword) end
         pcall(getgenv().saveLastEquippedSword, e)
     end})
-
     local s5b = Tabs.Skins:AddSection("Unlock All (Swords)")
-    s5b:AddToggle("UnlockAllToggle", {
-        Title = "Enabled",
-        Default = false,
-        Callback = function(v)
-            UA:set_enabled(v)
-            notify({Title = "Unlock All", Content = v and "On" or "Off", Duration = 2})
-        end,
-    })
-    s5b:AddButton({
-        Title = "Refresh Shop",
-        Callback = function()
-            if UA.enabled then UA:schedule_refresh() end
-        end,
-    })
+    s5b:AddToggle("UnlockAllToggle", {Title = "Enabled", Default = false, Callback = function(v)
+        UA:set_enabled(v)
+        notify({Title = "Unlock All", Content = v and "On" or "Off", Duration = 2})
+    end})
+    s5b:AddButton({Title = "Refresh Shop", Callback = function()
+        if UA.enabled then UA:schedule_refresh() end
+    end})
 end
 do
     local s6 = Tabs.Lock:AddSection("Parry Lock")
-    s6:AddToggle("LockToggle", {Title = "Enabled", Default = false, Callback = function(v) LockEnabled = v; notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2}) end})
-    s6:AddDropdown("LockTarget", {Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v) LockTarget = pLookup[v] or "None" end})
+    s6:AddToggle("LockToggle", {Title = "Enabled", Default = false, Callback = function(v)
+        LockEnabled = v
+        notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2})
+    end})
+    s6:AddKeybind("LockKey", {Title = "Toggle Key", Default = "L", Callback = function()
+        if Options.LockToggle then Options.LockToggle:SetValue(not LockEnabled) end
+    end, ChangedCallback = function() end})
+    s6:AddDropdown("LockTarget", {Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v)
+        LockTarget = pLookup[v] or "None"
+    end})
     s6:AddKeybind("CursorKey", {Title = "Cursor Lock", Default = "T", Callback = function()
         local t = closestToCursor()
         if t then LockTarget = t; syncLockDD(); notify({Title = "Lock", Content = t, Duration = 2}) end
     end, ChangedCallback = function() end})
-    s6:AddKeybind("LockKey", {Title = "Toggle Key", Default = "L", Callback = function()
-        if Options.LockToggle then Options.LockToggle:SetValue(not LockEnabled) end
-    end, ChangedCallback = function() end})
     s6:AddButton({Title = "Refresh List", Callback = function() syncLockDD() end})
 end
 do
-    local s6h = Tabs.Lock:AddSection("Lock Indicator")
-    s6h:AddToggle("HLToggle", {Title = "Enabled", Default = false, Callback = function(v) HLEnabled = v end})
-    local hr, hg, hb = 255, 60, 60
-    local function updHL() HLColor = Color3.fromRGB(hr, hg, hb) end
-    s6h:AddSlider("HLR", {Title = "R", Default = 255, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hr = v; updHL() end})
-    s6h:AddSlider("HLG", {Title = "G", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hg = v; updHL() end})
-    s6h:AddSlider("HLB", {Title = "B", Default = 60, Min = 0, Max = 255, Rounding = 0, Callback = function(v) hb = v; updHL() end})
-end
-do
     local s7 = Tabs.Visuals:AddSection("ESP")
-    s7:AddToggle("ESPToggle", {Title = "Ability ESP", Default = false, Callback = function(v) ESP_On = v; updateESP() end})
+    s7:AddToggle("ESPToggle", {Title = "Ability ESP", Default = false, Callback = function(v)
+        ESP_On = v; updateESP()
+    end})
     local s7b = Tabs.Visuals:AddSection("Ball Stats")
-    s7b:AddToggle("BSToggle", {Title = "Ball Info", Default = false, Callback = function(v) UIFlags.BSOn = v end})
+    s7b:AddToggle("BSToggle", {Title = "Ball Info", Default = false, Callback = function(v)
+        UIFlags.BSOn = v
+    end})
     local s7p = Tabs.Visuals:AddSection("Parry Range")
     s7p:AddToggle("PRVToggle", {Title = "Range Ring", Default = false, Callback = function(v)
         PRV.On = v
         if not v then PRV.Destroy() end
     end})
     local s7c = Tabs.Visuals:AddSection("Character")
+    s7c:AddToggle("HeadlessT", {Title = "Headless", Default = false, Callback = function(v)
+        HK.Headless = v
+        if v then HK.doHeadless() else HK.undoHeadless() end
+    end})
+    s7c:AddToggle("KorbloxT", {Title = "Korblox Leg", Default = false, Callback = function(v)
+        HK.Korblox = v
+        if v then HK.doKorblox() else HK.undoKorblox() end
+    end})
     local s7ab = Tabs.Visuals:AddSection("Ability")
-    s7ab:AddToggle("ThunderDashToggle", {
-        Title   = "Thunder Dash 0 Cooldown",
-        Default = false,
-        Callback = function(v)
-            if v then
-                ThunderDash.start()
-                notify({Title = "Thunder Dash", Content = "0 Cooldown On",  Duration = 2})
-            else
-                ThunderDash.stop()
-                notify({Title = "Thunder Dash", Content = "0 Cooldown Off", Duration = 2})
-            end
-        end,
-    })
-    s7c:AddToggle("HeadlessT", {Title = "Headless", Default = false, Callback = function(v) Headless = v; if v then doHeadless() else undoHeadless() end end})
-    s7c:AddToggle("KorbloxT", {Title = "Korblox Leg", Default = false, Callback = function(v) Korblox = v; if v then doKorblox() else undoKorblox() end end})
+    s7ab:AddToggle("ThunderDashToggle", {Title = "Thunder Dash 0 Cooldown", Default = false, Callback = function(v)
+        if v then
+            ThunderDash.start()
+            notify({Title = "Thunder Dash", Content = "0 Cooldown On", Duration = 2})
+        else
+            ThunderDash.stop()
+            notify({Title = "Thunder Dash", Content = "0 Cooldown Off", Duration = 2})
+        end
+    end})
+
 -- ============================================================
--- AVATAR CHANGER (ported from Aries) — qzxp edition
+-- AVATAR / PROFILE SPOOFER
 -- ============================================================
 do
+    -- ---------------------------------------------------------
+    -- STATE
+    -- ---------------------------------------------------------
     local AvatarSlotNumber    = nil
     local AvatarDefaultDesc   = nil
     local AvatarKillFeedConn  = nil
     local AvatarCharacterConn = nil
     local AvatarCloneConn     = nil
+    local ProfileSpoofer      = { usernameEnabled = false, displayNameEnabled = false, info = nil }
+    local spoofedLabels       = setmetatable({}, {__mode = "k"})
+    local hookedLabels        = setmetatable({}, {__mode = "k"})
+    local watchedRoots        = setmetatable({}, {__mode = "k"})
 
+    -- ---------------------------------------------------------
+    -- SHARED HELPERS
+    -- ---------------------------------------------------------
+    local function findPlayerListFrame()
+        local cg = game:GetService("CoreGui")
+        local pl = cg:FindFirstChild("PlayerList"); if pl then return pl end
+        local rg = cg:FindFirstChild("RobloxGui")
+        return rg and rg:FindFirstChild("PlayerList")
+    end
+    local function currentRoots()
+        local out = {}
+        local pl = findPlayerListFrame(); if pl then out[#out + 1] = pl end
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local lb = pg and pg:FindFirstChild("Leaderboard"); if lb then out[#out + 1] = lb end
+        return out
+    end
+    local function getTargetHeadshotUrl()
+        local id = getgenv().qzxp_avatarUserId
+        if not id then return nil end
+        return string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", id)
+    end
+
+    -- ---------------------------------------------------------
+    -- AVATAR APPEARANCE
+    -- ---------------------------------------------------------
     local function GetDefaultAvatarDescription()
         if AvatarDefaultDesc then return AvatarDefaultDesc end
-        local ok, result = pcall(function()
-            return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId)
-        end)
+        local ok, result = pcall(function() return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId) end)
         if ok and result then AvatarDefaultDesc = result end
         return AvatarDefaultDesc
     end
-
     local function WeldAccessory(accessory, character)
-        local handle = accessory:FindFirstChild("Handle")
-        if not handle then return end
-        local attachment = handle:FindFirstChildOfClass("Attachment")
-        if not attachment then return end
-        local targetAttachment = character:FindFirstChild(attachment.Name, true)
-        if not targetAttachment then return end
+        local handle = accessory:FindFirstChild("Handle"); if not handle then return end
+        local attachment = handle:FindFirstChildOfClass("Attachment"); if not attachment then return end
+        local targetAttachment = character:FindFirstChild(attachment.Name, true); if not targetAttachment then return end
         local weld = Instance.new("Weld")
-        weld.Name  = "AccessoryWeld"
-        weld.Part0 = handle
-        weld.Part1 = targetAttachment.Parent
-        weld.C0    = attachment.CFrame
-        weld.C1    = targetAttachment.CFrame
-        weld.Parent = handle
+        weld.Name = "AccessoryWeld"; weld.Part0 = handle; weld.Part1 = targetAttachment.Parent
+        weld.C0 = attachment.CFrame; weld.C1 = targetAttachment.CFrame; weld.Parent = handle
         handle.Anchored = false
     end
-
     local function MeshIdOf(part)
         if part:IsA("MeshPart") then return part.MeshId end
         local sm = part:FindFirstChildOfClass("SpecialMesh")
         return sm and sm.MeshId or ""
     end
-
     local function CopyAttachments(src, dst)
         for _, child in ipairs(src:GetChildren()) do
             if child:IsA("Attachment") then
                 local matched = dst:FindFirstChild(child.Name)
                 if matched then
-                    matched.CFrame          = child.CFrame
-                    matched.Position        = child.Position
-                    matched.Orientation     = child.Orientation
-                    matched.Axis            = child.Axis
-                    matched.SecondaryAxis   = child.SecondaryAxis
+                    matched.CFrame = child.CFrame
+                    matched.Position = child.Position
+                    matched.Orientation = child.Orientation
+                    matched.Axis = child.Axis
+                    matched.SecondaryAxis = child.SecondaryAxis
                 else
                     child:Clone().Parent = dst
                 end
             end
         end
     end
-
     local function ApplyAvatar(parent)
         if not parent or not AvatarSlotNumber then return end
-        local humanoid = parent:FindFirstChildOfClass("Humanoid")
-                        or parent:WaitForChild("Humanoid", 5)
+        local humanoid = parent:FindFirstChildOfClass("Humanoid") or parent:WaitForChild("Humanoid", 5)
         if not humanoid then return end
         if parent:GetAttribute("qzxp_AvatarApplied") == AvatarSlotNumber then return end
         parent:SetAttribute("qzxp_AvatarApplied", AvatarSlotNumber)
-
-        local ok, desc = pcall(function()
-            return Players:GetHumanoidDescriptionFromUserId(AvatarSlotNumber)
-        end)
-        if not ok or not desc then
-            parent:SetAttribute("qzxp_AvatarApplied", nil)
-            return
-        end
-
+        local ok, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(AvatarSlotNumber) end)
+        if not ok or not desc then parent:SetAttribute("qzxp_AvatarApplied", nil); return end
         local equippedSword = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
-
         for _, child in parent:GetChildren() do
             if child:IsA("Accessory") then
-                if child.Name ~= equippedSword then
-                    pcall(function() child:Destroy() end)
-                end
+                if child.Name ~= equippedSword then pcall(function() child:Destroy() end) end
             elseif child:IsA("Shirt") or child:IsA("Pants") or child:IsA("ShirtGraphic")
                 or child:IsA("BodyColors") or child:IsA("CharacterMesh") then
                 pcall(function() child:Destroy() end)
             end
         end
-
         local ok2, tempModel = pcall(function()
             return Players:CreateHumanoidModelFromDescription(desc, humanoid.RigType)
         end)
-        if not ok2 or not tempModel then
-            parent:SetAttribute("qzxp_AvatarApplied", nil)
-            return
-        end
-
+        if not ok2 or not tempModel then parent:SetAttribute("qzxp_AvatarApplied", nil); return end
         for _, child in tempModel:GetChildren() do
             if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
                 local target = parent:FindFirstChild(child.Name)
@@ -4229,7 +4027,7 @@ do
                         if sm2 then sm2:Clone().Parent = target end
                         if child:IsA("MeshPart") and target:IsA("MeshPart") then
                             pcall(function()
-                                target.MeshId    = child.MeshId
+                                target.MeshId = child.MeshId
                                 target.TextureID = child.TextureID
                             end)
                             CopyAttachments(child, target)
@@ -4240,7 +4038,6 @@ do
                 child:Clone().Parent = parent
             end
         end
-
         for _, child in tempModel:GetChildren() do
             if child:IsA("Shirt") or child:IsA("Pants") or child:IsA("ShirtGraphic")
                 or child:IsA("BodyColors") then
@@ -4251,11 +4048,10 @@ do
                 WeldAccessory(clone, parent)
             end
         end
-
-        local head     = parent:FindFirstChild("Head")
+        local head = parent:FindFirstChild("Head")
         local tempHead = tempModel:FindFirstChild("Head")
         if head and tempHead then
-            local decal     = head:FindFirstChildOfClass("Decal")
+            local decal = head:FindFirstChildOfClass("Decal")
             local tempDecal = tempHead:FindFirstChildOfClass("Decal")
             if tempDecal then
                 if decal then decal.Texture = tempDecal.Texture
@@ -4264,33 +4060,21 @@ do
                 pcall(function() decal:Destroy() end)
             end
         end
-
         pcall(function() tempModel:Destroy() end)
     end
-
     local function RevertAvatar()
-        local character = LocalPlayer.Character
-        if not character then return end
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        if not humanoid then return end
-
+        local character = LocalPlayer.Character; if not character then return end
+        local humanoid = character:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
         character:SetAttribute("qzxp_AvatarApplied", nil)
-
-        local defaultDesc = GetDefaultAvatarDescription()
-        if not defaultDesc then return end
-
+        local defaultDesc = GetDefaultAvatarDescription(); if not defaultDesc then return end
         local ok, tempModel = pcall(function()
             return Players:CreateHumanoidModelFromDescription(defaultDesc, humanoid.RigType)
         end)
         if not ok or not tempModel then return end
-
         local accessoryList = {}
         for _, child in tempModel:GetChildren() do
-            if child:IsA("Accessory") then
-                table.insert(accessoryList, child:Clone())
-            end
+            if child:IsA("Accessory") then table.insert(accessoryList, child:Clone()) end
         end
-
         for _, child in character:GetChildren() do
             if child:IsA("Shirt") or child:IsA("Pants") or child:IsA("ShirtGraphic")
                 or child:IsA("Accessory") or child:IsA("BodyColors")
@@ -4298,7 +4082,6 @@ do
                 pcall(function() child:Destroy() end)
             end
         end
-
         for _, child in tempModel:GetChildren() do
             if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
                 local target = character:FindFirstChild(child.Name)
@@ -4309,9 +4092,9 @@ do
                     if sm2 then sm2:Clone().Parent = target end
                     if child:IsA("MeshPart") and target:IsA("MeshPart") then
                         pcall(function()
-                            target.MeshId    = child.MeshId
+                            target.MeshId = child.MeshId
                             target.TextureID = child.TextureID
-                            target.Size      = child.Size
+                            target.Size = child.Size
                         end)
                     end
                 end
@@ -4319,14 +4102,12 @@ do
                 child:Clone().Parent = character
             end
         end
-
         for _, child in tempModel:GetChildren() do
             if child:IsA("Shirt") or child:IsA("Pants")
                 or child:IsA("ShirtGraphic") or child:IsA("BodyColors") then
                 child:Clone().Parent = character
             end
         end
-
         for _, accessory in accessoryList do
             accessory.Parent = character
             local handle = accessory:FindFirstChild("Handle")
@@ -4336,45 +4117,33 @@ do
                     local targetAttachment = character:FindFirstChild(attachment.Name, true)
                     if targetAttachment then
                         local weld = Instance.new("Weld")
-                        weld.Part0  = handle
-                        weld.Part1  = targetAttachment.Parent
-                        weld.C0     = attachment.CFrame
-                        weld.C1     = targetAttachment.CFrame
+                        weld.Part0 = handle; weld.Part1 = targetAttachment.Parent
+                        weld.C0 = attachment.CFrame; weld.C1 = targetAttachment.CFrame
                         weld.Parent = handle
                     end
                 end
             end
         end
-
         pcall(function() tempModel:Destroy() end)
     end
-
     local function HookKillFeed()
-        if AvatarKillFeedConn then
-            pcall(function() AvatarKillFeedConn:Disconnect() end)
-            AvatarKillFeedConn = nil
-        end
+        if AvatarKillFeedConn then pcall(function() AvatarKillFeedConn:Disconnect() end); AvatarKillFeedConn = nil end
         if not AvatarSlotNumber then return end
         local killFeed = LocalPlayer.PlayerGui:FindFirstChild("KillFeed")
                       or LocalPlayer.PlayerGui:WaitForChild("KillFeed", 10)
         if not killFeed then return end
-        local frame = killFeed:FindFirstChild("Frame")
-        if not frame then return end
-        local headshotUrl = "rbxthumb://type=AvatarHeadShot&id="
-                          .. AvatarSlotNumber .. "&w=100&h=100"
+        local frame = killFeed:FindFirstChild("Frame"); if not frame then return end
+        local headshotUrl = "rbxthumb://type=AvatarHeadShot&id=" .. AvatarSlotNumber .. "&w=100&h=100"
         AvatarKillFeedConn = frame.ChildAdded:Connect(function(child)
-            local holder = child:FindFirstChild("Holder")
-            if not holder then return end
+            local holder = child:FindFirstChild("Holder"); if not holder then return end
             local left = holder:FindFirstChild("Left")
             local vector = left and left:FindFirstChild("Vector")
             if vector then pcall(function() vector.Image = headshotUrl end) end
         end)
     end
-
     local function HookEncryptedClone()
         if AvatarCloneConn then return end
-        local alive = Workspace:FindFirstChild("Alive")
-                   or Workspace:WaitForChild("Alive", 30)
+        local alive = Workspace:FindFirstChild("Alive") or Workspace:WaitForChild("Alive", 30)
         if not alive then return end
         AvatarCloneConn = alive.ChildAdded:Connect(function(child)
             if child.Name:find("ENCRYPTED CLONE", 1, true) then
@@ -4384,7 +4153,6 @@ do
             end
         end)
     end
-
     local function SetAvatarEnabled(v)
         if v then
             if not AvatarSlotNumber then
@@ -4393,227 +4161,123 @@ do
             end
             local char = LocalPlayer.Character
             if char then ApplyAvatar(char) end
-            HookKillFeed()
-            HookEncryptedClone()
-            if AvatarCharacterConn then
-                pcall(function() AvatarCharacterConn:Disconnect() end)
-            end
+            HookKillFeed(); HookEncryptedClone()
+            if AvatarCharacterConn then pcall(function() AvatarCharacterConn:Disconnect() end) end
             AvatarCharacterConn = LocalPlayer.CharacterAppearanceLoaded:Connect(function()
                 local newChar = LocalPlayer.Character
-                if newChar then
-                    ApplyAvatar(newChar)
-                    HookKillFeed()
-                end
+                if newChar then ApplyAvatar(newChar); HookKillFeed() end
             end)
         else
             RevertAvatar()
-            if AvatarCharacterConn then
-                pcall(function() AvatarCharacterConn:Disconnect() end)
-                AvatarCharacterConn = nil
-            end
-            if AvatarKillFeedConn then
-                pcall(function() AvatarKillFeedConn:Disconnect() end)
-                AvatarKillFeedConn = nil
-            end
-            if AvatarCloneConn then
-                pcall(function() AvatarCloneConn:Disconnect() end)
-                AvatarCloneConn = nil
-            end
+            if AvatarCharacterConn then pcall(function() AvatarCharacterConn:Disconnect() end); AvatarCharacterConn = nil end
+            if AvatarKillFeedConn then pcall(function() AvatarKillFeedConn:Disconnect() end); AvatarKillFeedConn = nil end
+            if AvatarCloneConn then pcall(function() AvatarCloneConn:Disconnect() end); AvatarCloneConn = nil end
         end
     end
 
-    local s7a = Tabs.Visuals:AddSection("Avatar")
-
-    -- Forward-declared so the AvatarSaver callback (below) can invalidate
-    -- the cache when a new UserId is entered.
-    local ProfileSpoofer = { enabled = false, info = nil }
-
-    s7a:AddToggle("AvatarChanger", {
-        Title    = "Avatar Changer",
-        Default  = false,
-        Callback = function(v)
-            SetAvatarEnabled(v)
-            notify({Title = "Avatar", Content = v and "On" or "Off", Duration = 2})
-        end,
-    })
-
-    s7a:AddInput("AvatarSaver", {
-        Title       = "User ID / Name",
-        Default     = "",
-        Placeholder = "UserId or username",
-        Callback    = function(v)
-            local text = (v and v:match("^%s*(.-)%s*$")) or ""
-            if text == "" then
-                AvatarSlotNumber = nil
-                getgenv().qzxp_avatarUserId = nil
-                if LocalPlayer.Character then
-                    pcall(function()
-                        LocalPlayer.Character:SetAttribute("qzxp_AvatarApplied", nil)
-                    end)
-                end
-                return
-            end
-            local id = tonumber(text)
-            if not id then
-                local ok, result, attempts
-                attempts = 0
-                repeat
-                    attempts += 1
-                    ok, result = pcall(function()
-                        return Players:GetUserIdFromNameAsync(text)
-                    end)
-                    if not ok then task.wait(0.5) end
-                until ok or attempts >= 5
-                if not ok or not result then
-                    notify({Title = "Avatar", Content = "User not found", Duration = 3})
-                    return
-                end
-                id = result
-            end
-            AvatarSlotNumber = id
-            getgenv().qzxp_avatarUserId = id
-            -- Invalidate the profile-spoofer cache so it re-fetches this UserId.
-            ProfileSpoofer.info = nil
-            -- Auto-apply any toggles that were left on while waiting for input.
-            if Options.AvatarChanger and Options.AvatarChanger.Value then
-                SetAvatarEnabled(true)
-            end
-            notify({Title = "Avatar", Content = "Set to " .. tostring(id), Duration = 2})
-        end,
-    })
-
-    -- ============================================================
-    -- PROFILE SPOOFER (v3 — flicker-proof)
-    -- · Matches username (bare or @-prefixed) and display name
-    -- · Hooks Text property changes so the game can't revert us
-    --   for even one frame
-    -- · Hooks DescendantAdded so dynamically-created labels
-    --   (tooltips, new joiners) get spoofed instantly
-    -- · Toggle stays on with no UserId and auto-applies once
-    --   a UserId is entered
-    -- ============================================================
-    local function getSpoofedProfileInfo()
+    -- ---------------------------------------------------------
+    -- PROFILE SPOOFER
+    -- ---------------------------------------------------------
+    function getSpoofedProfileInfo()
         local id = getgenv().qzxp_avatarUserId
         if not id then return nil end
-        local ok1, username = pcall(function() return Players:GetNameFromUserIdAsync(id) end)
-        if not ok1 or not username then return nil end
-        local ok2, displayName = pcall(function() return Players:GetUserDisplayNameFromUserIdAsync(id) end)
+        local ok1, fetchedUsername = pcall(function() return Players:GetNameFromUserIdAsync(id) end)
+        if not ok1 or type(fetchedUsername) ~= "string" or fetchedUsername == "" then return nil end
+        local ok2, fetchedDisplayName = pcall(function() return Players:GetUserDisplayNameFromUserIdAsync(id) end)
+        local gotDisplay = ok2 and type(fetchedDisplayName) == "string" and fetchedDisplayName ~= ""
+        local finalDisplay = gotDisplay and fetchedDisplayName or fetchedUsername
+        local finalUsername = fetchedUsername
+        if Options and Options.ProfileSpoofDisplayName and Options.ProfileSpoofDisplayName.Value ~= "" then
+            finalDisplay = Options.ProfileSpoofDisplayName.Value
+        end
+        if Options and Options.ProfileSpoofUsername and Options.ProfileSpoofUsername.Value ~= "" then
+            finalUsername = Options.ProfileSpoofUsername.Value
+        end
         return {
-            userId      = id,
-            username    = username,
-            displayName = (ok2 and displayName) or username,
-            headshot    = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", id),
+            userId = id,
+            username = finalUsername,
+            displayName = finalDisplay,
+            _displayNameFetched = true,
+            headshot = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", id),
         }
     end
-
-    local function findPlayerListFrame()
-        local cg = game:GetService("CoreGui")
-        local pl = cg:FindFirstChild("PlayerList")
-        if pl then return pl end
-        local rg = cg:FindFirstChild("RobloxGui")
-        return rg and rg:FindFirstChild("PlayerList")
-    end
-
-    -- Per-label tracking. Weak keys so destroyed labels get GC'd.
-    -- spoofedLabels[lbl] = { kind = "username" | "displayName", prefix = "" | "@" }
-    local spoofedLabels = setmetatable({}, {__mode = "k"})
-    local hookedLabels  = setmetatable({}, {__mode = "k"})
-    local watchedRoots  = setmetatable({}, {__mode = "k"})
-
     local function desiredText(state, info)
+        if state.kind == "username" and not ProfileSpoofer.usernameEnabled then return nil end
+        if state.kind == "displayName" and not ProfileSpoofer.displayNameEnabled then return nil end
         local base = (state.kind == "username") and info.username or info.displayName
         return (state.prefix or "") .. base
     end
-
-    -- True only when the label is currently showing *our* real identity.
-    -- If the game recycles this label for someone else, this returns false
-    -- and we stop enforcing the spoof on it.
     local function stillMine(txt)
         local name = LocalPlayer.Name
         local disp = LocalPlayer.DisplayName
-        return txt == name
-            or txt == "@" .. name
-            or txt == disp
-            or txt == "@" .. disp
+        return txt == name or txt == "@" .. name or txt == disp or txt == "@" .. disp
     end
-
     local function enforceLabel(lbl, state, info)
         local want = desiredText(state, info)
-        if lbl.Text ~= want then
-            lbl.Text = want
-        end
+        if want and lbl.Text ~= want then lbl.Text = want end
+        state._lastSet = want
     end
-
-    -- Immediate revert. Fires synchronously whenever the game sets Text,
-    -- so the original value never renders even for a single frame.
-    -- Crucially: if the new value is *another player's* name, we do NOT
-    -- overwrite it — that means this recycled label is no longer ours.
     local function hookLabel(lbl)
         if hookedLabels[lbl] then return end
         hookedLabels[lbl] = true
         lbl:GetPropertyChangedSignal("Text"):Connect(function()
-            if not ProfileSpoofer.enabled then return end
+            if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
             local info = ProfileSpoofer.info
             local state = spoofedLabels[lbl]
             if not info or not state then return end
             local txt = lbl.Text
-            if txt == desiredText(state, info) then return end
+            local want = desiredText(state, info)
+            if not want then return end
+            if txt == want then state._lastSet = want; return end
             if stillMine(txt) then
-                lbl.Text = desiredText(state, info)
+                lbl.Text = want
+                state._lastSet = want
             end
-            -- else: game wrote a different player's name to this label.
-            -- Leave it alone; it's been repurposed.
         end)
     end
-
+    local function getLocalNames()
+        return LocalPlayer.Name, LocalPlayer.DisplayName
+    end
     local function classifyLabel(lbl, info)
         if not lbl then return end
-        local isText = lbl:IsA("TextLabel")
-                    or lbl:IsA("TextButton")
-                    or lbl:IsA("TextBox")
+        local isText = lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox")
         if not isText then return end
-
         local state = spoofedLabels[lbl]
         if state then
             local want = desiredText(state, info)
-            if lbl.Text == want then return end
-            -- Only re-enforce if the label still shows our real name.
-            -- If it shows another player, this label was recycled and we
-            -- must NOT clobber it.
-            if stillMine(lbl.Text) then
+            if not want then return end
+            if lbl.Text == want then state._lastSet = want; return end
+            if stillMine(lbl.Text) or (state._lastSet and lbl.Text == state._lastSet) then
                 lbl.Text = want
             end
+            state._lastSet = want
             return
         end
-
         local txt = lbl.Text
-        if txt == LocalPlayer.Name then
-            spoofedLabels[lbl] = {kind = "username", prefix = ""}
-        elseif txt == "@" .. LocalPlayer.Name then
-            spoofedLabels[lbl] = {kind = "username", prefix = "@"}
-        elseif LocalPlayer.DisplayName ~= LocalPlayer.Name and txt == LocalPlayer.DisplayName then
-            spoofedLabels[lbl] = {kind = "displayName", prefix = ""}
-        elseif LocalPlayer.DisplayName ~= LocalPlayer.Name and txt == "@" .. LocalPlayer.DisplayName then
-            spoofedLabels[lbl] = {kind = "displayName", prefix = "@"}
+        local isAt = string.sub(txt, 1, 1) == "@"
+        local name, displayName = getLocalNames()
+        local nameOnly = isAt and string.sub(txt, 2) or txt
+        if nameOnly == displayName or nameOnly == name then
+            local kind = isAt and "username" or "displayName"
+            if (kind == "username" and not ProfileSpoofer.usernameEnabled)
+                or (kind == "displayName" and not ProfileSpoofer.displayNameEnabled) then
+                return
+            end
+            spoofedLabels[lbl] = {kind = kind, prefix = isAt and "@" or ""}
         else
             return
         end
-
         hookLabel(lbl)
         enforceLabel(lbl, spoofedLabels[lbl], info)
     end
-
     local function classifyImage(img, info)
         if not img then return end
         if not (img:IsA("ImageLabel") or img:IsA("ImageButton")) then return end
         local myIdStr = tostring(LocalPlayer.UserId)
         if img.Name == "HeadShot" or (img.Image and string.find(img.Image, myIdStr, 1, true)) then
-            if img.Image ~= info.headshot then
-                img.Image = info.headshot
-            end
+            if img.Image ~= info.headshot then img.Image = info.headshot end
         end
     end
-
     local function applyToContainer(container, info)
         if not container then return end
         for _, d in ipairs(container:GetDescendants()) do
@@ -4621,31 +4285,17 @@ do
             classifyImage(d, info)
         end
     end
-
-    -- DescendantAdded so labels created after we run (new joiners,
-    -- tooltips, etc.) get spoofed the instant they appear.
     local function watchRoot(root)
         if not root or watchedRoots[root] then return end
         watchedRoots[root] = true
         root.DescendantAdded:Connect(function(d)
-            if not ProfileSpoofer.enabled then return end
+            if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
             local info = ProfileSpoofer.info
             if not info then return end
             classifyLabel(d, info)
             classifyImage(d, info)
         end)
     end
-
-    local function currentRoots()
-        local out = {}
-        local pl = findPlayerListFrame()
-        if pl then out[#out + 1] = pl end
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        local lb = pg and pg:FindFirstChild("Leaderboard")
-        if lb then out[#out + 1] = lb end
-        return out
-    end
-
     local function applyAll(info)
         local roots = currentRoots()
         for i = 1, #roots do
@@ -4653,7 +4303,6 @@ do
             applyToContainer(roots[i], info)
         end
     end
-
     local function restoreProfile(info)
         if not info then return end
         local originalHeadshot = string.format(
@@ -4663,64 +4312,284 @@ do
             for _, d in ipairs(roots[i]:GetDescendants()) do
                 local state = spoofedLabels[d]
                 if state then
-                    local want = desiredText(state, info)
-                    if d.Text == want then
+                    if (state.kind == "username" and not ProfileSpoofer.usernameEnabled)
+                        or (state.kind == "displayName" and not ProfileSpoofer.displayNameEnabled) then
                         local orig = (state.kind == "username") and LocalPlayer.Name or LocalPlayer.DisplayName
                         d.Text = (state.prefix or "") .. orig
+                        spoofedLabels[d] = nil
                     end
                 elseif (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image == info.headshot then
-                    d.Image = originalHeadshot
+                    if not ProfileSpoofer.usernameEnabled and not ProfileSpoofer.displayNameEnabled then
+                        d.Image = originalHeadshot
+                    end
                 end
             end
         end
-        spoofedLabels = setmetatable({}, {__mode = "k"})
-        hookedLabels  = setmetatable({}, {__mode = "k"})
+    end
+    local _profileRetryActive = false
+    local function retryDisplayNameInBackground()
+        if _profileRetryActive then return end
+        _profileRetryActive = true
+        task.spawn(function()
+            for _ = 1, 20 do
+                task.wait(1.5)
+                if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then break end
+                local info = ProfileSpoofer.info
+                if info and info._displayNameFetched then break end
+                local newInfo = getSpoofedProfileInfo()
+                if newInfo and newInfo._displayNameFetched then
+                    ProfileSpoofer.info = newInfo
+                    pcall(applyAll, newInfo)
+                    break
+                end
+            end
+            _profileRetryActive = false
+        end)
     end
 
-    s7a:AddToggle("ProfileSpooferToggle", {
-        Title    = "Spoof Profile",
-        Default  = false,
-        Callback = function(v)
-            ProfileSpoofer.enabled = v
-            if v then
-                if not getgenv().qzxp_avatarUserId then
-                    notify({Title = "Profile", Content = "Waiting for User ID...", Duration = 4})
-                    return
-                end
-                ProfileSpoofer.info = getSpoofedProfileInfo()
-                if ProfileSpoofer.info then
-                    pcall(applyAll, ProfileSpoofer.info)
-                end
-                notify({Title = "Profile", Content = "Spoofing enabled", Duration = 2})
-            else
-                pcall(restoreProfile, ProfileSpoofer.info)
-                ProfileSpoofer.info = nil
-                notify({Title = "Profile", Content = "Spoofing disabled", Duration = 2})
+    -- ---------------------------------------------------------
+    -- PFP SPOOFING (automatic with Avatar Changer)
+    -- ---------------------------------------------------------
+    local function spoofHeadshotImage(img)
+        if not img or not img.Parent then return end
+        if not (img:IsA("ImageLabel") or img:IsA("ImageButton")) then return end
+        local target = getTargetHeadshotUrl()
+        if not target then return end
+        local myIdStr = tostring(LocalPlayer.UserId)
+        if img.Name == "HeadShot" or (img.Image and string.find(img.Image, myIdStr, 1, true)) then
+            if img.Image ~= target then img.Image = target end
+        end
+    end
+    local function refreshAvatarHeadshots()
+        local target = getTargetHeadshotUrl()
+        if not target then return end
+        local roots = currentRoots()
+        for i = 1, #roots do
+            local root = roots[i]
+            if root and root.Parent then
+                pcall(function()
+                    for _, d in ipairs(root:GetDescendants()) do
+                        spoofHeadshotImage(d)
+                    end
+                end)
             end
-        end,
-    })
+        end
+    end
+    local function revertAvatarHeadshots()
+        local target = getTargetHeadshotUrl()
+        if not target then return end
+        local original = string.format(
+            "rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", LocalPlayer.UserId)
+        local roots = currentRoots()
+        for i = 1, #roots do
+            local root = roots[i]
+            if root and root.Parent then
+                pcall(function()
+                    for _, d in ipairs(root:GetDescendants()) do
+                        if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image == target then
+                            d.Image = original
+                        end
+                    end
+                end)
+            end
+        end
+    end
 
-    -- Per-frame enforcement through the tracked dispatcher. Handles
-    -- cases where a label is created in a way that bypasses
-    -- DescendantAdded (rare) and keeps us robust across rebuilds.
+    -- ---------------------------------------------------------
+    -- UI SECTION: Avatar
+    -- Pattern: [Toggle] -> [Input]
+    -- ---------------------------------------------------------
+    local s7a = Tabs.Visuals:AddSection("Avatar")
+
+    s7a:AddToggle("AvatarChanger", {Title = "Avatar Changer", Default = false, Callback = function(v)
+        SetAvatarEnabled(v)
+        if v then
+            refreshAvatarHeadshots()
+            notify({Title = "Avatar", Content = "On", Duration = 2})
+        else
+            if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then
+                revertAvatarHeadshots()
+            end
+            notify({Title = "Avatar", Content = "Off", Duration = 2})
+        end
+    end})
+    s7a:AddInput("AvatarSaver", {Title = "User ID / Name", Default = "", Placeholder = "UserId or username", Callback = function(v)
+        local text = (v and v:match("^%s*(.-)%s*$")) or ""
+        if text == "" then
+            AvatarSlotNumber = nil
+            getgenv().qzxp_avatarUserId = nil
+            if LocalPlayer.Character then
+                pcall(function() LocalPlayer.Character:SetAttribute("qzxp_AvatarApplied", nil) end)
+            end
+            return
+        end
+        local id = tonumber(text)
+        if not id then
+            local ok, result, attempts; attempts = 0
+            repeat
+                attempts += 1
+                ok, result = pcall(function() return Players:GetUserIdFromNameAsync(text) end)
+                if not ok then task.wait(0.5) end
+            until ok or attempts >= 5
+            if not ok or not result then
+                notify({Title = "Avatar", Content = "User not found", Duration = 3})
+                return
+            end
+            id = result
+        end
+        AvatarSlotNumber = id
+        getgenv().qzxp_avatarUserId = id
+        ProfileSpoofer.info = nil
+        if Options.AvatarChanger and Options.AvatarChanger.Value then
+            SetAvatarEnabled(true)
+            refreshAvatarHeadshots()
+        end
+        if (Options.ProfileSpooferUsername and Options.ProfileSpooferUsername.Value)
+           or (Options.ProfileSpooferDisplayName and Options.ProfileSpooferDisplayName.Value) then
+            ProfileSpoofer.info = getSpoofedProfileInfo()
+            if ProfileSpoofer.info then pcall(applyAll, ProfileSpoofer.info) end
+        end
+        notify({Title = "Avatar", Content = "Set to " .. tostring(id), Duration = 2})
+    end})
+
+    s7a:AddToggle("ProfileSpooferDisplayName", {Title = "Spoof Profile Display Name", Default = false, Callback = function(v)
+        ProfileSpoofer.displayNameEnabled = v
+        if v then
+            if not getgenv().qzxp_avatarUserId then
+                notify({Title = "Profile", Content = "Waiting for User ID...", Duration = 4})
+                return
+            end
+            ProfileSpoofer.info = getSpoofedProfileInfo()
+            if ProfileSpoofer.info then pcall(applyAll, ProfileSpoofer.info) end
+        else
+            pcall(restoreProfile, ProfileSpoofer.info)
+        end
+    end})
+    s7a:AddInput("ProfileSpoofDisplayName", {Title = "Display Name", Default = "", Placeholder = "Leave empty for API name...", Callback = function(v)
+        ProfileSpoofer.info = getSpoofedProfileInfo()
+        if ProfileSpoofer.displayNameEnabled and ProfileSpoofer.info then
+            pcall(applyAll, ProfileSpoofer.info)
+        end
+    end})
+
+    s7a:AddToggle("ProfileSpooferUsername", {Title = "Spoof Profile Username", Default = false, Callback = function(v)
+        ProfileSpoofer.usernameEnabled = v
+        if v then
+            if not getgenv().qzxp_avatarUserId then
+                notify({Title = "Profile", Content = "Waiting for User ID...", Duration = 4})
+                return
+            end
+            ProfileSpoofer.info = getSpoofedProfileInfo()
+            if ProfileSpoofer.info then pcall(applyAll, ProfileSpoofer.info) end
+        else
+            pcall(restoreProfile, ProfileSpoofer.info)
+        end
+    end})
+    s7a:AddInput("ProfileSpoofUsername", {Title = "Username", Default = "", Placeholder = "Leave empty for API name...", Callback = function(v)
+        ProfileSpoofer.info = getSpoofedProfileInfo()
+        if ProfileSpoofer.usernameEnabled and ProfileSpoofer.info then
+            pcall(applyAll, ProfileSpoofer.info)
+        end
+    end})
+
+    -- ---------------------------------------------------------
+    -- PROFILE PREVIEW PANEL
+    -- ---------------------------------------------------------
+    local function createPreviewPanel()
+        local frame = Instance.new("Frame")
+        frame.Name = "SpooferPreview"
+        frame.Parent = Window._gui
+        frame.BackgroundColor3 = UITheme.Bg
+        frame.Position = UDim2.new(0.5, 385, 0.5, -200)
+        frame.Size = UDim2.new(0, 200, 0, 220)
+        frame.BorderSizePixel = 0
+        frame.Visible = false
+        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+        local stroke = Instance.new("UIStroke", frame); stroke.Color = UITheme.Border
+        local img = Instance.new("ImageLabel")
+        img.Parent = frame
+        img.Size = UDim2.new(0, 100, 0, 100)
+        img.Position = UDim2.new(0.5, -50, 0, 20)
+        img.BackgroundColor3 = UITheme.Panel
+        img.BorderSizePixel = 0
+        Instance.new("UICorner", img).CornerRadius = UDim.new(1, 0)
+        local disp = Instance.new("TextLabel")
+        disp.Parent = frame
+        disp.Size = UDim2.new(1, -20, 0, 24)
+        disp.Position = UDim2.new(0, 10, 0, 140)
+        disp.BackgroundTransparency = 1
+        disp.Font = FONTB; disp.TextSize = 16; disp.TextColor3 = UITheme.Text
+        local user = Instance.new("TextLabel")
+        user.Parent = frame
+        user.Size = UDim2.new(1, -20, 0, 18)
+        user.Position = UDim2.new(0, 10, 0, 168)
+        user.BackgroundTransparency = 1
+        user.Font = FONT; user.TextSize = 13; user.TextColor3 = UITheme.TextDim
+        return frame, img, disp, user
+    end
+    local profilePrev, profileImg, profileDisp, profileUser = createPreviewPanel()
+    s7a:AddToggle("ProfilePreviewToggle", {Title = "Preview Profile", Default = false, Callback = function(v)
+        profilePrev.Visible = v
+    end})
+
+    -- ---------------------------------------------------------
+    -- RENDER HANDLERS
+    -- ---------------------------------------------------------
     addRenderHandler(function()
-        if not ProfileSpoofer.enabled then return end
-        local info = ProfileSpoofer.info or getSpoofedProfileInfo()
-        if not info then return end
-        ProfileSpoofer.info = info
+        if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
+        local info = ProfileSpoofer.info
+        if not info then
+            info = getSpoofedProfileInfo()
+            if not info then return end
+            ProfileSpoofer.info = info
+        end
+        if not info._displayNameFetched then retryDisplayNameInBackground() end
         pcall(applyAll, info)
     end, 9)
-end
+
+    local _avatarHSPrev = 0
+    addRenderHandler(function()
+        local on = Options.AvatarChanger and Options.AvatarChanger.Value
+        if not on then return end
+        if not getgenv().qzxp_avatarUserId then return end
+        local now = os.clock()
+        if now - _avatarHSPrev < 0.15 then return end
+        _avatarHSPrev = now
+        pcall(refreshAvatarHeadshots)
+    end, 7)
+
+    addRenderHandler(function()
+        local mainPos = Window._main.Position
+        local baseX = mainPos.X.Offset + 760
+        local baseY = mainPos.Y.Offset + 115
+        if profilePrev.Visible then
+            profilePrev.Position = UDim2.new(mainPos.X.Scale, baseX, mainPos.Y.Scale, baseY)
+            if ProfileSpoofer.info then
+                profileImg.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", ProfileSpoofer.info.userId)
+                profileDisp.Text = ProfileSpoofer.info.displayName
+                profileUser.Text = "@" .. ProfileSpoofer.info.username
+            else
+                profileImg.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", LocalPlayer.UserId)
+                profileDisp.Text = "No Target"
+                profileUser.Text = "@none"
+            end
+        end
+    end, 11)
+end -- Avatar/Profile spoofer scope
 
     local s7s = Tabs.Visuals:AddSection("Stats HUD")
-    s7s:AddToggle("ShowFPSToggle", {Title = "Show FPS", Default = false,
-        Callback = function(v) UIFlags.StatsShowFPS = v end})
-    s7s:AddToggle("ShowPingToggle", {Title = "Show Ping", Default = false,
-        Callback = function(v) UIFlags.StatsShowPing = v end})
+    s7s:AddToggle("ShowFPSToggle", {Title = "Show FPS", Default = false, Callback = function(v)
+        UIFlags.StatsShowFPS = v
+    end})
+    s7s:AddToggle("ShowPingToggle", {Title = "Show Ping", Default = false, Callback = function(v)
+        UIFlags.StatsShowPing = v
+    end})
 end
 do
     local s8 = Tabs.Settings:AddSection("Engine")
-    s8:AddToggle("KBToggle", {Title = "Keybind List", Default = false, Callback = function(v) UIFlags.KBShow = v; kbF.Visible = v end})
+    s8:AddToggle("KBToggle", {Title = "Keybind List", Default = false, Callback = function(v)
+        UIFlags.KBShow = v; kbF.Visible = v
+    end})
     s8:AddKeybind("GUIToggleKey", {Title = "GUI Toggle", Default = "LeftControl", Callback = function()
         local w = Fluent.Window
         if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
@@ -4728,34 +4597,22 @@ do
 end
 end)() -- UI LAYOUT scope
 
--- ============================================================
--- FPS CAP — realtime, uncap toggle + 15..360 slider
--- ============================================================
+-- FPS Cap
 ;(function()
 do
     local fpsSection = Tabs.Settings:AddSection("Performance")
-
     local FPSUncapped = false
     local FPSCap      = 240
-
     local _setFPS = type(setfpscap) == "function" and setfpscap or nil
-
     local function applyFPS()
         if type(_setFPS) ~= "function" then return end
-        pcall(function()
-            _setFPS(FPSUncapped and 1000 or FPSCap)
-        end)
+        pcall(function() _setFPS(FPSUncapped and 1000 or FPSCap) end)
     end
-
     fpsSection:AddToggle("FPSUncap", {
         Title = "Uncap FPS",
         Default = false,
-        Callback = function(v)
-            FPSUncapped = v
-            applyFPS()
-        end,
+        Callback = function(v) FPSUncapped = v; applyFPS() end,
     })
-
     fpsSection:AddSlider("FPSCap", {
         Title = "FPS Cap",
         Default = 240,
@@ -4767,7 +4624,6 @@ do
             if not FPSUncapped then applyFPS() end
         end,
     })
-
     task.defer(function()
         if _setFPS == nil then
             Fluent:Notify({Title = "FPS", Content = "setfpscap unavailable on this executor", Duration = 4})
@@ -4775,6 +4631,24 @@ do
         end
         applyFPS()
     end)
+end
+end)()
+
+;(function()
+do
+    local appearanceSection = Tabs.Settings:AddSection("Appearance")
+    appearanceSection:AddSlider("UITransparency", {
+        Title = "UI Transparency",
+        Default = 0,
+        Min = 0,
+        Max = 90,
+        Rounding = 0,
+        Callback = function(v)
+            if getgenv().qzxp_applyUITransparency then
+                getgenv().qzxp_applyUITransparency(v / 100)
+            end
+        end,
+    })
 end
 end)()
 
@@ -4803,12 +4677,9 @@ task.delay(1, function()
     Fluent:Notify({Title = "qzxp", Content = "Loaded", Duration = 4})
 end)
 
--- ============================================================
--- [FIX 8] CLEANUP — now actually kills everything
--- ============================================================
+-- Cleanup
 getgenv().qzxp_Cleanup = function()
     pcall(function()
-        -- VFX hooks
         if getgenv().qzxp_VFXConns then
             for _, conn in ipairs(getgenv().qzxp_VFXConns) do
                 pcall(function() conn:Disconnect() end)
@@ -4822,38 +4693,26 @@ getgenv().qzxp_Cleanup = function()
         getgenv().qzxp_VFXConns = nil
         getgenv().qzxp_VFXHooked = nil
         getgenv().qzxp_VFXDisabled = nil
-
-        -- Thunder Dash: restore original ability cooldown before killing threads
         pcall(function()
             if getgenv().qzxp_thunderDashStop then getgenv().qzxp_thunderDashStop() end
         end)
-
-        -- Kill every tracked background thread
         if getgenv().qzxp_Threads then
             for _, t in ipairs(getgenv().qzxp_Threads) do
                 pcall(function() task.cancel(t) end)
             end
             getgenv().qzxp_Threads = nil
         end
-
-        -- Kill the consolidated RenderStepped dispatcher
         if getgenv().qzxp_StopRender then
             pcall(getgenv().qzxp_StopRender)
             getgenv().qzxp_StopRender = nil
         end
-
-        -- Parry range visualizer
         pcall(function() if PRV and PRV.Destroy then PRV.Destroy() end end)
-
-        -- Destroy our ScreenGuis
         local cg = GetSafeUIParent()
         for _, o in ipairs(cg:GetChildren()) do
             if o:IsA("ScreenGui") and (o.Name:lower():find("qzxp") or o.Name:lower():find("q_")) then
                 o:Destroy()
             end
         end
-
-        -- Unlock All: restore shop UI + shop API before tearing down
         pcall(function()
             if UA and UA.ready then
                 UA.enabled = false
@@ -4864,7 +4723,6 @@ getgenv().qzxp_Cleanup = function()
                 end
             end
         end)
-
         getgenv().skinChanger = nil; getgenv().skinChangerEnabled = nil
         getgenv().qzxp_unlockAllActive = nil
         getgenv().swordModel = nil; getgenv().swordAnimations = nil; getgenv().swordFX = nil
@@ -4873,7 +4731,9 @@ getgenv().qzxp_Cleanup = function()
         getgenv().qzxp_equipSword = nil; getgenv().qzxp_resolveSword = nil
         getgenv().qzxp_forceEquipSword = nil
         getgenv().qzxp_avatarUserId = nil
+        getgenv().qzxp_resetAPState = nil
         getgenv().qzxp_Cleanup = nil
+        getgenv().qzxp_realSword = nil
     end)
 end
 
