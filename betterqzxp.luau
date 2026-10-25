@@ -3449,16 +3449,6 @@ do
         end
         return v
     end
-    local BLOCK_PART = { "physics", "worldstep", "hitbox", "raknet", "replicat", "humanoid", "collision", "collide",
-        "interpolat", "extrapolat", "ownership", "anticheat", "hyperion", "tamper", "integrity", "walkspeed",
-        "jumppower", "jumpheight", "timescale", "lagswitch", "desync", "teleport", "bandwidth", "networkowner",
-        "debugsim", "primalsolver", "s2phys", "datasender", "sendrate", "receiverate", "maxmissed", "camera",
-        "character", "hipheight", "fling", "noclip" }
-    local BLOCK_WORD = { phys = 1, net = 1, network = 1, rak = 1, sim = 1, simulation = 1, solver = 1, assembly = 1,
-        owner = 1, sender = 1, send = 1, receive = 1, receiver = 1, recv = 1, packet = 1, packets = 1, mtu = 1,
-        ping = 1, lag = 1, latency = 1, throttle = 1, gravity = 1, jump = 1, walk = 1, velocity = 1, hit = 1,
-        aim = 1, raycast = 1, kick = 1, step = 1, steps = 1, clock = 1, security = 1, exploit = 1, cheat = 1,
-        replication = 1, speed = 1 }
     function FF.words(name)
         local s = FF.strip(name):gsub("(%l)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2"):gsub("(%a)(%d)", "%1 %2")
             :gsub("(%d)(%a)", "%1 %2"):gsub("_", " ")
@@ -3467,9 +3457,7 @@ do
         return out
     end
     function FF.blocked(name)
-        local l = FF.strip(name):lower()
-        for _, b in ipairs(BLOCK_PART) do if l:find(b, 1, true) then return b end end
-        for _, w in ipairs(FF.words(name)) do if BLOCK_WORD[w] then return w end end
+        return nil
     end
     local function tryGet(n)
         if not FF.canGet then return nil end
@@ -3974,9 +3962,11 @@ local function makeCustomToggleRow(name, initialOn, onChange)
     return row
 end
 
+mk("UIListLayout", { Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder }, addRow)
+
 do -- add-custom form
-    local row1 = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0 }, addRow)
-    local row2 = mk("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0 }, addRow)
+    local row1 = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0, LayoutOrder = 1 }, addRow)
+    local row2 = mk("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0, LayoutOrder = 2 }, addRow)
     local f1 = mk("Frame", { Size = UDim2.new(1, -24, 0, 28), Position = UDim2.fromOffset(12, 5),
         BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0 }, row1)
     addCorner(f1, 6); addStroke(f1, UITheme.Border, 1, 0.4)
