@@ -910,6 +910,7 @@ local AnimFix_Cache = {}
 local ANIM_FAIL = false
 local Bypass_Cd = false
 local AnimLastPlayed = 0
+local VirtualInputManager = Instance.new("VirtualInputManager")
 
 local function PlayParryAnimation()
     local character = LocalPlayer.Character
@@ -954,45 +955,23 @@ end
 -- Block keybind detection (for game-native parry animation)
 local Block_Keybind
 do
-    pcall(function()
-        local pg = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
-        if not pg then return end
-        local settings = pg:FindFirstChild("Settings")
-        if not settings then return end
-        local outer = settings:FindFirstChild("Frame")
-        if not outer then return end
-        local frame = outer:FindFirstChild("Frame")
-        if not frame then return end
-        local bind = frame:FindFirstChild("Keybinds/Block")
-        if not bind then return end
-        for i = 1, 3 do
-            local kb = bind:FindFirstChild("Keybind" .. i)
-            local tb = kb and kb:FindFirstChild("TextBox")
-            if tb and type(tb.Text) == "string" and tb.Text ~= "" then
-                Block_Keybind = tb.Text
-                break
-            end
-        end
-    end)
-    if not Block_Keybind then
-        warn("[qzxp] block keybind not found — spam animation will fall back to script-driven playback")
-    end
+    local pg = LocalPlayer:WaitForChild("PlayerGui")
+    Block_Keybind = pg.Settings.Frame.Frame["Keybinds/Block"].Keybind1.TextBox.Text or pg.Settings.Frame.Frame["Keybinds/Block"].Keybind2.TextBox.Text or pg.Settings.Frame.Frame["Keybinds/Block"].Keybind3.TextBox.Text
 end
 local function Animation_Fix()
-    if not Block_Keybind or type(VirtualInputManager) ~= "Instance" then
-        PlayParryAnimation()
-        return
+    local identity = getthreadidentity()
+    if identity ~= 8 then
+        setthreadidentity(8)
     end
-    local key = Enum.KeyCode[Block_Keybind] or Block_Keybind
-    local oldId = getthreadidentity and getthreadidentity() or 8
-    if oldId ~= 8 and setthreadidentity then setthreadidentity(8) end
-    local ok = pcall(function()
-        VirtualInputManager:SendKeyEvent(true,  key, false, game)
-        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    local ok, message = pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Block_Keybind, false, game)
+        VirtualInputManager:SendKeyEvent(false, Block_Keybind, false, game)
     end)
-    if oldId ~= 8 and setthreadidentity then setthreadidentity(oldId) end
+    if identity ~= 8 then
+        setthreadidentity(identity)
+    end
     if not ok then
-        PlayParryAnimation()
+        error(message, 0)
     end
 end
 local SpamAnimRate, SpamAnimLastPlayed, SpamAnimBypass = 100, 0, false
@@ -1004,16 +983,14 @@ local function StopParryGrabTracks()
     local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
     local animator = humanoid:FindFirstChildOfClass("Animator"); if not animator then return end
     for _, track in pairs(animator:GetPlayingAnimationTracks()) do
-        if track.Name == "GrabParry" or track.Name == "Grab" then
-            pcall(function() track:Stop(0.1) end)
+        if track:GetAttribute("GrabParry") or track:GetAttribute("Parry") or track.Name == "GrabParry" or track.Name == "Grab" then
+            track:Stop(track:GetAttribute("StopFadeTime") or 0.1)
         end
     end
 end
-pcall(function()
-    ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
-        Bypass_Cd = true
-        StopParryGrabTracks()
-    end)
+ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+    Bypass_Cd = true
+    StopParryGrabTracks()
 end)
 
 -- Ball cache
@@ -1504,7 +1481,21 @@ local function getCurveCF(ballArg)
         for _, p in pairs(Players:GetPlayers()) do if p ~= LocalPlayer and p.Character then chk(p.Character) end end
         tp = st2 or wt
     end
-    local tpos = tp and tp.Position or (rp + Camera.CFrame.LookVector * 100)
+    local tpos = tp and tp.Position
+    if not tpos then
+        if ball then
+            local z = ball:FindFirstChild("zoomies")
+            if z then
+                local v = z.VectorVelocity
+                if v.Magnitude > 1 then
+                    tpos = rp - v.Unit * 100
+                end
+            end
+        end
+    end
+    if not tpos then
+        tpos = rp + Camera.CFrame.LookVector * 100
+    end
     if LockEnabled and tp then cachedCF = CFrame.new(rp, tpos); return cachedCF end
     local m = (Options and Options.CurveMode and Options.CurveMode.Value) or CurveMode
     local resCF = Camera.CFrame
@@ -1845,7 +1836,22 @@ local function apGetCurveCF()
         if lockPart then return CFrame.new(root.Position, lockPart.Position) end
     end
     local tp        = _apTarget.current and _apTarget.current.PrimaryPart
-    local targetPos = tp and tp.Position or (root.Position + cf.LookVector * 1000)
+    local targetPos = tp and tp.Position
+    if not targetPos then
+        local ball = apFirstBall()
+        if ball then
+            local z = ball:FindFirstChild("zoomies")
+            if z then
+                local v = z.VectorVelocity
+                if v.Magnitude > 1 then
+                    targetPos = root.Position - v.Unit * 100
+                end
+            end
+        end
+    end
+    if not targetPos then
+        targetPos = root.Position + cf.LookVector * 1000
+    end
     local delta     = targetPos - root.Position
     local unit      = delta.Magnitude > 0.001 and delta.Unit or root.CFrame.LookVector
     local method    = tostring(CurveMode or "Camera"):lower()
@@ -3471,24 +3477,28 @@ do
         v = tryGet(FF.strip(name)); if v ~= nil then FF.key[name] = FF.strip(name) return v, FF.strip(name) end
     end
     local function same(a, b) return a ~= nil and b ~= nil and tostring(a):lower() == tostring(b):lower() end
-    function FF.set(name, value)
-        if not FF.canSet then FF.result[name] = "fail" return false end
-        local v = FF.norm(name, value); if v == nil then FF.result[name] = "fail" return false end
-        local before, known = FF.get(name)
-        if FF.orig[name] == nil then FF.orig[name] = before or false end
+
+    local function writeFlag(name, value)
+        if not FF.canSet then return false, false end
+        local v = FF.norm(name, value)
+        if v == nil then return false, false end
         local p = FF.prefix(name) or ""
         local values = { v }
-        if p:find("Flag") then table.insert(values, v:lower()); table.insert(values, v == "True")
-        elseif p:find("Int") then table.insert(values, tonumber(v)) end
+        if p:find("Flag") then
+            table.insert(values, v:lower())
+            table.insert(values, v == "True")
+        elseif p:find("Int") then
+            table.insert(values, tonumber(v))
+        end
         local names, seen = {}, {}
-        for _, n in ipairs({ known, FF.key[name], FF.strip(name), name }) do
+        for _, n in ipairs({ FF.key[name], FF.strip(name), name }) do
             if n and not seen[n] then seen[n] = true; table.insert(names, n) end
         end
         local accepted, matched = false, false
         for _, n in ipairs(names) do
             for _, val in ipairs(values) do
-                local okS = pcall(setfflag, n, val)
-                if okS then
+                local okS, ret = pcall(setfflag, n, val)
+                if okS and ret ~= false then
                     accepted = true
                     FF.key[name] = FF.key[name] or n
                     if not FF.canGet then break end
@@ -3498,17 +3508,62 @@ do
             end
             if matched or (accepted and not FF.canGet) then break end
         end
+        return accepted, matched
+    end
+
+    function FF.set(name, value)
+        if not FF.canSet then FF.result[name] = "fail" return false end
+        local v = FF.norm(name, value); if v == nil then FF.result[name] = "fail" return false end
+        local before, known = FF.get(name)
+        if FF.orig[name] == nil then FF.orig[name] = before or false end
+        if known and not FF.key[name] then FF.key[name] = known end
+        
+        local accepted, matched = writeFlag(name, value)
+        
         if matched then FF.result[name] = "ok"
         elseif accepted then FF.result[name] = FF.canGet and "reverted" or "sent"
         else FF.result[name] = (FF.canGet and before == nil) and "unknown" or "fail" end
         if accepted then FF.applied[name] = v end
         return matched or (accepted and not FF.canGet)
     end
+
     function FF.good(name) local r = FF.result[name]; return r == "ok" or r == "sent" end
+
     function FF.restore(name)
         local o = FF.orig[name]
-        FF.applied[name] = nil; FF.result[name] = nil
-        if o and FF.canSet then pcall(setfflag, FF.key[name] or FF.strip(name), o) end
+        FF.applied[name] = nil
+        FF.result[name] = nil
+        if not FF.canSet then return end
+        local target
+        if o and o ~= false then
+            target = o
+        else
+            local p = FF.prefix(name) or ""
+            if p:find("Flag") then target = "False"
+            elseif p:find("Int") then target = "0"
+            elseif p:find("String") then target = ""
+            end
+        end
+        if target then writeFlag(name, target) end
+    end
+
+    function FF.refreshMaterials()
+        pcall(function()
+            local ms = game:GetService("MaterialService")
+            local overrides = {}
+            for _, mat in ipairs(Enum.Material:GetEnumItems()) do
+                local ok, val = pcall(function() return ms:GetBaseMaterialOverride(mat) end)
+                if ok then overrides[mat] = val end
+            end
+            for _, mat in ipairs(Enum.Material:GetEnumItems()) do
+                pcall(function() ms:SetBaseMaterialOverride(mat, "") end)
+            end
+            task.defer(function()
+                for mat, val in pairs(overrides) do
+                    pcall(function() ms:SetBaseMaterialOverride(mat, val) end)
+                end
+            end)
+        end)
     end
 end
 
@@ -3554,7 +3609,7 @@ local function saveConfig()
 end
 loadConfig()
 
--- ============ MAPTEX (must be before Force) ============
+-- ============ MAPTEX ============
 local MapTex = { mode = "Normal", saved = setmetatable({}, {__mode = "k"}), conns = {}, gen = 0, over = {} }
 local MaterialService = game:GetService("MaterialService")
 local PlayersS = game:GetService("Players")
@@ -3808,7 +3863,11 @@ do
     }
     function Flags.applyAll()
         local w = Flags.wanted()
-        for name in pairs(FF.applied) do if w[name] == nil then FF.restore(name) end end
+        local toRestore = {}
+        for name in pairs(FF.applied) do
+            if w[name] == nil then table.insert(toRestore, name) end
+        end
+        for _, name in ipairs(toRestore) do FF.restore(name) end
         pcall(Force.apply)
         local ok, fail, total = 0, 0, 0
         for name, v in pairs(w) do
@@ -3839,13 +3898,16 @@ do
         if Config.Enabled then
             Flags.applyAll()
         else
-            for name in pairs(FF.applied) do pcall(FF.restore, name) end
+            local toRestore = {}
+            for name in pairs(FF.applied) do table.insert(toRestore, name) end
+            for _, name in ipairs(toRestore) do pcall(FF.restore, name) end
             local keep = Config.V
             Config.V = {}
             for k, v in pairs(DEFAULT_V) do Config.V[k] = v end
             pcall(Force.apply)
             Config.V = keep
         end
+        if FF.refreshMaterials then FF.refreshMaterials() end
     end
     Flags.MapTex = MapTex
     Flags.Force = Force
@@ -3884,8 +3946,8 @@ end
 -- ============ UI ============
 local V = Config.V
 
--- MASTER TOGGLE
-local sM = FFTab:AddSection("Master")
+-- FFLAGS TOGGLE
+local sM = FFTab:AddSection("FFlags Toggle")
 sM:AddToggle("FF_MasterToggle", { Title = "FFlags Enabled", Default = Config.Enabled,
     Callback = function(v) Flags.setEnabled(v) end })
 
@@ -3927,14 +3989,18 @@ local customListRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize 
 mk("UIListLayout", { Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder }, customListRow)
 local addRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
     BackgroundTransparency = 1, LayoutOrder = 2 }, sC._wrap)
+mk("UIListLayout", { Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder }, addRow)
 sC._rowN += 2
 
-local function makeCustomToggleRow(name, initialOn, onChange)
+local function makeCustomToggleRow(name, value, initialOn, onChange)
     local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0 }, customListRow)
     mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.Border, BackgroundTransparency = 0.4, BorderSizePixel = 0 }, row)
-    mk("TextLabel", { Size = UDim2.new(0.55, -16, 1, 0), Position = UDim2.fromOffset(16, 0), BackgroundTransparency = 1,
+    mk("TextLabel", { Size = UDim2.new(1, -252, 1, 0), Position = UDim2.fromOffset(16, 0), BackgroundTransparency = 1,
         Font = FONT, TextSize = 12, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Text = tostring(name) }, row)
+    mk("TextLabel", { Size = UDim2.new(0, 90, 1, 0), Position = UDim2.new(1, -230, 0, 0), BackgroundTransparency = 1,
+        Font = FONTM, TextSize = 11, TextColor3 = UITheme.TextDim, TextXAlignment = Enum.TextXAlignment.Right,
+        TextTruncate = Enum.TextTruncate.AtEnd, Text = tostring(value or "") }, row)
     local sw = mk("Frame", { Size = UDim2.new(0, 40, 0, 22), Position = UDim2.new(1, -56, 0.5, -11),
         BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, ClipsDescendants = true }, row)
     addCorner(sw, 11); addStroke(sw, UITheme.Border, 1, 0.35)
@@ -3961,8 +4027,6 @@ local function makeCustomToggleRow(name, initialOn, onChange)
     end)
     return row
 end
-
-mk("UIListLayout", { Padding = UDim.new(0, 0), SortOrder = Enum.SortOrder.LayoutOrder }, addRow)
 
 do -- add-custom form
     local row1 = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0, LayoutOrder = 1 }, addRow)
@@ -4017,7 +4081,17 @@ function Flags.rebuildCustom()
         return
     end
     for i, e in ipairs(Config.Custom) do
-        makeCustomToggleRow(e.name, e.on, function(v) e.on = v; Flags.changed() end)
+        makeCustomToggleRow(e.name, e.value, e.on, function(v)
+            e.on = v
+            saveConfig()
+            if v then
+                if Config.Enabled then pcall(FF.set, e.name, e.value) end
+            else
+                pcall(FF.restore, e.name)
+            end
+            if Config.Enabled then Flags.applyAll() end
+            FF.refreshMaterials()
+        end)
     end
 end
 Flags.rebuildCustom()
