@@ -44,9 +44,43 @@ local function addRenderHandler(fn, order)
         end)
     end
 end
+local _postSimHandlers = {}
+local _postSimConn = nil
+local function addPostSimHandler(fn, order)
+    table.insert(_postSimHandlers, {fn = fn, order = order or 0})
+    table.sort(_postSimHandlers, function(a, b) return a.order < b.order end)
+    if _postSimHandlers[#_postSimHandlers] ~= nil and not _postSimConn then
+        _postSimConn = game:GetService("RunService").PostSimulation:Connect(function(dt)
+            for i = 1, #_postSimHandlers do
+                local h = _postSimHandlers[i]
+                local ok, err = pcall(h.fn, dt)
+                if not ok then warn("[qzxp] postsim handler: " .. tostring(err)) end
+            end
+        end)
+    end
+end
+local _heartbeatHandlers = {}
+local _heartbeatConn = nil
+local function addHeartbeatHandler(fn, order)
+    table.insert(_heartbeatHandlers, {fn = fn, order = order or 0})
+    table.sort(_heartbeatHandlers, function(a, b) return a.order < b.order end)
+    if _heartbeatHandlers[#_heartbeatHandlers] ~= nil and not _heartbeatConn then
+        _heartbeatConn = game:GetService("RunService").Heartbeat:Connect(function(dt)
+            for i = 1, #_heartbeatHandlers do
+                local h = _heartbeatHandlers[i]
+                local ok, err = pcall(h.fn, dt)
+                if not ok then warn("[qzxp] heartbeat handler: " .. tostring(err)) end
+            end
+        end)
+    end
+end
 getgenv().qzxp_StopRender = function()
     if _renderConn then pcall(function() _renderConn:Disconnect() end); _renderConn = nil end
     _renderHandlers = {}
+    if _postSimConn then pcall(function() _postSimConn:Disconnect() end); _postSimConn = nil end
+    _postSimHandlers = {}
+    if _heartbeatConn then pcall(function() _heartbeatConn:Disconnect() end); _heartbeatConn = nil end
+    _heartbeatHandlers = {}
 end
 
 task.spawn(function()
@@ -2156,9 +2190,9 @@ pcall(function()
         end
     end)
 end)
-addRenderHandler(apCheck, 2)
+addPostSimHandler(apCheck, 2)
 
-addRenderHandler(function()
+addPostSimHandler(function()
     if not AutoSpam_On or not AP_On then return end
     local char = LocalPlayer.Character
     if not char or not char.PrimaryPart then return end
@@ -2187,7 +2221,7 @@ addRenderHandler(function()
         if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
             PlayParryAnimation()
         else
-            Animation_Fix()
+            AnimFix.Fire()
         end
         fireRemote(ball)
     end
@@ -2243,7 +2277,7 @@ function PRV.Draw(center, radius)
         seg.CFrame = CFrame.new(x, y, z) * CFrame.Angles(0, -phi, 0)
     end
 end
-addRenderHandler(function()
+addHeartbeatHandler(function()
     if not PRV.On then
         if PRV.Model then PRV.Destroy() end
         return
@@ -2283,7 +2317,7 @@ local function tryTBForBall(ball)
         if AnimFix_TB then PlaySingleParryAnimation() end
     end
 end
-addRenderHandler(function()
+addPostSimHandler(function()
     if not TB_On or Spam_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
@@ -2362,7 +2396,7 @@ local function spamOk()
     return true
 end
 local timeAccumulator = 0
-addRenderHandler(function(dt)
+addPostSimHandler(function(dt)
     if not Spam_On then timeAccumulator = 0 return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then timeAccumulator = 0 return end
@@ -4417,7 +4451,7 @@ local function bsLabel(o)
 end
 local bsSp, bsDi, bsTg, bsCu = bsLabel(1), bsLabel(2), bsLabel(3), bsLabel(4)
 local uiLast = 0
-addRenderHandler(function()
+addHeartbeatHandler(function()
     local now = os.clock()
     if now - uiLast < 0.1 then return end
     uiLast = now
@@ -4527,7 +4561,7 @@ local _fpsAvg = 60
 local _statsLast = 0
 local _lastFpsTxt  = ""
 local _lastPingTxt = ""
-addRenderHandler(function(dt)
+addHeartbeatHandler(function(dt)
     if dt and dt > 0 then
         _fpsAvg = _fpsAvg * 0.9 + (1 / dt) * 0.1
     end
@@ -5398,7 +5432,7 @@ do
     -- ---------------------------------------------------------
     -- RENDER HANDLERS
     -- ---------------------------------------------------------
-    addRenderHandler(function()
+    addHeartbeatHandler(function()
         if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
         local info = ProfileSpoofer.info
         if not info then
@@ -5411,7 +5445,7 @@ do
     end, 9)
 
     local _avatarHSPrev = 0
-    addRenderHandler(function()
+    addHeartbeatHandler(function()
         local on = Options.AvatarChanger and Options.AvatarChanger.Value
         if not on then return end
         if not getgenv().qzxp_avatarUserId then return end
@@ -5421,7 +5455,7 @@ do
         pcall(refreshAvatarHeadshots)
     end, 7)
 
-    addRenderHandler(function()
+    addHeartbeatHandler(function()
         local mainPos = Window._main.Position
         local baseX = mainPos.X.Offset + 760
         local baseY = mainPos.Y.Offset + 115
