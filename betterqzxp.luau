@@ -1633,6 +1633,42 @@ local function fireRemote(ball)
     return true
 end
 
+local function fireParryGeneric()
+    if not _remote or not _args or not _tokenFound then return false end
+    local rcf = getCurveCF(getBall())
+    if _frameEdFrame ~= frameCount then
+        _frameEdFrame = frameCount
+        local ed = {}
+        local af = Workspace:FindFirstChild("Alive")
+        if af then
+            for _, e in pairs(af:GetChildren()) do
+                if e.PrimaryPart then
+                    local ok, sp = pcall(Camera.WorldToScreenPoint, Camera, e.PrimaryPart.Position)
+                    if ok then ed[e.Name] = sp end
+                end
+            end
+        end
+        _frameEd = ed
+    end
+    local ed = _frameEd
+    local vp = Camera.ViewportSize
+    local mp = Vector2.new(vp.X / 2, vp.Y / 2)
+    if LockEnabled and LockTarget ~= "None" then
+        local lp = findPart(LockTarget)
+        if lp then
+            local sp = Camera:WorldToScreenPoint(lp.Position)
+            mp = Vector2.new(sp.X, sp.Y)
+        end
+    else
+        local ok, loc = pcall(UserInputService.GetMouseLocation, UserInputService)
+        if ok and loc then mp = loc end
+    end
+    local ok = pcall(function()
+        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
+    end)
+    return ok
+end
+
 local AP_Acc, AP_Div = 50, 1.1
 local RandAcc, AutoAbility = false, false
 local function computeTriggerDist(spd, ping, curved, acc)
@@ -1658,34 +1694,9 @@ spawnTracked(function()
     end
 end)
 
-local InfOn, DSOn, THOn, SFOn = false, false, false, false
-local InfDet, DSDet, THDet, SFDet = false, false, false, false
-local function isInfinityActive()      return InfOn end
-local function isDeathSlashActive()    return DSOn end
-local function isTimeHoleActive()      return THOn end
-local function isSlashesOfFuryActive() return SFOn end
-pcall(function()
-    ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(who, on)
-        if who ~= LocalPlayer and who ~= LocalPlayer.Name then return end
-        DSOn = (on == true)
-    end)
-    ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on)
-        if on then
-            local char = LocalPlayer.Character
-            local abilities = char and char:FindFirstChild("Abilities")
-            local inf = abilities and abilities:FindFirstChild("Infinity")
-            if LocalPlayer:GetAttribute("CurrentlyEquippedAbility") == "Infinity"
-               and inf and inf.Enabled then
-                InfOn = true
-            end
-        elseif InfOn then
-            InfOn = false
-        end
-    end)
-    ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on)
-        InfinityBallRaw = on == true
-    end)
-end)
+pcall(function() ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_,d) DSOn=d or false end) end)
+pcall(function() ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_,b) InfOn=b or false end) end)
+pcall(function() ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on) InfinityBallRaw = on == true end) end)
 local _lpName = LocalPlayer.Name
 local _argsContainMe = function(a)
     for i = 1, #a do
@@ -1711,6 +1722,34 @@ do
         end)
     end
 end
+pcall(function()
+    if not _netModule then return end
+    local net = _netModule
+    net["RE/TimeHoleActivate"].OnClientEvent:Connect(function(...)
+        local p = (...)
+        if p == LocalPlayer or (p and p.Name == LocalPlayer.Name) then THOn = true end
+    end)
+    net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function() THOn = false end)
+    net["RE/SlashesOfFuryActivate"].OnClientEvent:Connect(function(...)
+        local p = (...)
+        if p == LocalPlayer or (p and p.Name == LocalPlayer.Name) then
+            SFOn = true; slashesoffury_count = 0
+        end
+    end)
+    net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function()
+        SFOn = false; slashesoffury_count = 0
+    end)
+    net["RE/SlashesOfFuryParry"].OnClientEvent:Connect(function()
+        slashesoffury_count += 1
+    end)
+    net["RE/SlashesOfFuryCatch"].OnClientEvent:Connect(function()
+        task.spawn(function()
+            while SFOn and slashesoffury_count < maxParryCount do
+                if SFDet then fireParryGeneric(); task.wait(parryDelay) else break end
+            end
+        end)
+    end)
+end)
 local function _hookNetEvent(name, onFire)
     local hooked = false
     if _netModule then
@@ -1731,17 +1770,6 @@ local function _hookNetEvent(name, onFire)
     end
     if not hooked then warn("[qzxp] detection: could not hook net event " .. name) end
 end
-_hookNetEvent("RE/TimeHoleActivate", function(a)
-    local who = a[1]
-    if who == LocalPlayer or who == LocalPlayer.Name then THOn = true end
-end)
-_hookNetEvent("RE/TimeHoleDeactivate", function() THOn = false end)
-_hookNetEvent("RE/SlashesOfFuryActivate", function(a)
-    local who = a[1]
-    if who == LocalPlayer or who == LocalPlayer.Name then SFOn = true end
-end)
-_hookNetEvent("RE/SlashesOfFuryCatch", function() SFOn = true end)
-_hookNetEvent("RE/SlashesOfFuryEnd", function() SFOn = false end)
 
 do
 addRenderHandler(function()
@@ -2083,10 +2111,8 @@ local function apCheck()
     if not AP_On or TB_On or Spam_On then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
-    if InfDet and isInfinityActive()      then return end
-    if DSDet  and isDeathSlashActive()    then return end
-    if THDet  and isTimeHoleActive()      then return end
-    if SFDet  and isSlashesOfFuryActive() then return end
+    local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
+    if blocked then return end
     local char = LocalPlayer.Character
     local root = char and char.PrimaryPart
     if not root then return end
@@ -2221,7 +2247,7 @@ addPostSimHandler(function()
         if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
             PlayParryAnimation()
         else
-            AnimFix.Fire()
+            PlaySingleParryAnimation()
         end
         fireRemote(ball)
     end
@@ -2306,10 +2332,8 @@ local function tryTBForBall(ball)
     if not root or root:FindFirstChild('SingularityCape') then return end
     if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
     if ball:FindFirstChild('ComboCounter') then return end
-    if InfDet and isInfinityActive()      then return end
-    if DSDet  and isDeathSlashActive()    then return end
-    if THDet  and isTimeHoleActive()      then return end
-    if SFDet  and isSlashesOfFuryActive() then return end
+    local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
+    if blocked then return end
     local fired = fireRemote(ball)
     if fired then
         _tbLastFire = os.clock()
@@ -2329,10 +2353,8 @@ addPostSimHandler(function()
     for _, ball in pairs(balls) do
         if ball:GetAttribute('target') ~= _lpName then continue end
         if ball:FindFirstChild('ComboCounter') then continue end
-        if InfDet and isInfinityActive()      then continue end
-        if DSDet  and isDeathSlashActive()    then continue end
-        if THDet  and isTimeHoleActive()      then continue end
-        if SFDet  and isSlashesOfFuryActive() then continue end
+        local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
+        if blocked then continue end
         local fired = fireRemote(ball)
         if fired then
             _tbLastFire = os.clock()
@@ -2389,10 +2411,8 @@ end)
 local SpamRPS, SpamInt, SpamDetect = 100, 0.01, true
 local function spamOk()
     if not SpamDetect then return true end
-    if InfDet and isInfinityActive()      then return false end
-    if DSDet  and isDeathSlashActive()    then return false end
-    if THDet  and isTimeHoleActive()      then return false end
-    if SFDet  and isSlashesOfFuryActive() then return false end
+    local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
+    if blocked then return false end
     return true
 end
 local timeAccumulator = 0
@@ -4641,9 +4661,9 @@ do
     s2:AddToggle("THDet", {Title = "Time Hole", Default = false, Callback = function(v)
         THDet = v
     end})
-    s2:AddToggle("SFDet", {Title = "Slashes of Fury", Default = false, Callback = function(v)
-        SFDet = v
-    end})
+    s2:AddToggle("SFDet", {Title = "Slashes of Fury", Default = false, Callback = function(v) SFDet = v end})
+    s2:AddSlider("SofDelay", {Title = "SoF Parry Delay (ms)", Default = 5, Min = 5, Max = 25, Rounding = 0, Callback = function(v) parryDelay = v/100 end})
+    s2:AddSlider("SofMax",   {Title = "SoF Max Parry Count", Default = 36, Min = 1, Max = 36, Rounding = 0, Callback = function(v) maxParryCount = v end})
 end
 do
     local s3 = Tabs.Combat:AddSection("Spam")
