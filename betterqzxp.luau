@@ -1,5 +1,11 @@
 -- CREDITS: S14X (spam, anim, fflags), EAGLE HUB, ANGELI (triggerbot), OXY (autoparry)
 
+-- Dispose the previous run before replacing shared cleanup references.
+pcall(function()
+    local cleanup = getgenv().qzxp_Cleanup
+    if cleanup then cleanup() end
+end)
+
 local function GetSafeUIParent()
     return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 end
@@ -93,29 +99,18 @@ local _HS  = game:GetService("HttpService")
 local _TS  = game:GetService("TweenService")
 
 local UITheme = {
-    Bg = Color3.fromRGB(15, 15, 15),
-    Sidebar = Color3.fromRGB(11, 11, 11),
-    Panel = Color3.fromRGB(15, 15, 15),
-    Row = Color3.fromRGB(15, 15, 15),
-    Border = Color3.fromRGB(55, 55, 55),
-    BorderDim = Color3.fromRGB(35, 35, 35),
-    Text = Color3.fromRGB(242, 242, 242),
-    TextDim = Color3.fromRGB(182, 182, 182),
-    TextMute = Color3.fromRGB(126, 126, 126),
-    White = Color3.fromRGB(255, 255, 255),
-    Black = Color3.fromRGB(0, 0, 0),
-    Off = Color3.fromRGB(52, 52, 52),
-    Hover = Color3.fromRGB(28, 28, 28),
-    GradTop = Color3.fromRGB(15, 15, 15),
-    GradBot = Color3.fromRGB(15, 15, 15),
-    RowTop = Color3.fromRGB(15, 15, 15),
-    RowBot = Color3.fromRGB(15, 15, 15),
-    BtnTop = Color3.fromRGB(15, 15, 15),
-    BtnBot = Color3.fromRGB(15, 15, 15),
-    KnobTop = Color3.fromRGB(255, 255, 255),
-    KnobBot = Color3.fromRGB(255, 255, 255),
-    OffTop = Color3.fromRGB(52, 52, 52),
-    OffBot = Color3.fromRGB(52, 52, 52),
+    Bg = Color3.fromRGB(0, 0, 0), Sidebar = Color3.fromRGB(8, 8, 8),
+    Panel = Color3.fromRGB(12, 12, 12), Row = Color3.fromRGB(8, 8, 8),
+    Border = Color3.fromRGB(28, 28, 28), BorderDim = Color3.fromRGB(20, 20, 20),
+    Text = Color3.fromRGB(245, 245, 245), TextDim = Color3.fromRGB(185, 185, 185),
+    TextMute = Color3.fromRGB(130, 130, 130), White = Color3.fromRGB(255, 255, 255),
+    Accent = Color3.fromRGB(255, 255, 255), Black = Color3.fromRGB(0, 0, 0),
+    Off = Color3.fromRGB(45, 45, 45), Hover = Color3.fromRGB(28, 28, 28),
+    GradTop = Color3.fromRGB(0, 0, 0), GradBot = Color3.fromRGB(0, 0, 0),
+    RowTop = Color3.fromRGB(8, 8, 8), RowBot = Color3.fromRGB(8, 8, 8),
+    BtnTop = Color3.fromRGB(12, 12, 12), BtnBot = Color3.fromRGB(12, 12, 12),
+    KnobTop = Color3.fromRGB(255, 255, 255), KnobBot = Color3.fromRGB(255, 255, 255),
+    OffTop = Color3.fromRGB(45, 45, 45), OffBot = Color3.fromRGB(45, 45, 45),
 }
 local FONT  = Enum.Font.GothamMedium
 local FONTB = Enum.Font.GothamBold
@@ -132,7 +127,7 @@ local function mk(c, p, par)
 end
 local function addStroke(par, color, thick, trans)
     return mk("UIStroke", {Color = color or UITheme.Border, Thickness = thick or 1,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Transparency = trans or 0}, par)
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Enabled = false}, par)
 end
 local function addCorner(par, r) return mk("UICorner", {CornerRadius = UDim.new(0, r or 0)}, par) end
 local function addGrad(par, top, bottom, rot)
@@ -192,6 +187,12 @@ function Fluent:Notify(opts)
     task.delay(dur, function() if card and card.Parent then pcall(function() card:Destroy() end) end end)
 end
 
+-- Release input-service listeners for this UI on reload/cleanup.
+local qzxpUIConnections = {}
+local function qzxpTrackUI(connection)
+    table.insert(qzxpUIConnections, connection)
+    return connection
+end
 local Tab, Section, Window, _openDropdown
 local function closeDropdown()
     if _openDropdown then pcall(function() _openDropdown:Destroy() end); _openDropdown = nil end
@@ -200,10 +201,8 @@ end
 Section = {}; Section.__index = Section
 function Section:_row(h)
     self._rowN += 1
-    local row = mk("Frame", {Size = UDim2.new(1, 0, 0, h or 36), BackgroundColor3 = UITheme.Row,
+    local row = mk("Frame", {Size = UDim2.new(1, -5, 0, h or 36), BackgroundTransparency = 1,
         BorderSizePixel = 0, LayoutOrder = self._rowN}, self._wrap)
-    mk("Frame", {Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 0),
-        BackgroundColor3 = UITheme.Border, BackgroundTransparency = 0.4, BorderSizePixel = 0}, row)
     return row
 end
 function Section:_label(row, text)
@@ -224,7 +223,7 @@ function Section:AddToggle(id, opts)
     local obj = {Value = not not opts.Default}
     local function apply(on, animate)
         local knobPos = on and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
-        switch.BackgroundColor3 = on and UITheme.White or UITheme.Off
+        switch.BackgroundColor3 = on and UITheme.Accent or UITheme.Off
         if animate then tween(knob, TI_MED, {Position = knobPos}) else knob.Position = knobPos end
     end
     local function set(v, animate)
@@ -247,7 +246,7 @@ function Section:AddSlider(id, opts)
     local bar = mk("Frame", {Size = UDim2.new(1, -32, 0, 6), Position = UDim2.new(0, 16, 0, 34),
         BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, ClipsDescendants = false}, row)
     addCorner(bar, 3); addStroke(bar, UITheme.Border, 1, 0.55); addGrad(bar, UITheme.OffTop, UITheme.OffBot, 90)
-    local fill = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = UITheme.White, BorderSizePixel = 0}, bar)
+    local fill = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = UITheme.Accent, BorderSizePixel = 0}, bar)
     addCorner(fill, 3); addGrad(fill, UITheme.White, Color3.fromRGB(200, 200, 210), 0)
     local knob = mk("Frame", {Size = UDim2.new(0, 16, 0, 16), AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = UITheme.White, BorderSizePixel = 0, ZIndex = 2}, bar)
@@ -373,7 +372,7 @@ function Section:AddKeybind(id, opts)
         end
         listening = true; suppressUntil = os.clock() + 0.25; refresh()
     end)
-    _UIS.InputBegan:Connect(function(input, gp)
+    qzxpTrackUI(_UIS.InputBegan:Connect(function(input, gp)
         if gp then return end
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
         if listening then
@@ -386,15 +385,15 @@ function Section:AddKeybind(id, opts)
                 if opts.Callback then pcall(opts.Callback, obj.Value) end
             end
         end
-    end)
-    _UIS.InputEnded:Connect(function(input, gp)
+    end))
+    qzxpTrackUI(_UIS.InputEnded:Connect(function(input, gp)
         if gp then return end
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
         if input.KeyCode == obj.Value and obj.isHeld then
             obj.isHeld = false
             if opts.ReleasedCallback then pcall(opts.ReleasedCallback, obj.Value) end
         end
-    end)
+    end))
     refresh()
     obj.SetValue = function(_, v)
         obj.Value = toKey(v); suppressUntil = os.clock() + 0.25; refresh()
@@ -484,7 +483,7 @@ function Window:AddTab(opts)
         BackgroundTransparency = 1, Font = FONT, TextSize = 13, TextColor3 = UITheme.TextDim,
         TextXAlignment = Enum.TextXAlignment.Left, Text = title}, btn)
     local ind = mk("Frame", {Size = UDim2.new(0, 2, 0, 16), Position = UDim2.new(0, 0, 0.5, -8),
-        BackgroundColor3 = UITheme.White, BorderSizePixel = 0, Visible = false}, btn)
+        BackgroundColor3 = UITheme.Accent, BorderSizePixel = 0, Visible = false}, btn)
     addCorner(ind, 1)
     local page = mk("ScrollingFrame", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
         BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = UITheme.Off,
@@ -515,10 +514,10 @@ function Fluent:CreateWindow(opts)
         BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, titleBar)
     addGrad(titleBar, UITheme.RowTop, UITheme.Bg, 90)
     local dot = mk("Frame", {Size = UDim2.new(0, 6, 0, 6), Position = UDim2.new(0, 16, 0.5, -3),
-        BackgroundColor3 = UITheme.White, BorderSizePixel = 0}, titleBar)
+        BackgroundColor3 = UITheme.Accent, BorderSizePixel = 0}, titleBar)
     addCorner(dot, 3)
     mk("TextLabel", {Size = UDim2.new(0, 300, 1, 0), Position = UDim2.new(0, 30, 0, 0), BackgroundTransparency = 1,
-        Font = FONTB, TextSize = 13, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+        Font = FONTB, TextSize = 15, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
         Text = opts.Title or "Window"}, titleBar)
     local closeBtn = mk("TextButton", {Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(1, -36, 0.5, -14),
         BackgroundTransparency = 1, Font = FONTB, TextSize = 14, TextColor3 = UITheme.TextDim, Text = "×", AutoButtonColor = false}, titleBar)
@@ -555,6 +554,1036 @@ function Fluent:CreateWindow(opts)
     end
     Fluent.Window = window
     return window
+end
+
+do -- Tsukuyomi UI, adapted to qzxp's existing control API
+    local SectionClass = Section
+    local function softStroke()
+        local stroke = Instance.new("UIStroke")
+        stroke.Enabled = false
+        return stroke
+    end
+    local TweenService, UserInputService = _TS, _UIS
+    local TextService = game:GetService("TextService")
+    local UI_PARENT = GetSafeUIParent()
+    local NeverZen = {Guis = {}, HighlightUpdateFunctions = {}, Theme = {
+        WindowBackgroundColor = Color3.fromRGB(0,0,0),
+        LineColor = Color3.fromRGB(10,10,10), BackgroundColor = Color3.fromRGB(12,12,12),
+        SectionColor = Color3.fromRGB(8,8,8), Hightlight = Color3.fromRGB(255,255,255),
+        StrokeColor = Color3.fromRGB(28,28,28), StrokeColor2 = Color3.fromRGB(45,45,45),
+        BackgroundColor2 = Color3.fromRGB(15,15,15),
+    }}
+    function NeverZen:Track(conn) return qzxpTrackUI(conn) end
+    function NeverZen.ProtectGui(_) end
+    function NeverZen:RandomString() return "qzxp_UI" end
+    function NeverZen:GetIcon(name)
+        return ({cycle = "rbxassetid://10734952755", settings = "rbxassetid://10734950309"})[name] or ""
+    end
+    function NeverZen:Rounding(n, places)
+        local mult = 10 ^ (places or 0)
+        return math.floor(n * mult + 0.5) / mult
+    end
+    function NeverZen:NewInput(frame, call)
+        local button = Instance.new("TextButton")
+        button.Parent = frame
+        button.ZIndex = frame.ZIndex + 10
+        button.Size = UDim2.fromScale(1, 1)
+        button.BackgroundTransparency = 1
+        button.TextTransparency = 1
+        if call then button.MouseButton1Click:Connect(call) end
+        return button
+    end
+    function NeverZen.new(config)
+        config = config or {}
+        config.Name = config.Name or "S14x"
+        config.Keybind = config.Keybind or Enum.KeyCode.LeftControl
+        config.Scale = config.Scale or UDim2.new(0, 611, 0, 396)
+        config.Resizable = config.Resizable
+        config.Acrylic = config.Acrylic or false
+
+        local WindowSignal = {}
+        WindowSignal.SelectedTab = nil
+        WindowSignal.Tabs = {}
+        WindowSignal.Config = config
+        WindowSignal.Toggle = true
+
+        local Content = Instance.new("ScreenGui")
+        local WindowFrame = Instance.new("Frame")
+        local UICorner = Instance.new("UICorner")
+        local UIStroke = softStroke()
+        local Header = Instance.new("Frame")
+        local HeaderText = Instance.new("TextLabel")
+        local SubTitleText = Instance.new("TextLabel")
+        local Line = Instance.new("Frame")
+        local Frame = Instance.new("Frame")
+        local UIListLayout = Instance.new("UIListLayout")
+        local MinButton = Instance.new("ImageButton")
+        local Line_2 = Instance.new("Frame")
+        local BthFrames = Instance.new("Frame")
+        local InformationFrame = Instance.new("Frame")
+        local TabButtons = Instance.new("Frame")
+        local TBSFrame = Instance.new("ScrollingFrame")
+        local UIListLayout_2 = Instance.new("UIListLayout")
+        local Line_3 = Instance.new("Frame")
+        local TabWin = Instance.new("Frame")
+
+        local old = UI_PARENT:FindFirstChild("qzxp_UI")
+        if old then old:Destroy() end
+        Content.Name = NeverZen:RandomString()
+        Content.Parent = UI_PARENT
+        Content.ResetOnSpawn = false
+        Content.IgnoreGuiInset = true
+        Content.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        table.insert(NeverZen.Guis, Content)
+        NeverZen.ProtectGui(Content)
+
+        WindowSignal._gui = Content
+        WindowSignal._main = WindowFrame
+        function WindowSignal:SetToggleKeyLabel(_) end
+        WindowFrame.Parent = Content
+        WindowFrame.BackgroundColor3 = NeverZen.Theme.WindowBackgroundColor
+        WindowFrame.BackgroundTransparency = 0
+        WindowFrame.BorderSizePixel = 0
+        WindowFrame.ClipsDescendants = true
+        WindowFrame.Position = UDim2.new(0, 177, 0, 177)
+        WindowFrame.Size = UDim2.new(0,0,0,0)
+        WindowFrame.Active = true
+
+        TweenService:Create(WindowFrame, TweenInfo.new(1, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = config.Scale,
+            Position = UDim2.new(0, 75, 0, 75)
+        }):Play()
+
+        UICorner.CornerRadius = UDim.new(0,10)
+        UICorner.Parent = WindowFrame
+        UIStroke.Transparency = 0.85
+        UIStroke.Color = Color3.fromRGB(0,25,34)
+        UIStroke.Parent = WindowFrame
+
+        Header.Parent = WindowFrame
+        Header.BackgroundTransparency = 1
+        Header.ClipsDescendants = true
+        Header.Size = UDim2.new(1,0,0,45)
+        Header.Position = UDim2.new(0,0,0,-50)
+        Header.Active = true
+        task.delay(0.2, function()
+            TweenService:Create(Header, TweenInfo.new(1, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(0,0,0,0)
+            }):Play()
+        end)
+
+        local TITLE_SIZE = 17
+        local titleSize = TextService:GetTextSize(config.Name, TITLE_SIZE, Enum.Font.GothamBold, Vector2.new(math.huge, math.huge))
+        local titleWidth = titleSize.X
+        local titleLeft = 5
+        local lineX = titleLeft + titleWidth + 8
+
+        HeaderText.Parent = Header
+        HeaderText.BackgroundTransparency = 1
+        HeaderText.Position = UDim2.new(0, titleLeft, 0, 6)
+        HeaderText.Size = UDim2.new(0, titleWidth + 4, 0, 16)
+        HeaderText.Font = Enum.Font.GothamBold
+        HeaderText.Text = config.Name
+        HeaderText.TextColor3 = NeverZen.Theme.Hightlight
+        HeaderText.TextSize = TITLE_SIZE
+        HeaderText.TextXAlignment = Enum.TextXAlignment.Left
+        table.insert(NeverZen.HighlightUpdateFunctions, function()
+            HeaderText.TextColor3 = NeverZen.Theme.Hightlight
+        end)
+
+        task.delay(0.4, function()
+            TweenService:Create(HeaderText, TweenInfo.new(1, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(0, titleLeft, 0, 10)
+            }):Play()
+        end)
+
+        Line.Parent = Header
+        Line.AnchorPoint = Vector2.new(0,1)
+        Line.BackgroundColor3 = NeverZen.Theme.LineColor
+        Line.BorderSizePixel = 0
+        Line.Position = UDim2.new(0, lineX, 1, 0)
+        Line.Size = UDim2.new(1, -lineX, 0, 1)
+
+        SubTitleText.Parent = Header
+        SubTitleText.BackgroundTransparency = 1
+        SubTitleText.AnchorPoint = Vector2.new(0, 0.5)
+        SubTitleText.Position = UDim2.new(0, 15, 0.85, 0)
+        SubTitleText.Size = UDim2.new(0, 250, 0, 15)
+        SubTitleText.Font = Enum.Font.GothamMedium
+        SubTitleText.Text = config.SubTitle or ""
+        SubTitleText.TextColor3 = NeverZen.Theme.Hightlight
+        SubTitleText.TextSize = 10
+        SubTitleText.TextTransparency = 0.5
+        SubTitleText.TextXAlignment = Enum.TextXAlignment.Left
+        table.insert(NeverZen.HighlightUpdateFunctions, function()
+            SubTitleText.TextColor3 = NeverZen.Theme.Hightlight
+        end)
+
+        Frame.Parent = Header
+        Frame.AnchorPoint = Vector2.new(1, 0.5)
+        Frame.BackgroundTransparency = 1
+        Frame.Position = UDim2.new(1, -10, -0.5, 0)
+        Frame.Size = UDim2.new(0, 150, 0.5, 0)
+        Frame.ZIndex = 5
+        task.delay(0.6, function()
+            TweenService:Create(Frame, TweenInfo.new(1, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(1, -10, 0.5, 0)
+            }):Play()
+        end)
+
+        UIListLayout.Parent = Frame
+        UIListLayout.FillDirection = Enum.FillDirection.Horizontal
+        UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+        UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        UIListLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        UIListLayout.Padding = UDim.new(0,5)
+
+        MinButton.Parent = Frame
+        MinButton.BackgroundTransparency = 1
+        MinButton.Size = UDim2.new(1,0,1,0)
+        MinButton.SizeConstraint = Enum.SizeConstraint.RelativeYY
+        MinButton.Image = NeverZen:GetIcon('settings')
+        MinButton.ImageColor3 = Color3.fromRGB(255,255,255)
+        MinButton.ImageTransparency = 0.25
+
+        Line_2.Parent = WindowFrame
+        Line_2.Visible = false
+        Line_2.BackgroundColor3 = NeverZen.Theme.LineColor
+        Line_2.BorderSizePixel = 0
+        Line_2.Position = UDim2.new(0, 170, 0, 0)
+        Line_2.Size = UDim2.new(0,1,1,0)
+
+        BthFrames.Parent = WindowFrame
+        BthFrames.BackgroundTransparency = 1
+        BthFrames.Position = UDim2.new(-1,0,0,45)
+        BthFrames.Size = UDim2.new(0,170,1,-45)
+        task.delay(0.3, function()
+            TweenService:Create(BthFrames, TweenInfo.new(1, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(0,0,0,45)
+            }):Play()
+        end)
+
+        InformationFrame.Parent = BthFrames
+        InformationFrame.AnchorPoint = Vector2.new(0,1)
+        InformationFrame.BackgroundTransparency = 1
+        InformationFrame.Position = UDim2.new(0,0,1,55)
+        InformationFrame.Size = UDim2.new(1,0,0,45)
+        InformationFrame.Visible = false
+
+        TabButtons.Parent = BthFrames
+        TabButtons.BackgroundTransparency = 1
+        TabButtons.ClipsDescendants = true
+        TabButtons.Size = UDim2.new(0,170,1,-5)
+
+        TBSFrame.Parent = TabButtons
+        TBSFrame.Active = true
+        TBSFrame.AnchorPoint = Vector2.new(0.5,0.5)
+        TBSFrame.BackgroundTransparency = 1
+        TBSFrame.ClipsDescendants = false
+        TBSFrame.Position = UDim2.new(-0.4,0,0.5,0)
+        TBSFrame.Size = UDim2.new(1,-5,1,-5)
+        TBSFrame.ZIndex = 2
+        TBSFrame.ScrollBarThickness = 0
+        task.delay(0.3, function()
+            TweenService:Create(TBSFrame, TweenInfo.new(1, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(0.5,0,0.5,0)
+            }):Play()
+        end)
+
+        UIListLayout_2.Parent = TBSFrame
+        UIListLayout_2.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        UIListLayout_2.SortOrder = Enum.SortOrder.LayoutOrder
+        UIListLayout_2.Padding = UDim.new(0,10)
+        UIListLayout_2:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+            TBSFrame.CanvasSize = UDim2.fromOffset(0, UIListLayout_2.AbsoluteContentSize.Y + 5)
+        end)
+
+        Line_3.Parent = BthFrames
+        Line_3.AnchorPoint = Vector2.new(0,1)
+        Line_3.BackgroundColor3 = NeverZen.Theme.LineColor
+        Line_3.BorderSizePixel = 0
+        Line_3.Position = UDim2.new(0,0,1,-45)
+        Line_3.Size = UDim2.new(0,170,0,1)
+        Line_3.Visible = false
+
+        TabWin.Parent = WindowFrame
+        TabWin.BackgroundTransparency = 1
+        TabWin.Position = UDim2.new(0,170,1,45)
+        TabWin.Size = UDim2.new(1,-170,1,-45)
+        TabWin.ZIndex = 2
+        task.delay(0.3, function()
+            TweenService:Create(TabWin, TweenInfo.new(0.8, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(0,170,0,45)
+            }):Play()
+        end)
+
+        function WindowSignal:AddTab(config)
+            config = config or {}
+            config.Name = config.Name or config.Title or 'Example'
+            config.Icon = config.Icon or "cycle"
+
+            local TabSignal = {}
+            local TabButton = Instance.new("Frame")
+            local UICorner = Instance.new("UICorner")
+            local TabIcon = Instance.new("ImageLabel")
+            local TabName = Instance.new("TextLabel")
+
+            TabButton.Parent = TBSFrame
+            TabButton.LayoutOrder = #WindowSignal.Tabs + 1
+            TabButton.BackgroundColor3 = NeverZen.Theme.BackgroundColor2
+            TabButton.BorderSizePixel = 0
+            TabButton.Size = UDim2.new(0,0,0,42)
+            TabButton.ZIndex = 5
+            UICorner.CornerRadius = UDim.new(0,10)
+            UICorner.Parent = TabButton
+
+            TabIcon.Parent = TabButton
+            TabIcon.AnchorPoint = Vector2.new(0,0.5)
+            TabIcon.BackgroundTransparency = 1
+            TabIcon.Position = UDim2.new(0,10,0.5,0)
+            TabIcon.Size = UDim2.new(0,22,0,22)
+            TabIcon.ZIndex = 5
+            TabIcon.Image = NeverZen:GetIcon(config.Icon)
+            TabIcon.ImageColor3 = Color3.fromRGB(255,255,255)
+            TabIcon.ImageTransparency = 1
+
+            TabName.Parent = TabButton
+            TabName.AnchorPoint = Vector2.new(0.5,0.5)
+            TabName.BackgroundTransparency = 1
+            TabName.Position = UDim2.new(0.5, 0, 0.5, 0)
+            TabName.Size = UDim2.new(1,-50,0,16)
+            TabName.ZIndex = 5
+            TabName.Font = Enum.Font.GothamMedium
+            TabName.Text = config.Name
+            TabName.TextColor3 = NeverZen.Theme.Hightlight
+            TabName.TextScaled = true
+            TabName.TextSize = 14
+            TabName.TextTransparency = 1
+            TabName.TextXAlignment = Enum.TextXAlignment.Center
+
+            table.insert(NeverZen.HighlightUpdateFunctions, function()
+                TabName.TextColor3 = NeverZen.Theme.Hightlight
+            end)
+
+            local TabFrame = Instance.new("Frame")
+            local ContentFrame = Instance.new("ScrollingFrame")
+            local ContentLayout = Instance.new("UIListLayout")
+
+            TabFrame.Parent = TabWin
+            TabFrame.AnchorPoint = Vector2.new(0.5,0.5)
+            TabFrame.BackgroundTransparency = 1
+            TabFrame.ClipsDescendants = true
+            TabFrame.Position = UDim2.new(0.5,0,0.5,0)
+            TabFrame.Size = UDim2.new(1,-2,1,-2)
+            TabFrame.ZIndex = 4
+
+            ContentFrame.Parent = TabFrame
+            ContentFrame.Active = true
+            ContentFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+            ContentFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+            ContentFrame.Size = UDim2.new(1, -12, 1, -12)
+            ContentFrame.BackgroundTransparency = 1
+            ContentFrame.BorderSizePixel = 0
+            ContentFrame.ClipsDescendants = false
+            ContentFrame.ScrollBarThickness = 0
+            ContentFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+            ContentFrame.CanvasSize = UDim2.new(0,0,0,0)
+
+            ContentLayout.Parent = ContentFrame
+            ContentLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+            ContentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+            ContentLayout.Padding = UDim.new(0, 8)
+            ContentLayout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+                ContentFrame.CanvasSize = UDim2.fromOffset(0, ContentLayout.AbsoluteContentSize.Y + 8)
+            end)
+
+            local ToggleFunc = function(value)
+                if value then
+                    TabFrame.Visible = true
+                    TweenService:Create(TabButton, TweenInfo.new(0.2), { BackgroundTransparency = 0.1 }):Play()
+                    TweenService:Create(TabIcon, TweenInfo.new(0.3), { ImageTransparency = 0.15, Size = UDim2.new(0,26,0,26), Position = UDim2.new(0,8,0.5,0) }):Play()
+                    TweenService:Create(TabName, TweenInfo.new(0.1), { TextTransparency = 0.1, Position = UDim2.new(0.5,0,0.5,0) }):Play()
+                else
+                    TabFrame.Visible = false
+                    TweenService:Create(TabButton, TweenInfo.new(0.2), { BackgroundTransparency = 1 }):Play()
+                    TweenService:Create(TabIcon, TweenInfo.new(0.3), { ImageTransparency = 0.6, Position = UDim2.new(0,10,0.5,0), Size = UDim2.new(0,22,0,22) }):Play()
+                    TweenService:Create(TabName, TweenInfo.new(0.1), { TextTransparency = 0.2, Position = UDim2.new(0.5,0,0.5,0) }):Play()
+                end
+            end
+
+            local TabIden = { call = ToggleFunc, target = TabButton }
+            task.delay(#WindowSignal.Tabs / 8, function()
+                TweenService:Create(TabButton, TweenInfo.new(0.35), { Size = UDim2.new(1,0,0,42) }):Play()
+            end)
+
+            table.insert(WindowSignal.Tabs, TabIden)
+            ToggleFunc(WindowSignal.SelectedTab == nil)
+            if not WindowSignal.SelectedTab then WindowSignal.SelectedTab = TabIden end
+
+            NeverZen:NewInput(TabButton, function()
+                if not Content.Enabled or not Content.Parent then return end
+                closeDropdown()
+                WindowSignal.SelectedTab = TabIden
+                for i,v in next, WindowSignal.Tabs do
+                    if v.target == TabButton then ToggleFunc(true) else if v.call then v.call(false) end end
+                end
+            end)
+
+            function TabSignal:AddSection(Config)
+                if type(Config) == "string" then Config = {Name = Config} end
+                Config = Config or {}
+                Config.Name = Config.Name or "Section"
+
+                local SectionSignal = { _rowN = 0, _tab = { _window = WindowSignal } }
+                local Section = Instance.new("Frame")
+                SectionSignal._wrap = Section
+                TabSignal._sectionCount = (TabSignal._sectionCount or 0) + 1
+                Section.LayoutOrder = TabSignal._sectionCount
+                local UICorner = Instance.new("UICorner")
+                local UIStroke = softStroke()
+                local head = Instance.new("Frame")
+                local Label = Instance.new("TextLabel")
+                local Frame = Instance.new("Frame")
+                local UIListLayout = Instance.new("UIListLayout")
+
+                Section.Parent = ContentFrame
+                Section.BackgroundColor3 = NeverZen.Theme.SectionColor
+                Section.BorderSizePixel = 0
+                Section.ClipsDescendants = true
+                Section.Size = UDim2.new(1,0,0,34)
+
+                UICorner.CornerRadius = UDim.new(0,10)
+                UICorner.Parent = Section
+                UIStroke.Color = NeverZen.Theme.BackgroundColor
+                UIStroke.Parent = Section
+
+                head.Parent = Section
+                head.BackgroundTransparency = 1
+                head.Size = UDim2.new(1,0,0,32)
+                if Config.Name == "" then head.Visible = false end
+
+                Label.Parent = head
+                Label.AnchorPoint = Vector2.new(0.5,0)
+                Label.BackgroundTransparency = 1
+                Label.Position = UDim2.new(0.5,0,0,4)
+                Label.Size = UDim2.new(1,-12,0,24)
+                Label.Font = Enum.Font.GothamMedium
+                Label.Text = Config.Name
+                Label.TextColor3 = Color3.fromRGB(254,254,254)
+                Label.TextSize = 15
+                Label.TextTransparency = 0.2
+                Label.TextXAlignment = Enum.TextXAlignment.Left
+
+                Frame.Parent = head
+                Frame.Visible = false
+                Frame.AnchorPoint = Vector2.new(0,1)
+                Frame.BackgroundColor3 = NeverZen.Theme.BackgroundColor
+                Frame.BorderSizePixel = 0
+                Frame.Position = UDim2.new(0,0,1,0)
+                Frame.Size = UDim2.new(1,0,0,1)
+                Frame.ZIndex = 6
+
+                UIListLayout.Parent = Section
+                UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+                UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+                UIListLayout.Padding = UDim.new(0,6)
+                UIListLayout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+                    TweenService:Create(Section, TweenInfo.new(0.3, Enum.EasingStyle.Quint), {
+                        Size = UDim2.new(1,0,0, UIListLayout.AbsoluteContentSize.Y + 6)
+                    }):Play()
+                end)
+
+                function SectionSignal:AddDivider(cfg)
+                    cfg = cfg or {}
+                    local Divider = Instance.new("Frame")
+                    local UICorner = Instance.new("UICorner")
+                    Divider.Parent = Section
+                    SectionSignal._rowN += 1
+                    Divider.LayoutOrder = SectionSignal._rowN
+                    Divider.BackgroundColor3 = cfg.Color or NeverZen.Theme.LineColor
+                    Divider.BorderSizePixel = 0
+                    Divider.Size = UDim2.new(1,-10,0,cfg.Height or 1)
+                    UICorner.CornerRadius = UDim.new(0,2)
+                    UICorner.Parent = Divider
+                    return { Destroy = function() Divider:Destroy() end }
+                end
+
+                function SectionSignal:AddToggle(cfg)
+                    cfg = cfg or {}
+                    cfg.Default = cfg.Default or false
+                    cfg.Name = cfg.Name or "Toggle"
+                    cfg.Callback = cfg.Callback or function() end
+
+                    local Toggle = Instance.new("Frame")
+                    local Label = Instance.new("TextLabel")
+                    local sys = Instance.new("Frame")
+                    local UICorner = Instance.new("UICorner")
+                    local color = Instance.new("Frame")
+                    local UICorner_2 = Instance.new("UICorner")
+                    local UIStroke = softStroke()
+
+                    Toggle.Parent = Section
+                    SectionSignal._rowN += 1
+                    Toggle.LayoutOrder = SectionSignal._rowN
+                    Toggle.BackgroundTransparency = 1
+                    Toggle.Size = UDim2.new(1,-5,0,36)
+
+                    Label.Parent = Toggle
+                    Label.AnchorPoint = Vector2.new(0,0.5)
+                    Label.BackgroundTransparency = 1
+                    Label.Position = UDim2.new(0,8,0.5,0)
+                    Label.Size = UDim2.new(1,-55,0.75,0)
+                    Label.Font = Enum.Font.GothamMedium
+                    Label.Text = cfg.Name
+                    Label.TextColor3 = Color3.fromRGB(255,255,255)
+                    Label.TextSize = 15
+                    Label.TextTransparency = 0.1
+                    Label.TextXAlignment = Enum.TextXAlignment.Left
+
+                    sys.Parent = Toggle
+                    sys.AnchorPoint = Vector2.new(1,0.5)
+                    sys.BackgroundColor3 = NeverZen.Theme.BackgroundColor
+                    sys.BorderSizePixel = 0
+                    sys.Position = UDim2.new(1,-4,0.5,0)
+                    sys.Size = UDim2.new(0,34,0,19)
+
+                    UICorner.CornerRadius = UDim.new(1,0)
+                    UICorner.Parent = sys
+
+                    color.Parent = sys
+                    color.AnchorPoint = Vector2.new(0.5,0.5)
+                    color.BackgroundColor3 = NeverZen.Theme.Hightlight
+                    color.BorderSizePixel = 0
+                    color.Position = UDim2.new(0.75,0,0.5,0)
+                    color.Size = UDim2.new(1,0,1,0)
+                    color.SizeConstraint = Enum.SizeConstraint.RelativeYY
+
+                    UICorner_2.CornerRadius = UDim.new(1,0)
+                    UICorner_2.Parent = color
+                    UIStroke.Color = NeverZen.Theme.StrokeColor
+                    UIStroke.Parent = sys
+
+                    local updateColor = function()
+                        color.BackgroundColor3 = cfg.Default and NeverZen.Theme.Hightlight or Color3.fromRGB(152,152,152)
+                    end
+                    table.insert(NeverZen.HighlightUpdateFunctions, updateColor)
+
+                    local setValue = function(value)
+                        cfg.Default = value
+                        updateColor()
+                        if value then
+                            TweenService:Create(color, TweenInfo.new(0.2), { Position = UDim2.new(0.75,0,0.5,0) }):Play()
+                            TweenService:Create(Label, TweenInfo.new(0.4), { TextTransparency = 0.1 }):Play()
+                        else
+                            TweenService:Create(Label, TweenInfo.new(0.4), { TextTransparency = 0.4 }):Play()
+                            TweenService:Create(color, TweenInfo.new(0.2), { Position = UDim2.new(0.25,0,0.5,0) }):Play()
+                        end
+                    end
+                    setValue(cfg.Default)
+
+                    NeverZen:NewInput(Toggle, function()
+                        if not Content.Enabled or not Content.Parent then return end
+                        cfg.Default = not cfg.Default
+                        setValue(cfg.Default)
+                        cfg.Callback(cfg.Default, cfg)
+                    end)
+
+                    return {
+                        SetValue = function(self, v) cfg.Default = v setValue(v) cfg.Callback(v, cfg) end,
+                        SetName = function(self, name) Label.Text = name end,
+                        Visible = function(self, v) Toggle.Visible = v end,
+                    }
+                end
+
+                function SectionSignal:AddLabel(name)
+                    local Label = Instance.new("TextLabel")
+                    Label.Parent = Section
+                    SectionSignal._rowN += 1
+                    Label.LayoutOrder = SectionSignal._rowN
+                    Label.BackgroundTransparency = 1
+                    Label.Size = UDim2.new(1,-12,0,28)
+                    Label.ZIndex = 5
+                    Label.Font = Enum.Font.GothamBold
+                    Label.Text = name
+                    Label.TextColor3 = Color3.fromRGB(255,255,255)
+                    Label.TextSize = 14
+                    Label.TextTransparency = 0.2
+                    Label.TextXAlignment = Enum.TextXAlignment.Left
+                    return {
+                        SetValue = function(self, v) Label.Text = v end,
+                        Visible = function(self, v) Label.Visible = v end,
+                    }
+                end
+
+                function SectionSignal:AddButton(cfg)
+                    cfg = cfg or {}
+                    cfg.Name = cfg.Name or "Button"
+                    cfg.Callback = cfg.Callback or function() end
+
+                    local Button = Instance.new("Frame")
+                    local Label = Instance.new("TextLabel")
+                    local UICorner = Instance.new("UICorner")
+                    local UIStroke = softStroke()
+
+                    Button.Parent = Section
+                    SectionSignal._rowN += 1
+                    Button.LayoutOrder = SectionSignal._rowN
+                    Button.BackgroundColor3 = NeverZen.Theme.BackgroundColor
+                    Button.BorderSizePixel = 0
+                    Button.Size = UDim2.new(1,-10,0,36)
+
+                    Label.Parent = Button
+                    Label.AnchorPoint = Vector2.new(0.5,0.5)
+                    Label.BackgroundTransparency = 1
+                    Label.Position = UDim2.new(0.5,0,0.5,0)
+                    Label.Size = UDim2.new(1,-25,0.75,0)
+                    Label.Font = Enum.Font.GothamMedium
+                    Label.Text = cfg.Name
+                    Label.TextColor3 = Color3.fromRGB(255,255,255)
+                    Label.TextSize = 15
+                    Label.TextTransparency = 0.1
+
+                    UICorner.CornerRadius = UDim.new(0,10)
+                    UICorner.Parent = Button
+                    UIStroke.Color = NeverZen.Theme.StrokeColor
+                    UIStroke.Parent = Button
+
+                    local button = NeverZen:NewInput(Button, function()
+                        if not Content.Enabled or not Content.Parent then return end
+                        cfg.Callback(cfg)
+                    end)
+                    button.MouseEnter:Connect(function()
+                        TweenService:Create(Button, TweenInfo.new(0.1), { BackgroundColor3 = NeverZen.Theme.Hightlight }):Play()
+                    end)
+                    button.MouseLeave:Connect(function()
+                        TweenService:Create(Button, TweenInfo.new(0.1), { BackgroundColor3 = NeverZen.Theme.BackgroundColor }):Play()
+                    end)
+
+                    return {
+                        SetText = function(self, v) Label.Text = v end,
+                        Fire = cfg.Callback,
+                        Visible = function(self, v) Button.Visible = v end,
+                    }
+                end
+
+                function SectionSignal:AddSlider(cfg)
+                    cfg = cfg or {}
+                    cfg.Name = cfg.Name or "Slider"
+                    cfg.Min = cfg.Min or 0
+                    cfg.Max = cfg.Max or 100
+                    cfg.Default = cfg.Default or cfg.Min
+                    cfg.Round = cfg.Round or 0
+                    cfg.Step = cfg.Step or 0
+                    cfg.Type = cfg.Type or ""
+                    cfg.Callback = cfg.Callback or function() end
+
+                    local Slider = Instance.new("Frame")
+                    local value = Instance.new("Frame")
+                    local UICorner = Instance.new("UICorner")
+                    local LabelValue = Instance.new("TextLabel")
+                    local UIStroke = softStroke()
+                    local Label = Instance.new("TextLabel")
+                    local con = Instance.new("Frame")
+                    local UICorner_2 = Instance.new("UICorner")
+                    local UIStroke_2 = softStroke()
+                    local block = Instance.new("Frame")
+                    local UICorner_3 = Instance.new("UICorner")
+
+                    Slider.Parent = Section
+                    SectionSignal._rowN += 1
+                    Slider.LayoutOrder = SectionSignal._rowN
+                    Slider.BackgroundTransparency = 1
+                    Slider.Size = UDim2.new(1,-5,0,54)
+
+                    value.Parent = Slider
+                    value.AnchorPoint = Vector2.new(1,0)
+                    value.BackgroundColor3 = NeverZen.Theme.BackgroundColor
+                    value.BorderSizePixel = 0
+                    value.Position = UDim2.new(1,-4,0,3)
+                    value.Size = UDim2.new(0,48,0,20)
+
+                    UICorner.CornerRadius = UDim.new(0,10)
+                    UICorner.Parent = value
+
+                    LabelValue.Parent = value
+                    LabelValue.BackgroundTransparency = 1
+                    LabelValue.Size = UDim2.new(1,0,1,0)
+                    LabelValue.Font = Enum.Font.GothamMedium
+                    LabelValue.Text = tostring(cfg.Default) .. tostring(cfg.Type)
+                    LabelValue.TextColor3 = Color3.fromRGB(255,255,255)
+                    LabelValue.TextSize = 11
+                    LabelValue.TextTransparency = 0.25
+
+                    UIStroke.Color = NeverZen.Theme.StrokeColor
+                    UIStroke.Parent = value
+
+                    Label.Parent = Slider
+                    Label.AnchorPoint = Vector2.new(0,0)
+                    Label.BackgroundTransparency = 1
+                    Label.Position = UDim2.new(0,8,0,3)
+                    Label.Size = UDim2.new(1,-70,0,20)
+                    Label.TextTruncate = Enum.TextTruncate.AtEnd
+                    Label.Font = Enum.Font.GothamMedium
+                    Label.Text = cfg.Name
+                    Label.TextColor3 = Color3.fromRGB(255,255,255)
+                    Label.TextSize = 15
+                    Label.TextTransparency = 0.25
+                    Label.TextXAlignment = Enum.TextXAlignment.Left
+
+                    con.Parent = Slider
+                    con.AnchorPoint = Vector2.new(0,1)
+                    con.BackgroundColor3 = NeverZen.Theme.BackgroundColor
+                    con.BorderSizePixel = 0
+                    con.Position = UDim2.new(0,8,1,-7)
+                    con.Size = UDim2.new(1,-16,0,7)
+                    con.Active = true
+
+                    UICorner_2.CornerRadius = UDim.new(1,0)
+                    UICorner_2.Parent = con
+                    UIStroke_2.Color = NeverZen.Theme.StrokeColor
+                    UIStroke_2.Parent = con
+
+                    local hitArea = Instance.new("Frame")
+                    hitArea.Parent = Slider
+                    hitArea.BackgroundTransparency = 1
+                    hitArea.AnchorPoint = Vector2.new(0,1)
+                    hitArea.Position = UDim2.new(0,8,1,0)
+                    hitArea.Size = UDim2.new(1,-16,0,26)
+                    hitArea.Active = true
+                    hitArea.ZIndex = 20
+
+                    block.Parent = con
+                    block.BackgroundColor3 = NeverZen.Theme.Hightlight
+                    block.BorderSizePixel = 0
+                    block.Size = UDim2.new(((cfg.Default - cfg.Min) / (cfg.Max - cfg.Min)), 0, 1, 0)
+                    block.ZIndex = 15
+                    block.Active = true
+
+                    UICorner_3.CornerRadius = UDim.new(1,0)
+                    UICorner_3.Parent = block
+
+                    table.insert(NeverZen.HighlightUpdateFunctions, function()
+                        block.BackgroundColor3 = NeverZen.Theme.Hightlight
+                    end)
+
+                    local IsHold = false
+                    local function update(Input)
+                        local SizeScale = math.clamp((Input.Position.X - con.AbsolutePosition.X) / con.AbsoluteSize.X, 0, 1)
+                        local Main = ((cfg.Max - cfg.Min) * SizeScale) + cfg.Min
+                        local Value = Main
+                        if cfg.Step and cfg.Step > 0 then
+                            Value = math.floor(Value / cfg.Step + 0.5) * cfg.Step
+                            Value = math.clamp(Value, cfg.Min, cfg.Max)
+                        end
+                        Value = NeverZen:Rounding(Value, cfg.Round)
+                        local normalized = (Value - cfg.Min) / (cfg.Max - cfg.Min)
+                        TweenService:Create(block, TweenInfo.new(0.04), { Size = UDim2.new(normalized, 0, 1, 0) }):Play()
+                        LabelValue.Text = tostring(Value) .. tostring(cfg.Type)
+                        cfg.Callback(Value, cfg)
+                    end
+
+                    local function onInputBegan(Input)
+                        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+                            IsHold = true
+                            update(Input)
+                        end
+                    end
+                    con.InputBegan:Connect(onInputBegan)
+                    hitArea.InputBegan:Connect(onInputBegan)
+
+                    NeverZen:Track(UserInputService.InputEnded:Connect(function(Input)
+                        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then IsHold = false end
+                    end))
+                    NeverZen:Track(UserInputService.InputChanged:Connect(function(Input)
+                        if IsHold and (Input.UserInputType == Enum.UserInputType.MouseMovement or Input.UserInputType == Enum.UserInputType.Touch) then update(Input) end
+                    end))
+
+                    return {
+                        SetValue = function(self, v)
+                            local snapped = v
+                            if cfg.Step and cfg.Step > 0 then
+                                snapped = math.floor(snapped / cfg.Step + 0.5) * cfg.Step
+                                snapped = math.clamp(snapped, cfg.Min, cfg.Max)
+                            end
+                            cfg.Default = snapped
+                            block.Size = UDim2.new(((snapped - cfg.Min) / (cfg.Max - cfg.Min)), 0, 1, 0)
+                            LabelValue.Text = tostring(snapped) .. tostring(cfg.Type)
+                        end,
+                        Fire = cfg.Callback,
+                        Visible = function(self, v) Slider.Visible = v end,
+                    }
+                end
+
+                function SectionSignal:AddKeybind(cfg)
+                    cfg = cfg or {}
+                    cfg.Name = cfg.Name or "Keybind"
+                    cfg.Default = cfg.Default or nil
+                    cfg.Callback = cfg.Callback or function() end
+
+                    local Keys = {
+                        One='1', Two='2', Three='3', Four='4', Five='5', Six='6', Seven='7', Eight='8', Nine='9', Zero='0',
+                        Minus="-", Plus="+", BackSlash="\\", Slash="/", Period=".", Semicolon=";", Colon=":",
+                        LeftControl="LCtrl", RightControl="RCtrl", LeftShift="LShift", RightShift="RShift"
+                    }
+                    local GetItem = function(item)
+                        if item then
+                            if typeof(item) == 'EnumItem' then return Keys[item.Name] or item.Name end
+                            return Keys[tostring(item)] or string.upper(tostring(item))
+                        end
+                        return 'NONE'
+                    end
+
+                    local Keybind = Instance.new("Frame")
+                    local sys = Instance.new("Frame")
+                    local UICorner = Instance.new("UICorner")
+                    local value = Instance.new("TextLabel")
+                    local UIStroke = softStroke()
+                    local Label = Instance.new("TextLabel")
+
+                    Keybind.Parent = Section
+                    SectionSignal._rowN += 1
+                    Keybind.LayoutOrder = SectionSignal._rowN
+                    Keybind.BackgroundTransparency = 1
+                    Keybind.Size = UDim2.new(1,-5,0,36)
+
+                    sys.Parent = Keybind
+                    sys.AnchorPoint = Vector2.new(1,0.5)
+                    sys.BackgroundColor3 = NeverZen.Theme.BackgroundColor
+                    sys.BorderSizePixel = 0
+                    sys.Position = UDim2.new(1,-4,0.5,0)
+                    sys.Size = UDim2.new(0,44,0,22)
+
+                    UICorner.CornerRadius = UDim.new(0,10)
+                    UICorner.Parent = sys
+
+                    value.Parent = sys
+                    value.BackgroundTransparency = 1
+                    value.Size = UDim2.new(1,0,1,0)
+                    value.Font = Enum.Font.GothamMedium
+                    value.Text = GetItem(cfg.Default)
+                    value.TextColor3 = NeverZen.Theme.Hightlight
+                    value.TextSize = 13
+                    value.TextTransparency = 0.25
+
+                    UIStroke.Color = NeverZen.Theme.StrokeColor
+                    UIStroke.Parent = sys
+
+                    table.insert(NeverZen.HighlightUpdateFunctions, function()
+                        value.TextColor3 = NeverZen.Theme.Hightlight
+                    end)
+
+                    Label.Parent = Keybind
+                    Label.AnchorPoint = Vector2.new(0,0.5)
+                    Label.BackgroundTransparency = 1
+                    Label.Position = UDim2.new(0,8,0.5,0)
+                    Label.Size = UDim2.new(1,-60,0.75,0)
+                    Label.Font = Enum.Font.GothamMedium
+                    Label.Text = cfg.Name
+                    Label.TextColor3 = Color3.fromRGB(255,255,255)
+                    Label.TextSize = 15
+                    Label.TextTransparency = 0.25
+                    Label.TextXAlignment = Enum.TextXAlignment.Left
+
+                    local UpdateScale = function()
+                        local s = TextService:GetTextSize(value.Text, value.TextSize, value.Font, Vector2.new(math.huge, math.huge))
+                        TweenService:Create(sys, TweenInfo.new(0.1), { Size = UDim2.new(0, s.X + 14, 0, 22) }):Play()
+                    end
+                    UpdateScale()
+
+                    local Button = NeverZen:NewInput(Keybind)
+                    local IsBinding = false
+
+                    Button.MouseButton1Click:Connect(function()
+                        if not Content.Enabled or not Content.Parent then return end
+                        if IsBinding then return end
+                        IsBinding = true
+                        value.Text = "..."
+                        UpdateScale()
+                        local Selected = nil
+                        while not Selected do
+                            local Key = UserInputService.InputBegan:Wait()
+                            if Key.KeyCode ~= Enum.KeyCode.Unknown then Selected = Key.KeyCode end
+                        end
+                        cfg.Default = Selected
+                        value.Text = GetItem(Selected)
+                        UpdateScale()
+                        IsBinding = false
+                        cfg.Callback(Selected, cfg)
+                    end)
+
+                    return {
+                        SetValue = function(self, v)
+                            cfg.Default = v
+                            value.Text = GetItem(v)
+                            UpdateScale()
+                            cfg.Callback(v, cfg)
+                        end,
+                        Fire = cfg.Callback,
+                        Visible = function(self, v) Keybind.Visible = v end,
+                    }
+                end
+
+                local nzToggle = SectionSignal.AddToggle
+                local nzSlider = SectionSignal.AddSlider
+                local nzButton = SectionSignal.AddButton
+                function SectionSignal:AddToggle(id, opts)
+                    local obj = {Value = not not opts.Default}
+                    local control = nzToggle(self, {
+                        Name = opts.Title or id, Default = obj.Value,
+                        Callback = function(v)
+                            if obj.Value == v then return end
+                            obj.Value = v
+                            if opts.Callback then pcall(opts.Callback, v) end
+                        end,
+                    })
+                    function obj:SetValue(v) control:SetValue(not not v) end
+                    Options[id] = obj
+                    return obj
+                end
+                function SectionSignal:AddSlider(id, opts)
+                    local min, max = opts.Min or 0, opts.Max or 100
+                    local precision = 10 ^ (opts.Rounding or 0)
+                    local obj = {Value = math.clamp(math.floor((opts.Default or min) * precision + 0.5) / precision, min, max)}
+                    local function changed(v)
+                        if obj.Value == v then return end
+                        obj.Value = v
+                        if opts.Callback then pcall(opts.Callback, v) end
+                    end
+                    local control = nzSlider(self, {
+                        Name = opts.Title or id, Default = obj.Value, Min = min,
+                        Max = max, Round = opts.Rounding or 0, Callback = changed,
+                    })
+                    function obj:SetValue(v)
+                        v = math.clamp(math.floor((tonumber(v) or min) * precision + 0.5) / precision, min, max)
+                        control:SetValue(v)
+                        changed(v)
+                    end
+                    Options[id] = obj
+                    return obj
+                end
+                function SectionSignal:AddButton(opts)
+                    return nzButton(self, {Name = opts.Title, Callback = opts.Callback})
+                end
+                -- Reuse qzxp's controls and section row helpers where the supplied
+                -- shell has no compatible implementation (notably key hold/release).
+                SectionSignal._row = SectionClass._row
+                SectionSignal._label = SectionClass._label
+                SectionSignal.AddDropdown = SectionClass.AddDropdown
+                SectionSignal.AddInput = SectionClass.AddInput
+                SectionSignal.AddKeybind = SectionClass.AddKeybind
+                return SectionSignal
+            end
+
+            return TabSignal
+        end
+
+        function WindowSignal:SelectTab(index)
+            local selected = self.Tabs[index]
+            if not selected then return end
+            closeDropdown()
+            self.SelectedTab = selected
+            for _, entry in ipairs(self.Tabs) do entry.call(entry == selected) end
+        end
+
+        local llk
+        local ToggleWin = function(v)
+            if llk then llk.Visible = (v and true) or false end
+            if not v then
+                TweenService:Create(WindowFrame, TweenInfo.new(0.7, Enum.EasingStyle.Back, Enum.EasingDirection.In), { Size = UDim2.fromOffset(210,50) }):Play()
+                TweenService:Create(BthFrames, TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(-1,0,0,45) }):Play()
+                TweenService:Create(TabWin, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(1,170,0,45) }):Play()
+            else
+                TweenService:Create(BthFrames, TweenInfo.new(0.7, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(0,0,0,45) }):Play()
+                TweenService:Create(TabWin, TweenInfo.new(0.8, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(0,170,0,45) }):Play()
+                TweenService:Create(WindowFrame, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = WindowSignal.Config.Scale }):Play()
+            end
+        end
+
+        function WindowSignal:SetOpen(value)
+            self.Toggle = not not value
+            if not self.Toggle then closeDropdown() end
+            ToggleWin(self.Toggle)
+        end
+        MinButton.MouseButton1Click:Connect(function()
+            WindowSignal:SetOpen(not WindowSignal.Toggle)
+        end)
+
+        if config.Resizable then
+            local Resize = Instance.new("TextButton")
+            local IsHold = false
+            Resize.Parent = WindowFrame
+            Resize.AnchorPoint = Vector2.new(0.5,0.5)
+            Resize.BackgroundTransparency = 1
+            Resize.Position = UDim2.new(1,0,1,0)
+            Resize.Size = UDim2.new(0.075,0,0.075,0)
+            Resize.SizeConstraint = Enum.SizeConstraint.RelativeYY
+            Resize.ZIndex = 100
+            Resize.Text = ""
+            Resize.Active = true
+            llk = Resize
+
+            local label = Instance.new('ImageLabel', Resize)
+            label.BackgroundTransparency = 1
+            label.Size = UDim2.fromOffset(10,10)
+            label.ZIndex = Resize.ZIndex + 1
+            label.Image = "rbxassetid://10734953073"
+            label.Position = UDim2.fromScale(0.5,0.5)
+            label.AnchorPoint = Vector2.new(0.5,0.5)
+
+            Resize.InputBegan:Connect(function(std)
+                if std.UserInputType == Enum.UserInputType.MouseButton1 or std.UserInputType == Enum.UserInputType.Touch then
+                    IsHold = true
+                end
+            end)
+            Resize.InputEnded:Connect(function(std)
+                if std.UserInputType == Enum.UserInputType.MouseButton1 or std.UserInputType == Enum.UserInputType.Touch then
+                    IsHold = false
+                end
+            end)
+            NeverZen:Track(UserInputService.InputChanged:Connect(function(input)
+                if IsHold and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and WindowSignal.Toggle then
+                    local pios = input.Position
+                    local x = (pios.X - WindowFrame.AbsolutePosition.X)
+                    local y = (pios.Y - WindowFrame.AbsolutePosition.Y)
+                    if x < 390 then x = 390 end
+                    if y < 240 then y = 240 end
+                    local Offset = UDim2.new(0,x,0,y)
+                    TweenService:Create(WindowFrame, TweenInfo.new(0.05), { Size = Offset }):Play()
+                    WindowSignal.Config.Scale = Offset
+                end
+            end))
+        end
+
+        local dragToggle, dragSpeed = nil, 0.2
+        local dragStart, startPos = nil, nil
+        local function updateInput(input)
+            local delta = input.Position - dragStart
+            local position = UDim2.new(startPos.X.Scale, math.max(startPos.X.Offset + delta.X, -10), startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            TweenService:Create(WindowFrame, TweenInfo.new(dragSpeed), { Position = position }):Play()
+        end
+        Header.InputBegan:Connect(function(input)
+            if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+                dragToggle = true
+                dragStart = input.Position
+                startPos = WindowFrame.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then dragToggle = false end
+                end)
+            end
+        end)
+        NeverZen:Track(UserInputService.InputChanged:Connect(function(input)
+            if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragToggle then updateInput(input) end
+        end))
+
+        return WindowSignal
+    end
+
+    function Fluent:CreateWindow(opts)
+        local w = NeverZen.new({Name = opts.Title, Scale = opts.Size,
+            SubTitle = "Combat • Swords • Avatar • Visuals"})
+        self.Window = w
+        return w
+    end
 end
 
 -- SaveManager / InterfaceManager
@@ -629,6 +1658,9 @@ function SaveManager:Load(name)
     for _, item in ipairs(entries) do
         local opt = Fluent.Options[item.id]
         local v   = item.entry.v
+        if item.id == "SofDelay" and type(v) == "number" and v > 0.35 then
+            v = v / 1000
+        end
         if item.entry.t == "EnumItem" then
             if type(item.entry.c) == "string" and type(item.entry.v) == "string" then
                 local ok3, e = pcall(function() return Enum[item.entry.c][item.entry.v] end)
@@ -725,32 +1757,9 @@ function InterfaceManager:SetFolder(f) self.folder = f end
 function InterfaceManager:BuildInterfaceSection(tab) end
 
 local Window = Fluent:CreateWindow({Title = "qzxp", TabWidth = 130,
-    Size = UDim2.fromOffset(750, 450), MinimizeKey = Enum.KeyCode.LeftControl})
-local _ui = { value = 0, connected = false }
-function _ui.getOrStoreBase(obj)
-    local b = obj:GetAttribute("qzxp_baseBgTransparency")
-    if b == nil then
-        b = obj.BackgroundTransparency
-        obj:SetAttribute("qzxp_baseBgTransparency", b)
-    end
-    return b
-end
-function _ui.applyObj(obj)
-    if obj:IsA("Frame") or obj:IsA("ScrollingFrame") or obj:IsA("TextButton") then
-        local b = _ui.getOrStoreBase(obj)
-        obj.BackgroundTransparency = 1 - (1 - b) * (1 - _ui.value)
-    end
-end
-function _ui.apply(t)
-    _ui.value = t
-    if not Window or not Window._gui then return end
-    for _, obj in ipairs(Window._gui:GetDescendants()) do _ui.applyObj(obj) end
-    if not _ui.connected then
-        _ui.connected = true
-        Window._gui.DescendantAdded:Connect(_ui.applyObj)
-    end
-end
-getgenv().qzxp_applyUITransparency = _ui.apply
+    Size = UDim2.fromOffset(750, 450)})
+-- Opaque UI: remove the old transparency option and clear its exported hook.
+getgenv().qzxp_applyUITransparency = nil
 local Tabs = {
     Combat   = Window:AddTab({Title = "Combat"}),
     Swords   = Window:AddTab({Title = "Swords"}),
@@ -779,8 +1788,31 @@ end
 
 local AP_On, TB_On, Spam_On = false, false, false
 local AutoSpam_On = false
-local Parries = 0
 local ClashingThreshold = 1
+local Det = { InfDet = false, DSDet = false, THDet = false, SFDet = false,
+    InfOn = false, DSOn = false, THOn = false, SFOn = false, SFActive = false,
+    autoHit = false, animFix = true, maxParryCount = 1, parryDelay = 0.12,
+    generation = 0, connections = {}, ballConnections = {}, counterWorkers = {}, alive = true }
+local AutoClash = { active = false, times = {}, last = 0 }
+function AutoClash.reset()
+    AutoClash.active = false
+    AutoClash.last = 0
+    table.clear(AutoClash.times)
+end
+function AutoClash.record()
+    if not AutoSpam_On then return end
+    local now = os.clock()
+    local times = AutoClash.times
+    while #times > 0 and now - times[1] > 0.5 do table.remove(times, 1) end
+    times[#times + 1] = now
+    AutoClash.last = now
+    if #times >= ClashingThreshold then AutoClash.active = true end
+end
+function AutoClash.update()
+    if not AutoSpam_On or not LocalPlayer.Character or os.clock() - AutoClash.last > 0.5 then
+        AutoClash.reset()
+    end
+end
 local InfinityBallRaw = false
 local frameCount = 0
 local Stats_Network = Stats.Network
@@ -887,56 +1919,281 @@ local swordModule = require(swordModuleInstance)
 local swordApi = require(SwordAPI)
 local animationController = require(ReplicatedStorage:WaitForChild("Controllers"):WaitForChild("AnimationController"))
 
+-- >>> SWORD SEARCH ENGINE (shared by every build)
+-- One library + one resolver for everything that needs a sword name: the manual
+-- changer, the VFX hooker and the 0.5s enforcement loop.
+-- Sources, in order of authority:
+--   1. the Swords module Unlock All uses (ua.swords:GetCollection()) - authored at
+--      runtime, so this is the only list that is guaranteed complete
+--   2. the shared sword module that equip() actually calls (swordModule)
+--   3. replicated sword models / SwordAPI.Collection (exact model casing)
+--   4. names we have actually seen equipped this session
 local SwordRegistry = {}
 local SwordRegistryReverse = {}
 local function norm(s) return s and tostring(s):lower():gsub("[%s_%-%p]+", "") or "" end
+
+local SwordLib = { list = {}, map = {}, prio = {}, builtAt = -1, sources = {}, hasUA = false }
+local LIB_TTL = 5          -- rebuild at most this often, so late data is picked up
+local LIB_PREVIEW = 120    -- how many names the dropdown lists before you search
+
+-- lower is more trustworthy: the shop collection is authored, module keys may
+-- contain non-sword entries
+local SRC_PRIO = { collection = 1, api = 2, instances = 3, module = 4, seen = 5 }
+
+local function uaSwords()
+    local ok, ua = pcall(function() return getgenv().qzxp_UA end)
+    if ok and type(ua) == "table" and type(ua.swords) == "table" then return ua.swords end
+    return nil
+end
+
 local function buildRegistry()
     local seen = {}
     SwordRegistry = {}; SwordRegistryReverse = {}
-    local function reg(name)
-        if not name or name == "" or seen[name] then return end
+    SwordLib = { list = {}, map = {}, prio = {}, builtAt = -1, sources = {}, hasUA = false }
+    local function reg(name, source)
+        if type(name) ~= "string" or name == "" or seen[name] then return end
         seen[name] = true
         SwordRegistry[norm(name)] = name
         SwordRegistryReverse[name] = true
+        if SwordLib.map[name] then return end
+        SwordLib.map[name] = true
+        SwordLib.list[#SwordLib.list + 1] = name
+        source = source or "module"
+        SwordLib.prio[name] = SRC_PRIO[source] or 9
+        SwordLib.sources[source] = (SwordLib.sources[source] or 0) + 1
     end
+    -- 1) the module Unlock All reads: whatever the shop sells is equippable
     pcall(function()
-        if type(swordModule) == "table" then
-            for k, v in pairs(swordModule) do
-                if type(k) == "string" and k ~= "GetSword" and k ~= "EquipSwordTo" and k ~= "new" and k ~= "__index" then reg(k) end
+        local sw = uaSwords()
+        if not sw then return end
+        local ok, coll = pcall(function() return sw:GetCollection() end)
+        if ok and type(coll) == "table" then
+            for k, v in pairs(coll) do
+                if type(k) == "string" and k ~= "" then reg(k, "collection") end
                 if type(v) == "table" then
-                    if v.Name then reg(v.Name) end
-                    if v.SwordName then reg(v.SwordName) end
-                end
-            end
-            if swordModule.Swords and type(swordModule.Swords) == "table" then
-                for k2, v2 in pairs(swordModule.Swords) do
-                    if type(k2) == "string" then reg(k2) end
-                    if type(v2) == "table" and v2.Name then reg(v2.Name) end
+                    if type(v.Name) == "string" then reg(v.Name, "collection") end
+                    if type(v.SwordName) == "string" then reg(v.SwordName, "collection") end
                 end
             end
         end
-    end)
-    pcall(function()
-        local folder = ReplicatedStorage.Shared.ReplicatedInstances.Swords
-        for _, item in ipairs(folder:GetChildren()) do reg(item.Name) end
-    end)
-    pcall(function()
-        if SwordAPI and SwordAPI:FindFirstChild("Collection") then
-            for _, item in ipairs(SwordAPI.Collection:GetChildren()) do reg(item.Name) end
+        local okl, list = pcall(function() return sw.Swords end)
+        if okl and type(list) == "table" then
+            for k, v in pairs(list) do
+                if type(k) == "string" and k ~= "" then reg(k, "collection") end
+                if type(v) == "table" and type(v.Name) == "string" then reg(v.Name, "collection") end
+            end
         end
     end)
+    -- 2) the module equip() calls
+    pcall(function()
+        if type(swordModule) ~= "table" then return end
+        for k, v in pairs(swordModule) do
+            if type(k) == "string" and k ~= "GetSword" and k ~= "EquipSwordTo" and k ~= "new" and k ~= "__index" then reg(k, "module") end
+            if type(v) == "table" then
+                if type(v.Name) == "string" then reg(v.Name, "module") end
+                if type(v.SwordName) == "string" then reg(v.SwordName, "module") end
+            end
+        end
+        if type(swordModule.Swords) == "table" then
+            for k2, v2 in pairs(swordModule.Swords) do
+                if type(k2) == "string" then reg(k2, "module") end
+                if type(v2) == "table" and type(v2.Name) == "string" then reg(v2.Name, "module") end
+            end
+        end
+    end)
+    -- 3) replicated models + SwordAPI collection (these carry the exact casing)
+    pcall(function()
+        local rs = ReplicatedStorage
+        local sh = rs and rs:FindFirstChild("Shared")
+        local ri = sh and sh:FindFirstChild("ReplicatedInstances")
+        local swf = ri and ri:FindFirstChild("Swords")
+        if swf then for _, item in ipairs(swf:GetChildren()) do reg(item.Name, "instances") end end
+        local api = sh and sh:FindFirstChild("SwordAPI")
+        local coll = api and api:FindFirstChild("Collection")
+        if coll then for _, item in ipairs(coll:GetChildren()) do reg(item.Name, "api") end end
+    end)
+    -- 4) what we have seen equipped for real this session
+    pcall(function()
+        local r = getgenv().qzxp_realSword
+        if type(r) == "string" then reg(r, "seen") end
+        if type(getgenv().swordModel) == "string" then reg(getgenv().swordModel, "seen") end
+    end)
+    table.sort(SwordLib.list, function(a, b)
+        local pa, pb = SwordLib.prio[a] or 9, SwordLib.prio[b] or 9
+        if pa ~= pb then return pa < pb end
+        return a:lower() < b:lower()
+    end)
+    SwordLib.hasUA = uaSwords() ~= nil
+    SwordLib.builtAt = os.clock()
+    return SwordLib.list
 end
-buildRegistry()
+
+-- the library is built lazily and refreshed when it is older than LIB_TTL, so a
+-- list that was empty at load (ua.swords not required yet) fills itself in
+local function getSwordLibrary(force)
+    if force or SwordLib.builtAt < 0 or #SwordLib.list == 0
+        or (os.clock() - SwordLib.builtAt) > LIB_TTL
+        or (not SwordLib.hasUA and uaSwords() ~= nil) then   -- shop module just became available
+        return buildRegistry()
+    end
+    return SwordLib.list
+end
+local function refreshSwordLibrary() return buildRegistry() end
+local function libraryPreview()
+    local list = getSwordLibrary()
+    if #list == 0 then return { "(library empty)" } end
+    local out = {}
+    for i = 1, math.min(#list, LIB_PREVIEW) do out[i] = list[i] end
+    if #list > LIB_PREVIEW then out[#out + 1] = ("... %d more - type to search"):format(#list - LIB_PREVIEW) end
+    return out
+end
+
+-- bounded edit distance (nil when the names are further apart than maxd)
+local function editDistance(a, b, maxd)
+    local la, lb = #a, #b
+    if math.abs(la - lb) > maxd then return nil end
+    local prev, cur = {}, {}
+    for j = 0, lb do prev[j] = j end
+    for i = 1, la do
+        cur[0] = i
+        local best, ca = cur[0], a:sub(i, i)
+        for j = 1, lb do
+            local cost = (ca == b:sub(j, j)) and 0 or 1
+            local v = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            cur[j] = v
+            if v < best then best = v end
+        end
+        if best > maxd then return nil end
+        prev, cur = cur, prev
+    end
+    local d = prev[lb]
+    if d > maxd then return nil end
+    return d
+end
+
+-- ranked search: exact > prefix > substring > typos > gappy subsequence
+local function searchSwords(query, limit)
+    limit = limit or 10
+    local out = {}
+    if type(query) ~= "string" then return out end
+    local q = query:match("^%s*(.-)%s*$") or ""
+    if q == "" then return out end
+    local nq = norm(q)
+    if nq == "" then return out end
+    local list = getSwordLibrary()
+    local ql = q:lower()
+    local scored = {}
+    for i = 1, #list do
+        local name = list[i]
+        local nn = norm(name)
+        local score
+        if nn == nq then
+            score = 1000
+        elseif name:lower() == ql then
+            score = 990
+        elseif nn:sub(1, #nq) == nq then
+            score = 800 - math.min(#nn - #nq, 120)
+        else
+            local at = nn:find(nq, 1, true)
+            if at then
+                score = 500 - math.min(at - 1, 90) - math.min(#nn - #nq, 90)
+            else
+                -- typo tolerance: one or two wrong/missing letters
+                local maxd = (#nq <= 4) and 1 or 2
+                local ed = editDistance(nq, nn, maxd)
+                if not ed then ed = editDistance(nq, nn:sub(1, math.min(#nn, #nq + 1)), maxd) end
+                if ed then
+                    score = 300 - ed * 60 - math.min(#nn, 60)
+                elseif #nq >= 3 then
+                    -- every typed letter in order, gaps allowed
+                    local pos, fuzzy, gaps = 1, true, 0
+                    for k = 1, #nq do
+                        local f = nn:find(nq:sub(k, k), pos, true)
+                        if not f then fuzzy = false; break end
+                        gaps += (f - pos); pos = f + 1
+                    end
+                    if fuzzy then score = 200 - math.min(gaps, 120) - math.min(#nn, 60) end
+                end
+            end
+        end
+        if score then scored[#scored + 1] = { name = name, score = score, len = #name } end
+    end
+    table.sort(scored, function(a, b)
+        if a.score ~= b.score then return a.score > b.score end
+        if a.len ~= b.len then return a.len < b.len end
+        return a.name < b.name
+    end)
+    for i = 1, math.min(limit, #scored) do out[i] = scored[i].name end
+    return out
+end
+
+local function swordExists(name)
+    if type(name) ~= "string" or name == "" then return false end
+    getSwordLibrary()
+    if SwordRegistryReverse[name] then return true end
+    local sw = uaSwords()
+    if sw then
+        local ok, s = pcall(function() return sw:GetSword(name) end)
+        if ok and s then return true end
+    end
+    return false
+end
+local function resolveExact(input)
+    if type(input) ~= "string" or input == "" then return nil end
+    getSwordLibrary()
+    return SwordRegistry[norm(input)]
+end
 local function resolve(input)
     if not input or input == "" then return "" end
     input = tostring(input)
-    local n = norm(input)
-    if SwordRegistry[n] then return SwordRegistry[n] end
-    for nk, actual in pairs(SwordRegistry) do
-        if nk:find(n, 1, true) then return actual end
-    end
+    getSwordLibrary()
+    local hit = SwordRegistry[norm(input)]
+    if hit then return hit end
+    local best = searchSwords(input, 1)[1]
+    if best then return best end
     return input
 end
+local function swordLibStats()
+    getSwordLibrary()
+    local parts = {}
+    local names = {}
+    for k in pairs(SwordLib.sources) do names[#names + 1] = k end
+    table.sort(names)
+    for _, k in ipairs(names) do parts[#parts + 1] = k .. "=" .. tostring(SwordLib.sources[k]) end
+    return #SwordLib.list, table.concat(parts, " ")
+end
+
+-- the single entry point the UI uses: remembers the pick, applies it only while
+-- the changer is enabled (so configs / autoload can never stomp the real sword)
+local function applyManualSword(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local hit = resolveExact(name) or searchSwords(name, 1)[1] or name
+    local changed = getgenv().manualSword ~= hit
+    getgenv().manualSword = hit
+    if not getgenv().skinChanger then
+        if changed and notify then
+            notify({ Title = "Sword Changer", Content = "Selected " .. hit .. " - switch Enabled on", Duration = 3 })
+        end
+        return false
+    end
+    getgenv().swordModel = hit
+    getgenv().swordAnimations = hit
+    getgenv().swordFX = hit
+    pcall(getgenv().updateSword)
+    pcall(getgenv().saveLastEquippedSword, hit)
+    if changed and notify then notify({ Title = "Sword Changer", Content = hit, Duration = 2 }) end
+    return true
+end
+-- fill the library in as soon as the shop module exists: it is required
+-- asynchronously, so a list built at load time can be missing every real sword
+spawnTracked(function()
+    for _ = 1, 60 do
+        if SwordLib.hasUA and #SwordLib.list > 0 then break end
+        pcall(refreshSwordLibrary)
+        task.wait(2)
+    end
+end)
+-- <<< SWORD SEARCH ENGINE
 
 -- Animation system
 local AnimFix_AP, AnimFix_TB, AnimFix_Spam = true, true, true
@@ -1022,10 +2279,11 @@ local function StopParryGrabTracks()
         end
     end
 end
-ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+table.insert(Det.connections, ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+    AutoClash.record()
     Bypass_Cd = true
     StopParryGrabTracks()
-end)
+end))
 
 -- Ball cache
 local _ballCache = {}
@@ -1694,82 +2952,163 @@ spawnTracked(function()
     end
 end)
 
-pcall(function() ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_,d) DSOn=d or false end) end)
-pcall(function() ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_,b) InfOn=b or false end) end)
+pcall(function() ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_,d) Det.DSOn=d or false end) end)
+pcall(function() ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_,b) Det.InfOn=b or false end) end)
 pcall(function() ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on) InfinityBallRaw = on == true end) end)
 local _lpName = LocalPlayer.Name
-local _argsContainMe = function(a)
-    for i = 1, #a do
-        local v = a[i]
-        if v == LocalPlayer then return true end
-        local t = typeof(v)
-        if t == "Instance" then
-            if v.Name == _lpName then
-                if v:IsA("Player") or Players:GetPlayerFromCharacter(v) == LocalPlayer then return true end
+-- Flyte's Time Hole / Slashes of Fury detection, adapted to qzxp's
+-- own parry remote and input services.  SoF detection and Auto Hit are
+-- independent: detecting Fury does not automatically send parries.
+function Det.resetSF()
+    Det.generation += 1
+    Det.SFOn, Det.SFActive = false, false
+end
+function Det.isTimeHole()
+    if Det.THOn then return true end
+    local char = LocalPlayer.Character
+    local abilities = char and char:FindFirstChild("Abilities")
+    local effect = abilities and abilities:FindFirstChild("Time Hole")
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local hotbar = playerGui and playerGui:FindFirstChild("Hotbar")
+    local ability = hotbar and hotbar:FindFirstChild("Ability")
+    local duration = ability and ability:FindFirstChild("Duration")
+    if not effect or not duration then return false end
+    local ok, value = pcall(function() return duration.Visible and effect.Enabled end)
+    return ok and value or false
+end
+function Det.abilityPressed()
+    local char = LocalPlayer.Character
+    local abilities = char and char:FindFirstChild("Abilities")
+    local fury = abilities and abilities:FindFirstChild("Slashes of Fury")
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local hotbar = playerGui and playerGui:FindFirstChild("Hotbar")
+    local ability = hotbar and hotbar:FindFirstChild("Ability")
+    local red = ability and ability:FindFirstChild("Red")
+    local balls = Workspace:FindFirstChild("Balls")
+    local ok, active = pcall(function()
+        return Det.SFDet and char and char.Parent == Workspace:FindFirstChild("Alive")
+            and fury and fury.Enabled and red and not red.Visible and balls and #balls:GetChildren() > 0
+    end)
+    if ok and active then
+        if not Det.SFOn then Det.generation += 1 end
+        Det.SFOn, Det.SFActive = true, false
+    end
+end
+-- Flyte's counter-driven remote method, using the same parry sender as qzxp
+-- spam. The original Flyte logic counts accepted sender calls, not server acks.
+function Det.onCounter(counter)
+    if not Det.alive or not Det.SFDet or not Det.SFOn then return end
+    local label = counter:FindFirstChildOfClass("TextLabel")
+    if not label then return end
+    local generation = Det.generation
+    if Det.counterWorkers[counter] == generation then return end
+    Det.counterWorkers[counter] = generation
+    Det.SFActive = true
+    local count = tonumber(label.Text) or 0
+    while Det.alive and Det.SFDet and Det.SFOn and Det.generation == generation
+        and label:IsDescendantOf(Workspace) do
+        local current = tonumber(label.Text)
+        if current then count = math.max(count, current) end
+        if Det.autoHit and current and count < Det.maxParryCount then
+            local ball = getBall()
+            if ball and fireRemote(ball) then
+                count += 1
+                if Det.animFix then pcall(PlaySingleParryAnimation) end
             end
         end
+        -- Avoid a 0.002s idle loop when Auto Hit is off or has reached its
+        -- target. Active timing stays Flyte's remote-mode task.wait(delay).
+        local delay = Det.parryDelay or 0.12
+        if not Det.autoHit or count >= Det.maxParryCount then delay = math.max(delay, 0.1) end
+        task.wait(delay)
     end
-    return false
+    if Det.counterWorkers[counter] == generation then Det.counterWorkers[counter] = nil end
+    if Det.alive and Det.generation == generation then Det.resetSF() end
 end
-local _netModule = nil
-do
-    pcall(function() _netModule = ReplicatedStorage.Packages._Index["sleitnick_net@0.1.0"].net end)
-    if not _netModule then
-        pcall(function()
-            for _, m in ipairs(ReplicatedStorage.Packages:GetDescendants()) do
-                if m.Name == "net" and m:IsA("ModuleScript") then _netModule = require(m); break end
-            end
-        end)
+function Det.watchBall(ball)
+    if Det.ballConnections[ball] then return end
+    local counter = ball:FindFirstChild("ComboCounter")
+    if counter then task.spawn(Det.onCounter, counter) end
+    Det.ballConnections[ball] = ball.ChildAdded:Connect(function(child)
+        if child.Name == "ComboCounter" then task.spawn(Det.onCounter, child) end
+    end)
+end
+function Det.watchBalls(folder)
+    if Det.ballsFolder == folder then return end
+    if Det.folderConnections then
+        for _, connection in ipairs(Det.folderConnections) do connection:Disconnect() end
     end
+    for ball, connection in pairs(Det.ballConnections) do
+        connection:Disconnect()
+        Det.ballConnections[ball] = nil
+    end
+    Det.ballsFolder = folder
+    Det.folderConnections = {}
+    for _, ball in ipairs(folder:GetChildren()) do Det.watchBall(ball) end
+    local added = folder.ChildAdded:Connect(Det.watchBall)
+    local removed = folder.ChildRemoved:Connect(function(ball)
+        local connection = Det.ballConnections[ball]
+        if connection then connection:Disconnect(); Det.ballConnections[ball] = nil end
+    end)
+    table.insert(Det.folderConnections, added)
+    table.insert(Det.folderConnections, removed)
+    table.insert(Det.connections, added)
+    table.insert(Det.connections, removed)
 end
-pcall(function()
-    if not _netModule then return end
-    local net = _netModule
-    net["RE/TimeHoleActivate"].OnClientEvent:Connect(function(...)
-        local p = (...)
-        if p == LocalPlayer or (p and p.Name == LocalPlayer.Name) then THOn = true end
-    end)
-    net["RE/TimeHoleDeactivate"].OnClientEvent:Connect(function() THOn = false end)
-    net["RE/SlashesOfFuryActivate"].OnClientEvent:Connect(function(...)
-        local p = (...)
-        if p == LocalPlayer or (p and p.Name == LocalPlayer.Name) then
-            SFOn = true; slashesoffury_count = 0
-        end
-    end)
-    net["RE/SlashesOfFuryEnd"].OnClientEvent:Connect(function()
-        SFOn = false; slashesoffury_count = 0
-    end)
-    net["RE/SlashesOfFuryParry"].OnClientEvent:Connect(function()
-        slashesoffury_count += 1
-    end)
-    net["RE/SlashesOfFuryCatch"].OnClientEvent:Connect(function()
-        task.spawn(function()
-            while SFOn and slashesoffury_count < maxParryCount do
-                if SFDet then fireParryGeneric(); task.wait(parryDelay) else break end
-            end
-        end)
-    end)
+function Det.connect(name, callback)
+    local net = ReplicatedStorage:FindFirstChild("Packages")
+    net = net and net:FindFirstChild("_Index")
+    net = net and net:FindFirstChild("sleitnick_net@0.1.0")
+    net = net and net:FindFirstChild("net")
+    local event = net and net:FindFirstChild(name)
+    if not event or not event:IsA("RemoteEvent") then
+        warn("[qzxp] missing Flyte detection event: " .. name)
+        return
+    end
+    table.insert(Det.connections, event.OnClientEvent:Connect(callback))
+end
+-- Flyte uses the supplied actor only for TimeHoleActivate; Catch, FuryEnd,
+-- and TimeHoleDeactivate are client events without actor filtering.
+Det.connect("RE/TimeHoleActivate", function(actor)
+    if actor == LocalPlayer or actor == _lpName then Det.THOn = true end
 end)
-local function _hookNetEvent(name, onFire)
-    local hooked = false
-    if _netModule then
-        pcall(function()
-            local ev = _netModule[name]
-            if ev and ev.OnClientEvent then
-                ev.OnClientEvent:Connect(function(...) onFire({...}) end); hooked = true
-            end
-        end)
-    end
-    if not hooked then
-        pcall(function()
-            local ev = ReplicatedStorage.Remotes:FindFirstChild(name)
-            if ev and ev:IsA("RemoteEvent") then
-                ev.OnClientEvent:Connect(function(...) onFire({...}) end); hooked = true
-            end
-        end)
-    end
-    if not hooked then warn("[qzxp] detection: could not hook net event " .. name) end
+Det.connect("RE/TimeHoleDeactivate", function() Det.THOn = false end)
+Det.connect("RE/SlashesOfFuryCatch", function()
+    if not Det.SFOn then Det.generation += 1 end
+    Det.SFOn, Det.SFActive = true, false
+end)
+Det.connect("RE/SlashesOfFuryEnd", Det.resetSF)
+-- Flyte clears its Fury/Time Hole state on character spawn.
+table.insert(Det.connections, LocalPlayer.CharacterAdded:Connect(function()
+    Det.resetSF()
+    Det.THOn = false
+end))
+local balls = Workspace:FindFirstChild("Balls")
+if balls then Det.watchBalls(balls) end
+table.insert(Det.connections, Workspace.ChildAdded:Connect(function(child)
+    if child.Name == "Balls" then Det.watchBalls(child) end
+end))
+local abilityButton = ReplicatedStorage.Remotes:FindFirstChild("AbilityButtonPress")
+if abilityButton and abilityButton:IsA("BindableEvent") then
+    table.insert(Det.connections, abilityButton.Event:Connect(Det.abilityPressed))
 end
+spawnTracked(function()
+    local ok, input, settings = pcall(function()
+        return require(ReplicatedStorage:WaitForChild("UserInputService")),
+            require(ReplicatedStorage.Controllers:WaitForChild("SettingsController"))
+    end)
+    if not Det.alive then return end
+    if ok and input and input.InputBegan and settings then
+        table.insert(Det.connections, input.InputBegan:Connect(function(key, processed)
+            if not processed then
+                local valid, use = pcall(function() return settings:UseBind(key, "Ability") end)
+                if valid and use then Det.abilityPressed() end
+            end
+        end))
+    else
+        warn("[qzxp] Flyte ability-key detection unavailable; Fury Catch event remains active")
+    end
+end)
 
 do
 addRenderHandler(function()
@@ -2108,10 +3447,10 @@ local function spamService(ball, ping)
 end
 
 local function apCheck()
-    if not AP_On or TB_On or Spam_On then return end
+    if not AP_On or TB_On or Spam_On or AutoClash.active then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
-    local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
+    local blocked = (Det.InfDet and Det.InfOn) or (Det.DSDet and Det.DSOn) or (Det.THDet and Det.isTimeHole()) or (Det.SFDet and (Det.SFOn or Det.SFActive))
     if blocked then return end
     local char = LocalPlayer.Character
     local root = char and char.PrimaryPart
@@ -2153,16 +3492,6 @@ local function apCheck()
                 _apDebounce = true
                 _apUntilAt  = now + 1
 
-                local sr = spamService(ball, math.clamp(getPing() / 10, 5, 17))
-                if sr and sr ~= 0 then
-                    task.delay(0.65, function()
-                        if Parries >= 7 then return end
-                        Parries += 1
-                        task.delay(0.5, function()
-                            if Parries > 0 then Parries -= 1 end
-                        end)
-                    end)
-                end
             end
         end
     end
@@ -2216,42 +3545,10 @@ pcall(function()
         end
     end)
 end)
+addPostSimHandler(AutoClash.update, 1)
 addPostSimHandler(apCheck, 2)
 
-addPostSimHandler(function()
-    if not AutoSpam_On or not AP_On then return end
-    local char = LocalPlayer.Character
-    if not char or not char.PrimaryPart then return end
-    if char.Parent ~= Workspace:FindFirstChild("Alive") then return end
 
-    local hotbar = LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Hotbar")
-    local visible = hotbar and hotbar:FindFirstChild("Ability")
-        and hotbar.Ability:FindFirstChild("Duration") and hotbar.Ability.Duration.Visible
-    local abilities = char:FindFirstChild("Abilities")
-    local infinity = abilities and abilities:FindFirstChild("Infinity")
-    infinity = infinity and infinity.Enabled and visible and InfinityBallRaw
-    if infinity then Parries = 0; return end
-    local timeHole = abilities and abilities:FindFirstChild("Time Hole")
-    timeHole = timeHole and timeHole.Enabled and visible
-    if timeHole then Parries = 0; return end
-
-    local ball = getBall()
-    if not ball or not ball:FindFirstChild("zoomies") then return end
-
-    local ping     = math.clamp(getPing() / 10, 10, 16.5)
-    local spamDist = spamService(ball, ping)
-    if spamDist == 0 then return end
-
-    if (char.PrimaryPart.Position - ball.Position).Magnitude <= spamDist
-       and Parries >= ClashingThreshold then
-        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
-            PlayParryAnimation()
-        else
-            PlaySingleParryAnimation()
-        end
-        fireRemote(ball)
-    end
-end, 5)
 end
 
 -- Parry range visualizer
@@ -2323,7 +3620,7 @@ end, 6)
 
 -- Triggerbot
 local function tryTBForBall(ball)
-    if not TB_On or Spam_On or not ball or not ball.Parent then return end
+    if not TB_On or Spam_On or AutoClash.active or not ball or not ball.Parent then return end
     if isAPLocked() then return end
     if ball:GetAttribute('target') ~= _lpName then return end
     if not IsBlockLegit() then return end
@@ -2332,7 +3629,7 @@ local function tryTBForBall(ball)
     if not root or root:FindFirstChild('SingularityCape') then return end
     if ball:FindFirstChild('AeroDynamicSlashVFX') then ball.AeroDynamicSlashVFX:Destroy() end
     if ball:FindFirstChild('ComboCounter') then return end
-    local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
+    local blocked = (Det.InfDet and Det.InfOn) or (Det.DSDet and Det.DSOn) or (Det.THDet and Det.isTimeHole()) or (Det.SFDet and (Det.SFOn or Det.SFActive))
     if blocked then return end
     local fired = fireRemote(ball)
     if fired then
@@ -2342,19 +3639,19 @@ local function tryTBForBall(ball)
     end
 end
 addPostSimHandler(function()
-    if not TB_On or Spam_On then return end
+    if not TB_On or Spam_On or AutoClash.active then return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then return end
     if isAPLocked() then return end
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root or root:FindFirstChild('SingularityCape') then return end
+    local blocked = (Det.InfDet and Det.InfOn) or (Det.DSDet and Det.DSOn) or (Det.THDet and Det.isTimeHole()) or (Det.SFDet and (Det.SFOn or Det.SFActive))
+    if blocked then return end
     local balls = getAllBalls()
     for _, ball in pairs(balls) do
         if ball:GetAttribute('target') ~= _lpName then continue end
         if ball:FindFirstChild('ComboCounter') then continue end
-        local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
-        if blocked then continue end
         local fired = fireRemote(ball)
         if fired then
             _tbLastFire = os.clock()
@@ -2411,13 +3708,13 @@ end)
 local SpamRPS, SpamInt, SpamDetect = 100, 0.01, true
 local function spamOk()
     if not SpamDetect then return true end
-    local blocked = (InfDet and InfOn) or (DSDet and DSOn) or (THDet and THOn) or (SFDet and SFOn)
+    local blocked = (Det.InfDet and Det.InfOn) or (Det.DSDet and Det.DSOn) or (Det.THDet and Det.isTimeHole()) or (Det.SFDet and (Det.SFOn or Det.SFActive))
     if blocked then return false end
     return true
 end
 local timeAccumulator = 0
 addPostSimHandler(function(dt)
-    if not Spam_On then timeAccumulator = 0 return end
+    if not Spam_On and not AutoClash.active then timeAccumulator = 0 return end
     if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
     if not _frameBlockOk then timeAccumulator = 0 return end
     local char = LocalPlayer.Character
@@ -2463,6 +3760,7 @@ end
 local s = loadSaved()
 do
     getgenv().skinChanger = false
+    getgenv().manualSword = ""   -- never inherit a typed name from a previous run
     getgenv().swordModel = type(getgenv().swordModel) == "string" and getgenv().swordModel ~= "" and getgenv().swordModel or s
     getgenv().swordAnimations = type(getgenv().swordAnimations) == "string" and getgenv().swordAnimations ~= "" and getgenv().swordAnimations or s
     getgenv().swordFX = type(getgenv().swordFX) == "string" and getgenv().swordFX ~= "" and getgenv().swordFX or s
@@ -2566,6 +3864,12 @@ getgenv().updateSword = function()
     refreshSlash()
     AnimFix_Cache = {}
     if getgenv().skinChanger and getgenv().swordModel ~= "" then
+        -- the same trick Unlock All uses: stop the game's own FireSwordInfo
+        -- handler from putting the real sword straight back on
+        pcall(function()
+            local ua = getgenv().qzxp_UA
+            if ua and type(ua.set_sword_override) == "function" then ua:set_sword_override(true) end
+        end)
         getgenv().saveLastEquippedSword(getgenv().swordModel)
         equip(getgenv().swordModel, false)
     end
@@ -2574,6 +3878,10 @@ getgenv().revertSword = function()
     getgenv().skinChanger = false
     getgenv().skinChangerEnabled = false
     AnimFix_Cache = {}
+    pcall(function()
+        local ua = getgenv().qzxp_UA
+        if ua and type(ua.set_sword_override) == "function" then ua:set_sword_override(false) end
+    end)
     if getgenv().qzxp_unlockAllActive then
         local ua = getgenv().qzxp_UA
         if ua and ua.selected_sword and ua.selected_sword ~= "" then
@@ -4418,23 +5726,23 @@ local function MakeDrag(handle, frame)
             i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
         end
     end)
-    handle.InputEnded:Connect(function(i)
+    handle.InputChanged:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then di = i end
     end)
-    UserInputService.InputChanged:Connect(function(i)
+    table.insert(qzxpUIConnections, UserInputService.InputChanged:Connect(function(i)
         if i == di and drag and ds then
             local d = i.Position - ds
             frame.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
         end
-    end)
+    end))
 end
 local kbGui = Instance.new("ScreenGui"); kbGui.Name = "q_KB"; kbGui.ResetOnSpawn = false; kbGui.IgnoreGuiInset = true; kbGui.DisplayOrder = 100; kbGui.Parent = CoreGui
-kbF = Instance.new("Frame"); kbF.Size = UDim2.new(0, 220, 0, 200); kbF.Position = UDim2.new(1, -235, 0.5, -100); kbF.BackgroundColor3 = Color3.fromRGB(17, 17, 19); kbF.Visible = false; kbF.Parent = kbGui; kbF.ClipsDescendants = true
+kbF = Instance.new("Frame"); kbF.Size = UDim2.new(0, 220, 0, 200); kbF.Position = UDim2.new(1, -235, 0.5, -100); kbF.BackgroundColor3 = Color3.fromRGB(0, 0, 0); kbF.BorderSizePixel = 0; kbF.Visible = false; kbF.Parent = kbGui; kbF.ClipsDescendants = true
 Instance.new("UICorner", kbF).CornerRadius = UDim.new(0, 10)
-local kbS = Instance.new("UIStroke"); kbS.Color = Color3.fromRGB(58, 58, 66); kbS.Transparency = 0.25; kbS.Parent = kbF
-local kbT = Instance.new("TextLabel"); kbT.Size = UDim2.new(1, 0, 0, 28); kbT.BackgroundColor3 = Color3.fromRGB(30, 30, 34); kbT.BackgroundTransparency = 0.2; kbT.Font = Enum.Font.GothamBold; kbT.TextSize = 13; kbT.TextColor3 = Color3.fromRGB(230, 230, 235); kbT.Text = "  Keybind List"; kbT.TextXAlignment = Enum.TextXAlignment.Left; kbT.Parent = kbF
+local kbS = Instance.new("UIStroke"); kbS.Color = Color3.fromRGB(58, 58, 66); kbS.Transparency = 0.25; kbS.Enabled = false; kbS.Parent = kbF
+local kbT = Instance.new("TextLabel"); kbT.Size = UDim2.new(1, 0, 0, 38); kbT.BackgroundColor3 = Color3.fromRGB(0, 0, 0); kbT.BackgroundTransparency = 1; kbT.Font = Enum.Font.GothamBold; kbT.TextSize = 17; kbT.Active = true; kbT.TextColor3 = Color3.fromRGB(255, 255, 255); kbT.Text = "  Keybind List"; kbT.TextXAlignment = Enum.TextXAlignment.Left; kbT.Parent = kbF
 Instance.new("UICorner", kbT).CornerRadius = UDim.new(0, 8)
-local kbC = Instance.new("Frame"); kbC.Size = UDim2.new(1, -10, 1, -34); kbC.Position = UDim2.new(0, 5, 0, 31); kbC.BackgroundTransparency = 1; kbC.Parent = kbF
+local kbC = Instance.new("Frame"); kbC.Size = UDim2.new(1, -20, 1, -44); kbC.Position = UDim2.new(0, 10, 0, 41); kbC.BackgroundTransparency = 1; kbC.Parent = kbF
 Instance.new("UIListLayout", kbC).Padding = UDim.new(0, 4)
 MakeDrag(kbT, kbF)
 local function keyStr(o) if not o then return "?" end; local v = o.Value; return typeof(v) == "EnumItem" and keyDisplay(v) or tostring(v) end
@@ -4448,25 +5756,25 @@ local kbL = {}
 local kbLastText = {}
 for i, _ in ipairs(kbItems) do
     local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, 0, 0, 20); l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamBold
-    l.TextSize = 13; l.TextXAlignment = Enum.TextXAlignment.Left
-    l.TextColor3 = Color3.fromRGB(200, 200, 200); l.LayoutOrder = i; l.Parent = kbC
+    l.Size = UDim2.new(1, 0, 0, 20); l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamMedium
+    l.TextSize = 15; l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextColor3 = Color3.fromRGB(230, 230, 230); l.LayoutOrder = i; l.Parent = kbC
     kbL[i] = l; kbLastText[i] = ""
 end
 local bsGui = Instance.new("ScreenGui"); bsGui.Name = "q_BS"; bsGui.ResetOnSpawn = false; bsGui.IgnoreGuiInset = true; bsGui.DisplayOrder = 100; bsGui.Parent = CoreGui
-bsF = Instance.new("Frame"); bsF.Size = UDim2.new(0, 220, 0, 120); bsF.Position = UDim2.new(1, -470, 0.5, -60); bsF.BackgroundColor3 = Color3.fromRGB(17, 17, 19); bsF.Visible = false; bsF.Parent = bsGui; bsF.ClipsDescendants = true
+bsF = Instance.new("Frame"); bsF.Size = UDim2.new(0, 220, 0, 130); bsF.Position = UDim2.new(1, -470, 0.5, -60); bsF.BackgroundColor3 = Color3.fromRGB(0, 0, 0); bsF.BorderSizePixel = 0; bsF.Visible = false; bsF.Parent = bsGui; bsF.ClipsDescendants = true
 Instance.new("UICorner", bsF).CornerRadius = UDim.new(0, 10)
-local bsStroke = Instance.new("UIStroke", bsF); bsStroke.Color = Color3.fromRGB(58, 58, 66); bsStroke.Transparency = 0.25
-local bsT = Instance.new("TextLabel"); bsT.Size = UDim2.new(1, 0, 0, 28); bsT.BackgroundColor3 = Color3.fromRGB(30, 30, 34); bsT.BackgroundTransparency = 0.2; bsT.Font = Enum.Font.GothamBold; bsT.TextSize = 13; bsT.TextColor3 = Color3.fromRGB(230, 230, 235); bsT.Text = "  Ball Stats"; bsT.TextXAlignment = Enum.TextXAlignment.Left; bsT.Parent = bsF
+local bsStroke = Instance.new("UIStroke", bsF); bsStroke.Color = Color3.fromRGB(58, 58, 66); bsStroke.Transparency = 0.25; bsStroke.Enabled = false
+local bsT = Instance.new("TextLabel"); bsT.Size = UDim2.new(1, 0, 0, 38); bsT.BackgroundColor3 = Color3.fromRGB(0, 0, 0); bsT.BackgroundTransparency = 1; bsT.Font = Enum.Font.GothamBold; bsT.TextSize = 17; bsT.Active = true; bsT.TextColor3 = Color3.fromRGB(255, 255, 255); bsT.Text = "  Ball Stats"; bsT.TextXAlignment = Enum.TextXAlignment.Left; bsT.Parent = bsF
 Instance.new("UICorner", bsT).CornerRadius = UDim.new(0, 8)
-local bsC = Instance.new("Frame"); bsC.Size = UDim2.new(1, -10, 1, -34); bsC.Position = UDim2.new(0, 5, 0, 31); bsC.BackgroundTransparency = 1; bsC.Parent = bsF
+local bsC = Instance.new("Frame"); bsC.Size = UDim2.new(1, -20, 1, -44); bsC.Position = UDim2.new(0, 10, 0, 41); bsC.BackgroundTransparency = 1; bsC.Parent = bsF
 Instance.new("UIListLayout", bsC).Padding = UDim.new(0, 3)
 MakeDrag(bsT, bsF)
 local function bsLabel(o)
     local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, 0, 0, 18); l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamBold
-    l.TextSize = 13; l.TextXAlignment = Enum.TextXAlignment.Left
-    l.TextColor3 = Color3.fromRGB(200, 200, 200); l.LayoutOrder = o; l.Text = "N/A"; l.Parent = bsC
+    l.Size = UDim2.new(1, 0, 0, 18); l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamMedium
+    l.TextSize = 15; l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextColor3 = Color3.fromRGB(230, 230, 230); l.LayoutOrder = o; l.Text = "N/A"; l.Parent = bsC
     return l
 end
 local bsSp, bsDi, bsTg, bsCu = bsLabel(1), bsLabel(2), bsLabel(3), bsLabel(4)
@@ -4480,7 +5788,7 @@ addHeartbeatHandler(function()
         for i, it in ipairs(kbItems) do
             local s = it.s(); local k = it.k()
             local shown = (#k == 1) and k or ("[" .. k .. "]")
-            local txt = shown .. " " .. it.n .. " " .. (s and "<font color='#4cd964'>ON</font>" or "<font color='#ff3b30'>OFF</font>")
+            local txt = shown .. " " .. it.n .. " " .. (s and "<font color='#ffffff'>ON</font>" or "<font color='#828282'>OFF</font>")
             if txt ~= kbLastText[i] then
                 kbLastText[i] = txt
                 local lbl = kbL[i]; lbl.RichText = true; lbl.Text = txt
@@ -4516,15 +5824,15 @@ local function MakeDrag(handle, frame)
             i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
         end
     end)
-    handle.InputEnded:Connect(function(i)
+    handle.InputChanged:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then di = i end
     end)
-    UserInputService.InputChanged:Connect(function(i)
+    table.insert(qzxpUIConnections, UserInputService.InputChanged:Connect(function(i)
         if i == di and drag and ds then
             local d = i.Position - ds
             frame.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
         end
-    end)
+    end))
 end
 local statsGui = Instance.new("ScreenGui")
 statsGui.Name = "qzxp_Stats"
@@ -4533,9 +5841,10 @@ statsGui.IgnoreGuiInset = true
 statsGui.DisplayOrder = 100
 statsGui.Parent = CoreGui
 local statsF = Instance.new("Frame")
-statsF.Size = UDim2.new(0, 220, 0, 78)
+statsF.Size = UDim2.new(0, 220, 0, 88)
 statsF.Position = UDim2.new(1, -235, 0.5, 108)
-statsF.BackgroundColor3 = Color3.fromRGB(17, 17, 19)
+statsF.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+statsF.BorderSizePixel = 0
 statsF.Visible = false
 statsF.Parent = statsGui
 statsF.ClipsDescendants = true
@@ -4543,21 +5852,23 @@ Instance.new("UICorner", statsF).CornerRadius = UDim.new(0, 10)
 local statsS = Instance.new("UIStroke")
 statsS.Color = Color3.fromRGB(58, 58, 66)
 statsS.Transparency = 0.25
+statsS.Enabled = false
 statsS.Parent = statsF
 local statsT = Instance.new("TextLabel")
-statsT.Size = UDim2.new(1, 0, 0, 28)
-statsT.BackgroundColor3 = Color3.fromRGB(30, 30, 34)
-statsT.BackgroundTransparency = 0.2
+statsT.Size = UDim2.new(1, 0, 0, 38)
+statsT.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+statsT.BackgroundTransparency = 1
 statsT.Font = Enum.Font.GothamBold
-statsT.TextSize = 13
-statsT.TextColor3 = Color3.fromRGB(230, 230, 235)
+statsT.TextSize = 17
+statsT.Active = true
+statsT.TextColor3 = Color3.fromRGB(255, 255, 255)
 statsT.Text = "  Stats"
 statsT.TextXAlignment = Enum.TextXAlignment.Left
 statsT.Parent = statsF
 Instance.new("UICorner", statsT).CornerRadius = UDim.new(0, 8)
 local statsC = Instance.new("Frame")
-statsC.Size = UDim2.new(1, -10, 1, -34)
-statsC.Position = UDim2.new(0, 5, 0, 31)
+statsC.Size = UDim2.new(1, -20, 1, -44)
+statsC.Position = UDim2.new(0, 10, 0, 41)
 statsC.BackgroundTransparency = 1
 statsC.Parent = statsF
 Instance.new("UIListLayout", statsC).Padding = UDim.new(0, 3)
@@ -4566,10 +5877,10 @@ local function mkStatLabel(order)
     local l = Instance.new("TextLabel")
     l.Size = UDim2.new(1, 0, 0, 18)
     l.BackgroundTransparency = 1
-    l.Font = Enum.Font.GothamBold
-    l.TextSize = 13
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 15
     l.TextXAlignment = Enum.TextXAlignment.Left
-    l.TextColor3 = Color3.fromRGB(200, 200, 200)
+    l.TextColor3 = Color3.fromRGB(230, 230, 230)
     l.LayoutOrder = order
     l.Text = "N/A"
     l.Parent = statsC
@@ -4653,17 +5964,20 @@ end
 do
     local s2 = Tabs.Combat:AddSection("Detections")
     s2:AddToggle("InfDet", {Title = "Infinity", Default = false, Callback = function(v)
-        InfDet = v
+        Det.InfDet = v
     end})
     s2:AddToggle("DSDet", {Title = "Death Slash", Default = false, Callback = function(v)
-        DSDet = v
+        Det.DSDet = v
     end})
     s2:AddToggle("THDet", {Title = "Time Hole", Default = false, Callback = function(v)
-        THDet = v
+        Det.THDet = v
     end})
-    s2:AddToggle("SFDet", {Title = "Slashes of Fury", Default = false, Callback = function(v) SFDet = v end})
-    s2:AddSlider("SofDelay", {Title = "SoF Parry Delay (ms)", Default = 5, Min = 5, Max = 25, Rounding = 0, Callback = function(v) parryDelay = v/100 end})
-    s2:AddSlider("SofMax",   {Title = "SoF Max Parry Count", Default = 36, Min = 1, Max = 36, Rounding = 0, Callback = function(v) maxParryCount = v end})
+    s2:AddToggle("SFDet", {Title = "Slashes of Fury", Default = false, Callback = function(v) Det.SFDet = v; if not v then Det.resetSF() end end})
+    s2:AddToggle("SofAutoHit", {Title = "SoF Auto Hit", Default = false, Callback = function(v) Det.autoHit = v end})
+    s2:AddToggle("SofAnimFix", {Title = "SoF Anim Fix", Default = true, Callback = function(v) Det.animFix = v end})
+    s2:AddSlider("SofDelay", {Title = "SoF Parry Delay (seconds)", Default = 0.12, Min = 0.025, Max = 0.35, Rounding = 3,
+        Callback = function(v) Det.parryDelay = v end})
+    s2:AddSlider("SofMax", {Title = "SoF Parry Amount", Default = 1, Min = 1, Max = 35, Rounding = 0, Callback = function(v) Det.maxParryCount = v end})
 end
 do
     local s3 = Tabs.Combat:AddSection("Spam")
@@ -4710,8 +6024,9 @@ do
     end})
     s3:AddToggle("AutoSpamToggle", {Title = "Auto Spam", Default = false, Callback = function(v)
         AutoSpam_On = v
+        if not v then AutoClash.reset() end
     end})
-    s3:AddDropdown("ClashingThreshold", {Title = "Clashing Threshold", Values = {"1", "2", "3"}, Default = "1", Callback = function(v)
+    s3:AddDropdown("ClashingThreshold", {Title = "Threshold", Values = {"1", "2", "3"}, Default = "1", Callback = function(v)
         ClashingThreshold = tonumber(v) or 1
     end})
 end
@@ -4747,9 +6062,21 @@ do
     local s5 = Tabs.Swords:AddSection("Sword Changer")
     local skinRef = s5:AddToggle("SkinToggle", {Title = "Enabled", Default = false, Callback = function(v)
         getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
-        if v and getgenv().swordModel ~= "" then
-            pcall(getgenv().updateSword)
-        elseif not v then
+        if v then
+            -- only one sword driver at a time: turning the changer on switches Unlock All off
+            local uaOpt = Options.UnlockAllToggle
+            if uaOpt and uaOpt.Value then
+                uaOpt:SetValue(false)
+                notify({Title = "Sword Changer", Content = "Unlock All switched off", Duration = 2})
+            end
+            local m = getgenv().manualSword
+            if type(m) == "string" and m ~= "" then
+                getgenv().swordModel = m; getgenv().swordAnimations = m; getgenv().swordFX = m
+            end
+            if type(getgenv().swordModel) == "string" and getgenv().swordModel ~= "" then
+                pcall(getgenv().updateSword)
+            end
+        else
             pcall(getgenv().revertSword)
         end
     end})
@@ -4761,23 +6088,36 @@ do
     end
     s5:AddInput("ManualSword", {Title = "Sword Name", Default = "", Placeholder = "type sword name...", Callback = function(v)
         local n = v and v:match("^%s*(.-)%s*$") or ""
-        local e = resolve(n)
-        getgenv().swordModel = e; getgenv().swordAnimations = e; getgenv().swordFX = e
-        if getgenv().skinChanger then
-            if e ~= "" then
-                pcall(getgenv().updateSword)
-            else
-                pcall(getgenv().revertSword)
-                if getgenv().setSkinUI then pcall(getgenv().setSkinUI, false) end
-            end
+        if n == "" then
+            getgenv().manualSword = ""
+            return
         end
-        pcall(getgenv().saveLastEquippedSword, e)
+        -- the typed text goes through the real search engine: exact, prefix,
+        -- substring or a one/two letter typo, never a silent miss
+        local hit = resolveExact(n) or searchSwords(n, 1)[1]
+        if not hit then
+            notify({Title = "Sword Changer", Content = "No sword matching '" .. n .. "'", Duration = 4})
+            return
+        end
+        applyManualSword(hit)
     end})
     local s5b = Tabs.Swords:AddSection("Unlock All (Swords)")
     s5b:AddToggle("UnlockAllToggle", {Title = "Enabled", Default = false, Callback = function(v)
+        if v and getgenv().skinChanger then
+            -- unlock all drives the equipped sword too: switch the manual changer off first
+            if getgenv().setSkinUI then pcall(getgenv().setSkinUI, false) end
+            if getgenv().skinChanger then
+                getgenv().skinChanger = false; getgenv().skinChangerEnabled = false
+                pcall(function() if getgenv().revertSword then getgenv().revertSword() end end)
+            end
+            notify({Title = "Unlock All", Content = "Sword Changer switched off", Duration = 2})
+        end
         UA:set_enabled(v)
         notify({Title = "Unlock All", Content = v and "On" or "Off", Duration = 2})
     end})
+    if type(s5b.AddLabel) == "function" then
+        s5b:AddLabel("Turning this on switches the Sword Changer off.")
+    end
     s5b:AddButton({Title = "Refresh Shop", Callback = function()
         if UA.enabled then UA:schedule_refresh() end
     end})
@@ -5476,11 +6816,11 @@ do
     end, 7)
 
     addHeartbeatHandler(function()
-        local mainPos = Window._main.Position
-        local baseX = mainPos.X.Offset + 760
-        local baseY = mainPos.Y.Offset + 115
+        local mainPos = Window._main.AbsolutePosition
+        local mainSize = Window._main.AbsoluteSize
+        profilePrev.Visible = Window.Toggle and Options.ProfilePreviewToggle and Options.ProfilePreviewToggle.Value or false
         if profilePrev.Visible then
-            profilePrev.Position = UDim2.new(mainPos.X.Scale, baseX, mainPos.Y.Scale, baseY)
+            profilePrev.Position = UDim2.fromOffset(mainPos.X + mainSize.X + 10, mainPos.Y + 115)
             if ProfileSpoofer.info then
                 profileImg.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", ProfileSpoofer.info.userId)
                 profileDisp.Text = ProfileSpoofer.info.displayName
@@ -5554,18 +6894,7 @@ do
         local w = Fluent.Window
         if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
     end, ChangedCallback = function() end})
-    interfaceSection:AddSlider("UITransparency", {
-        Title = "UI Transparency",
-        Default = 0,
-        Min = 0,
-        Max = 90,
-        Rounding = 0,
-        Callback = function(v)
-            if getgenv().qzxp_applyUITransparency then
-                getgenv().qzxp_applyUITransparency(v / 100)
-            end
-        end,
-    })
+
 end
 end)()
 
@@ -5589,6 +6918,14 @@ Window:SelectTab(1)
 
 getgenv().qzxp_suppressNotify = true
 pcall(function() SaveManager:LoadAutoloadConfig() end)
+-- exactly one sword driver: a config saved while both were on keeps Unlock All
+pcall(function()
+    local uaOpt, skOpt = Options.UnlockAllToggle, Options.SkinToggle
+    if uaOpt and skOpt and uaOpt.Value and skOpt.Value then
+        skOpt:SetValue(false)
+        Fluent:Notify({Title = "Sword Changer", Content = "Off - this config has Unlock All enabled", Duration = 4})
+    end
+end)
 task.delay(1, function()
     getgenv().qzxp_suppressNotify = false
     Fluent:Notify({Title = "qzxp", Content = "Loaded", Duration = 4})
@@ -5597,6 +6934,12 @@ end)
 -- Cleanup
 getgenv().qzxp_Cleanup = function()
     pcall(function()
+        Det.alive = false
+        Det.resetSF()
+        AutoClash.reset()
+        for _, conn in pairs(Det.ballConnections) do pcall(function() conn:Disconnect() end) end
+        for _, connection in ipairs(qzxpUIConnections) do pcall(function() connection:Disconnect() end) end
+        for _, conn in ipairs(Det.connections) do pcall(function() conn:Disconnect() end) end
         if getgenv().qzxp_VFXConns then
             for _, conn in ipairs(getgenv().qzxp_VFXConns) do
                 pcall(function() conn:Disconnect() end)
