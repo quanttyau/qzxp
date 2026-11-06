@@ -2297,29 +2297,42 @@ local function _onBallRespawn(ball)
         pcall(_ballRespawnHandlers[i], ball)
     end
 end
+-- Both ChildAdded and DescendantAdded can report the same ball. Keep one
+-- realBall listener per instance and release it as the instance leaves.
+local _ballAttributeConns = setmetatable({}, {__mode = "k"})
+local function _unhookBallAttribute(child)
+    local conn = _ballAttributeConns[child]
+    if conn then conn:Disconnect(); _ballAttributeConns[child] = nil end
+end
 spawnTracked(function()
     local function watchFolder(folder)
         if not folder then return end
         local function hookRealBall(child)
-            if child and child:IsA("Instance") then
-                child:GetAttributeChangedSignal('realBall'):Connect(function()
+            if child and child:IsA("Instance") and not _ballAttributeConns[child] then
+                _ballAttributeConns[child] = child:GetAttributeChangedSignal('realBall'):Connect(function()
                     _markBallsDirty()
                     if child:GetAttribute('realBall') then _onBallRespawn(child) end
                 end)
             end
         end
-        folder.ChildAdded:Connect(function(child)
+        table.insert(Det.connections, folder.ChildAdded:Connect(function(child)
             _markBallsDirty()
             hookRealBall(child)
             if child:GetAttribute('realBall') then _onBallRespawn(child) end
-        end)
-        folder.ChildRemoved:Connect(_markBallsDirty)
-        folder.DescendantAdded:Connect(function(d)
+        end))
+        table.insert(Det.connections, folder.ChildRemoved:Connect(function(child)
+            _markBallsDirty()
+            _unhookBallAttribute(child)
+        end))
+        table.insert(Det.connections, folder.DescendantAdded:Connect(function(d)
             if d:IsA("Ball") or d:IsA("BasePart") then
                 _markBallsDirty()
                 hookRealBall(d)
             end
-        end)
+        end))
+        table.insert(Det.connections, folder.DescendantRemoving:Connect(function(d)
+            _unhookBallAttribute(d)
+        end))
         for _, child in ipairs(folder:GetChildren()) do hookRealBall(child) end
     end
     watchFolder(Workspace:WaitForChild('Balls', 9e9))
@@ -2347,6 +2360,7 @@ local function refreshBallCache()
 end
 local function getBall()
     refreshBallCache()
+    if #_ballCache <= 1 then return _ballCache[1] end
     local me = LocalPlayer.Name
     for i = 1, #_ballCache do
         local b = _ballCache[i]
@@ -2373,7 +2387,7 @@ local PING_SAMPLES = 12
 local _pingRing = {}
 local _pingRingN = 0
 local _pingRingHead = 0
-local _pingTime = 0
+local _pingTime, _pingMin = 0, 50
 local function getPing()
     local n = tick()
     if (n - _pingTime) > 0.1 then
@@ -2384,15 +2398,15 @@ local function getPing()
                 _pingRingHead = (_pingRingHead % PING_SAMPLES) + 1
                 _pingRing[_pingRingHead] = v
                 if _pingRingN < PING_SAMPLES then _pingRingN += 1 end
+                local minimum = math.huge
+                for i = 1, _pingRingN do
+                    if _pingRing[i] < minimum then minimum = _pingRing[i] end
+                end
+                _pingMin = minimum
             end
         end
     end
-    if _pingRingN == 0 then return 50 end
-    local m = math.huge
-    for i = 1, _pingRingN do
-        if _pingRing[i] < m then m = _pingRing[i] end
-    end
-    return m
+    return _pingMin
 end
 
 -- Curve detection
@@ -2517,7 +2531,7 @@ local _curveCache, _curveCacheTime = {}, 0
 local CURVE_INTERVAL = 1 / 30
 local function isCurvedCached(ball)
     local now = os.clock()
-    if now - _curveCacheTime >= CURVE_INTERVAL then _curveCacheTime = now; _curveCache = {} end
+    if now - _curveCacheTime >= CURVE_INTERVAL then _curveCacheTime = now; table.clear(_curveCache) end
     local cached = _curveCache[ball]
     if cached ~= nil then return cached end
     local result = isCurved(ball)
@@ -2726,7 +2740,7 @@ local CURVES = {"Camera", "Dot", "Nearest", "Random", "Accel", "Backwards", "Slo
 local CurveMode = "Camera"
 local lastCFCalcFrame, cachedCF = 0, nil
 local _frameBlockOk = nil
-local _frameEd, _frameEdFrame = nil, 0
+local _frameEd, _frameEdFrame = nil, -1
 local function IsBlockLegit()
     local c = LocalPlayer.Character
     if not c or not c.Parent then return false end
@@ -2742,8 +2756,93 @@ local function IsBlockLegit()
     if lobbyParry and LocalPlayer:GetAttribute("InLobbyParryCooldown") then return false end
     return true
 end
+-- Lobby training uses screen positions for practice targets, not only
+-- players in Workspace.Alive. Keep this override scoped to the lobby area;
+-- elsewhere the original match targeting and Parry Lock remain unchanged.
+local ArenaAim = {targetRefresh = 0, targets = {}, positionsFrame = -1}
+function ArenaAim.area()
+    local spawn = Workspace:FindFirstChild("Spawn")
+    return spawn and spawn:FindFirstChild("LobbyTraining")
+end
+function ArenaAim.active()
+    local training = ArenaAim.area()
+    local character = LocalPlayer.Character
+    local dead = Workspace:FindFirstChild("Dead")
+    if not training or not character or not dead or character.Parent ~= dead then return false end
+    -- Matches Tsukuyomi's lobby-training state check.
+    if LocalPlayer:GetAttribute("LobbyTraining") then return true end
+    -- Fallback for the scanned lobby map if the attribute is absent/delayed.
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local area = training:FindFirstChild("TrainingArea")
+    if not root or not area or not area:IsA("BasePart") then return false end
+    local relative = area.CFrame:PointToObjectSpace(root.Position)
+    local half = area.Size * 0.5
+    return math.abs(relative.X) <= half.X + 3
+        and math.abs(relative.Z) <= half.Z + 3
+        and math.abs(relative.Y) <= math.max(half.Y + 12, 32)
+end
+function ArenaAim.mouse(camera)
+    if UserInputService.MouseEnabled then
+        local ok, x, y = pcall(function()
+            local mouse = LocalPlayer:GetMouse()
+            return mouse.X, mouse.Y
+        end)
+        if ok and type(x) == "number" and type(y) == "number" then return Vector2.new(x, y) end
+        local good, point = pcall(UserInputService.GetMouseLocation, UserInputService)
+        if good and point then return point end
+    end
+    local vp = camera.ViewportSize
+    return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+end
+function ArenaAim.positions(camera)
+    if ArenaAim.positionsFrame == frameCount and ArenaAim.positionsCamera == camera then
+        return ArenaAim.positionsCache
+    end
+    local positions = {}
+    local dead = Workspace:FindFirstChild("Dead")
+    if dead then
+        for _, character in ipairs(dead:GetChildren()) do
+            if character:IsA("Model") then
+                local player = Players:GetPlayerFromCharacter(character)
+                local root = character.PrimaryPart
+                if player and player:GetAttribute("LobbyTraining") and root then
+                    positions[character.Name] = camera:WorldToScreenPoint(root.Position)
+                end
+            end
+        end
+    end
+    local training = ArenaAim.area()
+    local now = os.clock()
+    if training ~= ArenaAim.targetArea or now >= ArenaAim.targetRefresh then
+        ArenaAim.targetArea = training
+        ArenaAim.targetRefresh = now + 1
+        ArenaAim.targets = {}
+        local collection = game:GetService("CollectionService")
+        for _, target in ipairs(collection:GetTagged("LobbyTrainingTarget")) do
+            if target:IsA("BasePart") and training and target:IsDescendantOf(training) then
+                table.insert(ArenaAim.targets, target)
+            end
+        end
+        if #ArenaAim.targets == 0 and training then
+            for _, target in ipairs(training:GetDescendants()) do
+                if target:IsA("BasePart") and target.Name:match("^Target<.+>$") then
+                    table.insert(ArenaAim.targets, target)
+                end
+            end
+        end
+    end
+    for _, target in ipairs(ArenaAim.targets) do
+        if target.Parent and training and target:IsDescendantOf(training) then
+            positions[target.Name] = camera:WorldToScreenPoint(target.Position)
+        end
+    end
+    ArenaAim.positionsFrame, ArenaAim.positionsCamera, ArenaAim.positionsCache = frameCount, camera, positions
+    return positions
+end
+
 local _cachedCFBall = nil
 local function getCurveCF(ballArg)
+    if ArenaAim.active() then return (Workspace.CurrentCamera or Camera).CFrame end
     if cachedCF and frameCount == lastCFCalcFrame and _cachedCFBall == ballArg then return cachedCF end
     lastCFCalcFrame = frameCount
     _cachedCFBall = ballArg
@@ -2751,6 +2850,11 @@ local function getCurveCF(ballArg)
     local rp = root and root.Position or Camera.CFrame.Position
     local ball = ballArg or getBall()
     if ball then trackBall(ball) end
+    local m = (Options and Options.CurveMode and Options.CurveMode.Value) or CurveMode
+    if m == "Camera" and not LockEnabled then
+        cachedCF = Camera.CFrame
+        return cachedCF
+    end
     local tp = nil
     if LockEnabled and LockTarget ~= "None" then tp = findPart(LockTarget) end
     local _s = ball and Sender[ball]
@@ -2789,7 +2893,6 @@ local function getCurveCF(ballArg)
         tpos = rp + Camera.CFrame.LookVector * 100
     end
     if LockEnabled and tp then cachedCF = CFrame.new(rp, tpos); return cachedCF end
-    local m = (Options and Options.CurveMode and Options.CurveMode.Value) or CurveMode
     local resCF = Camera.CFrame
     if m == "Camera" then
         resCF = Camera.CFrame
@@ -2856,11 +2959,10 @@ local function isAPLocked()
     end
     return true
 end
-local function fireRemote(ball)
-    if not ball or not ball.Parent then return false end
-    if not _remote or not _args or not _tokenFound then return false end
+local function prepareParryPayload(ball)
     local rcf = getCurveCF(ball)
-    if _frameEdFrame ~= frameCount then
+    local inArena = ArenaAim.active()
+    if not inArena and _frameEdFrame ~= frameCount then
         _frameEdFrame = frameCount
         local ed = {}
         local af = Workspace:FindFirstChild("Alive")
@@ -2874,57 +2976,45 @@ local function fireRemote(ball)
         end
         _frameEd = ed
     end
-    local ed = _frameEd
-    local vp = Camera.ViewportSize
+    local arenaCamera = inArena and (Workspace.CurrentCamera or Camera)
+    local ed = inArena and ArenaAim.positions(arenaCamera) or _frameEd
+    local vp = (arenaCamera or Camera).ViewportSize
     local mp = Vector2.new(vp.X / 2, vp.Y / 2)
-    if LockEnabled and LockTarget ~= "None" then
+    if inArena then
+        mp = ArenaAim.mouse(arenaCamera)
+    elseif LockEnabled and LockTarget ~= "None" then
         local lp = findPart(LockTarget)
         if lp then local sp = Camera:WorldToScreenPoint(lp.Position); mp = Vector2.new(sp.X, sp.Y) end
     else
         local ok, loc = pcall(UserInputService.GetMouseLocation, UserInputService)
         if ok and loc then mp = loc end
     end
-    local ok = pcall(function()
-        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
-    end)
-    if not ok then return false end
-    return true
+    return rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}
 end
-
+local function sendPreparedParry(rcf, ed, mouse)
+    -- Generate the token for each actual remote call, as in the original.
+    return pcall(function()
+        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, mouse, false)
+    end)
+end
+local function fireRemote(ball)
+    if not ball or not ball.Parent then return false end
+    if not _remote or not _args or not _tokenFound then return false end
+    local rcf, ed, mouse = prepareParryPayload(ball)
+    return sendPreparedParry(rcf, ed, mouse)
+end
 local function fireParryGeneric()
     if not _remote or not _args or not _tokenFound then return false end
-    local rcf = getCurveCF(getBall())
-    if _frameEdFrame ~= frameCount then
-        _frameEdFrame = frameCount
-        local ed = {}
-        local af = Workspace:FindFirstChild("Alive")
-        if af then
-            for _, e in pairs(af:GetChildren()) do
-                if e.PrimaryPart then
-                    local ok, sp = pcall(Camera.WorldToScreenPoint, Camera, e.PrimaryPart.Position)
-                    if ok then ed[e.Name] = sp end
-                end
-            end
-        end
-        _frameEd = ed
+    local rcf, ed, mouse = prepareParryPayload(getBall())
+    return sendPreparedParry(rcf, ed, mouse)
+end
+local function fireSpamBatch(ball, count)
+    if not ball or not ball.Parent or not _remote or not _args or not _tokenFound then return end
+    local rcf, ed, mouse = prepareParryPayload(ball)
+    for _ = 1, count do
+        if not ball.Parent or not _remote or not _args or not _tokenFound then break end
+        sendPreparedParry(rcf, ed, mouse)
     end
-    local ed = _frameEd
-    local vp = Camera.ViewportSize
-    local mp = Vector2.new(vp.X / 2, vp.Y / 2)
-    if LockEnabled and LockTarget ~= "None" then
-        local lp = findPart(LockTarget)
-        if lp then
-            local sp = Camera:WorldToScreenPoint(lp.Position)
-            mp = Vector2.new(sp.X, sp.Y)
-        end
-    else
-        local ok, loc = pcall(UserInputService.GetMouseLocation, UserInputService)
-        if ok and loc then mp = loc end
-    end
-    local ok = pcall(function()
-        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}, false)
-    end)
-    return ok
 end
 
 local AP_Acc, AP_Div = 50, 1.1
@@ -3016,7 +3106,7 @@ function Det.onCounter(counter)
                 if Det.animFix then pcall(PlaySingleParryAnimation) end
             end
         end
-        -- Avoid a 0.002s idle loop when Auto Hit is off or has reached its
+        -- Avoid a fast idle loop when Auto Hit is off or has reached its
         -- target. Active timing stays Flyte's remote-mode task.wait(delay).
         local delay = Det.parryDelay or 0.12
         if not Det.autoHit or count >= Det.maxParryCount then delay = math.max(delay, 0.1) end
@@ -3183,7 +3273,7 @@ local function apPickRandom()
     _apTarget.visited[picked.Name] = true
     _apTarget.current = picked
 end
-local function apByMouse()
+local function apByMouse(aliveChildren)
     if LockEnabled and LockTarget ~= "None" then
         local lp = findPart(LockTarget)
         if lp and lp.Parent then
@@ -3192,9 +3282,8 @@ local function apByMouse()
         end
     end
     local list = {}
-    local af = Workspace:FindFirstChild("Alive")
-    if af then
-        for _, m in ipairs(af:GetChildren()) do
+    if aliveChildren then
+        for _, m in ipairs(aliveChildren) do
             if m.Name ~= _lpName and m.PrimaryPart and isRealPlayerModel(m) then table.insert(list, m) end
         end
     end
@@ -3236,6 +3325,8 @@ local function apGetCurveCF()
         local lockPart = findPart(LockTarget)
         if lockPart then return CFrame.new(root.Position, lockPart.Position) end
     end
+    local method = tostring(CurveMode or "Camera"):lower()
+    if method == "camera" then return cf end
     local tp        = _apTarget.current and _apTarget.current.PrimaryPart
     local targetPos = tp and tp.Position
     if not targetPos then
@@ -3255,7 +3346,6 @@ local function apGetCurveCF()
     end
     local delta     = targetPos - root.Position
     local unit      = delta.Magnitude > 0.001 and delta.Unit or root.CFrame.LookVector
-    local method    = tostring(CurveMode or "Camera"):lower()
     if method == "dot" then
         return CFrame.lookAt(root.Position, targetPos + Vector3.new(0, 1.75, 0))
     elseif method == "backwards" then
@@ -3286,12 +3376,24 @@ local function apGetCurveCF()
 end
 local _apFireCount = 0
 local function apFire()
-    apByMouse()
+    if not _remote or not _args or not _tokenFound then return false end
+    local inArena = ArenaAim.active()
+    local aliveChildren
+    if inArena then
+        _apTarget.current = nil
+    else
+        local alive = Workspace:FindFirstChild("Alive")
+        aliveChildren = alive and alive:GetChildren() or nil
+        apByMouse(aliveChildren)
+    end
     local cam = Workspace.CurrentCamera
-    local rcf = apGetCurveCF()
-    local targetPart = _apTarget.current and _apTarget.current.PrimaryPart
+    local rcf = inArena and cam.CFrame or apGetCurveCF()
+    local targetPart = not inArena and _apTarget.current and _apTarget.current.PrimaryPart
     local mp
-    if targetPart then
+    if inArena then
+        local cursor = ArenaAim.mouse(cam)
+        mp = {cursor.X, cursor.Y}
+    elseif targetPart then
         local sp = cam:WorldToViewportPoint(targetPart.Position)
         mp = { sp.X, sp.Y }
     elseif UserInputService.MouseEnabled then
@@ -3301,18 +3403,21 @@ local function apFire()
         local vp = cam.ViewportSize
         mp = { vp.X * 0.5, vp.Y * 0.5 }
     end
-    local ed = {}
-    local af = Workspace:FindFirstChild("Alive")
-    if af then
-        for _, m in ipairs(af:GetChildren()) do
-            local pp = m.PrimaryPart
-            if pp then
-                local sp = cam:WorldToScreenPoint(pp.Position)
-                if sp and sp.Z > 0 then ed[m.Name] = sp end
+    local ed
+    if inArena then
+        ed = ArenaAim.positions(cam)
+    else
+        ed = {}
+        if aliveChildren then
+            for _, m in ipairs(aliveChildren) do
+                local pp = m.PrimaryPart
+                if pp then
+                    local sp = cam:WorldToScreenPoint(pp.Position)
+                    if sp and sp.Z > 0 then ed[m.Name] = sp end
+                end
             end
         end
     end
-    if not _remote or not _args or not _tokenFound then return false end
     local ok = pcall(function()
         _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]),
             0.5, rcf, ed, mp, false)
@@ -3459,13 +3564,14 @@ local function apCheck()
     if _apDebounce or now < _apUntilAt then return end
     local pos       = root.Position
     local pingDist  = math.clamp(getPing() / 100, 5, 17)
-    local firstBall = apFirstBall()
+    local balls = getAllBalls()
+    local firstBall = balls[1]
     local firstTarget = firstBall and firstBall:GetAttribute("target")
     local runtime  = Workspace:FindFirstChild("Runtime")
     local tornado  = runtime and runtime:FindFirstChild("Tornado")
     local tornadoT = tornado and (tornado:GetAttribute("TornadoTime") or 1)
     local acc = apAccuracy()
-    for _, ball in ipairs(getAllBalls()) do
+    for _, ball in ipairs(balls) do
         if not ball then return end
         local z = ball:FindFirstChild("zoomies")
         if not z then return end
@@ -3497,28 +3603,30 @@ local function apCheck()
     end
 end
 do
+    Det.apBallConnections = setmetatable({}, {__mode = "k"})
+    local function watchBallTarget(ball)
+        if Det.apBallConnections[ball] then return end
+        Det.apBallConnections[ball] = ball:GetAttributeChangedSignal("target"):Connect(function()
+            _apDebounce = false
+            _apUntilAt = 0
+        end)
+    end
     local function watchBalls(folder)
         if not folder then return end
-        for _, ball in ipairs(folder:GetChildren()) do
-            ball:GetAttributeChangedSignal("target"):Connect(function()
-                _apDebounce = false
-                _apUntilAt  = 0
-            end)
-        end
-        folder.ChildAdded:Connect(function(ball)
+        for _, ball in ipairs(folder:GetChildren()) do watchBallTarget(ball) end
+        qzxpTrackUI(folder.ChildAdded:Connect(function(ball)
             _apDebounce = false
-            _apUntilAt  = 0
-            ball:GetAttributeChangedSignal("target"):Connect(function()
-                _apDebounce = false
-                _apUntilAt  = 0
-            end)
-        end)
-        folder.ChildRemoved:Connect(function()
+            _apUntilAt = 0
+            watchBallTarget(ball)
+        end))
+        qzxpTrackUI(folder.ChildRemoved:Connect(function(ball)
+            local connection = Det.apBallConnections[ball]
+            if connection then connection:Disconnect(); Det.apBallConnections[ball] = nil end
             _apDebounce = false
-            _apUntilAt  = 0
+            _apUntilAt = 0
             _apTarget.current = nil
             _apTarget.visited = {}
-        end)
+        end))
     end
     watchBalls(Workspace:FindFirstChild("Balls"))
     watchBalls(Workspace:FindFirstChild("TrainingBalls"))
@@ -3545,6 +3653,7 @@ pcall(function()
         end
     end)
 end)
+addPostSimHandler(function() _frameBlockOk = nil end, 0)
 addPostSimHandler(AutoClash.update, 1)
 addPostSimHandler(apCheck, 2)
 
@@ -3560,6 +3669,7 @@ function PRV.Destroy()
     if PRV.Model then pcall(function() PRV.Model:Destroy() end) end
     PRV.Model = nil
     PRV.Segments = {}
+    PRV.LastCenter, PRV.LastRadius = nil, nil
 end
 function PRV.Ensure()
     if PRV.Model then return end
@@ -3567,7 +3677,13 @@ function PRV.Ensure()
     m.Name = "qzxp_ParryRange"
     m.Parent = Workspace
     PRV.Model = m
+    PRV.Angles = PRV.Angles or {}
+    PRV.LastCenter, PRV.LastRadius = nil, nil
     for i = 1, PRV.SEG_COUNT do
+        if not PRV.Angles[i] then
+            local phi = (i - 1) / PRV.SEG_COUNT * math.pi * 2
+            PRV.Angles[i] = {math.cos(phi), math.sin(phi), CFrame.Angles(0, -phi, 0)}
+        end
         local p = Instance.new("Part")
         p.Name = "Seg" .. i
         p.Anchored = true
@@ -3588,17 +3704,24 @@ end
 function PRV.Draw(center, radius)
     PRV.Ensure()
     if not PRV.Model or #PRV.Segments == 0 then return end
-    local thickness = math.clamp(radius * 0.02, 0.15, 0.6)
-    local segLen = (2 * math.pi * radius) / PRV.SEG_COUNT * 1.12
+    local sizeChanged = PRV.LastRadius ~= radius
+    if not sizeChanged and PRV.LastCenter == center then return end
+    local size
+    if sizeChanged then
+        local thickness = math.clamp(radius * 0.02, 0.15, 0.6)
+        local segLen = (2 * math.pi * radius) / PRV.SEG_COUNT * 1.12
+        size = Vector3.new(thickness, 0.08, segLen)
+    end
     local y = center.Y - 2.5
     for i = 1, PRV.SEG_COUNT do
-        local phi = (i - 1) / PRV.SEG_COUNT * math.pi * 2
-        local x = center.X + math.cos(phi) * radius
-        local z = center.Z + math.sin(phi) * radius
+        local angle = PRV.Angles[i]
+        local x = center.X + angle[1] * radius
+        local z = center.Z + angle[2] * radius
         local seg = PRV.Segments[i]
-        seg.Size = Vector3.new(thickness, 0.08, segLen)
-        seg.CFrame = CFrame.new(x, y, z) * CFrame.Angles(0, -phi, 0)
+        if sizeChanged then seg.Size = size end
+        seg.CFrame = CFrame.new(x, y, z) * angle[3]
     end
+    PRV.LastCenter, PRV.LastRadius = center, radius
 end
 addHeartbeatHandler(function()
     if not PRV.On then
@@ -3662,6 +3785,7 @@ addPostSimHandler(function()
     end
 end, 3)
 local _tbConns = setmetatable({}, {__mode = "k"})
+Det.tbConnections = _tbConns
 local function _attachTB(ball)
     if not ball or _tbConns[ball] then return end
     if not ball:GetAttribute('realBall') then
@@ -3669,11 +3793,14 @@ local function _attachTB(ball)
         waitConn = ball:GetAttributeChangedSignal('realBall'):Connect(function()
             if ball:GetAttribute('realBall') then
                 if waitConn then pcall(function() waitConn:Disconnect() end) end
+                if _tbConns[ball] == waitConn then _tbConns[ball] = nil end
                 _attachTB(ball)
             end
         end)
+        _tbConns[ball] = waitConn
         ball.Destroying:Once(function()
             if waitConn then pcall(function() waitConn:Disconnect() end) end
+            if _tbConns[ball] == waitConn then _tbConns[ball] = nil end
         end)
         return
     end
@@ -3698,7 +3825,7 @@ spawnTracked(function()
     local function watchFolder(folder)
         if not folder then return end
         for _, ball in ipairs(folder:GetChildren()) do _attachTB(ball) end
-        folder.ChildAdded:Connect(function(child) task.defer(_attachTB, child) end)
+        qzxpTrackUI(folder.ChildAdded:Connect(function(child) task.defer(_attachTB, child) end))
     end
     watchFolder(Workspace:WaitForChild('Balls', 9e9))
     watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
@@ -3728,9 +3855,7 @@ addPostSimHandler(function(dt)
         local fires = math.floor(timeAccumulator / interval)
         timeAccumulator -= fires * interval
         local ball = getBall()
-        if ball then
-            for _ = 1, fires do fireRemote(ball) end
-        end
+        if ball then fireSpamBatch(ball, fires) end
         if AnimFix_Spam then PlaySingleParryAnimation() end
     end
 end, 4)
@@ -5525,7 +5650,7 @@ clearBtn.MouseButton1Click:Connect(function()
 end)
 
 -- ============ KEEP-APPLIED LOOP ============
-task.spawn(function()
+spawnTracked(function()
     local tick2 = 0
     while true do
         task.wait(2)
@@ -5547,7 +5672,7 @@ end)
 
 -- ============ AUTO-APPLY ON LAUNCH ============
 task.delay(1.5, function()
-    if Config.Enabled then
+    if Det.alive and Config.Enabled then
         local ok, fail, total = Flags.applyAll()
         if total > 0 then
             notify({ Title = "FFlags", Content = ok .. " applied" ..
@@ -5697,11 +5822,11 @@ local function updateESP()
 end
 local function attachESPRespawn(p)
     if p == LocalPlayer then return end
-    p.CharacterAdded:Connect(function() clearESPFor(p) end)
+    qzxpTrackUI(p.CharacterAdded:Connect(function() clearESPFor(p) end))
 end
 for _, p in ipairs(Players:GetPlayers()) do attachESPRespawn(p) end
-Players.PlayerAdded:Connect(attachESPRespawn)
-Players.PlayerRemoving:Connect(clearESPFor)
+qzxpTrackUI(Players.PlayerAdded:Connect(attachESPRespawn))
+qzxpTrackUI(Players.PlayerRemoving:Connect(clearESPFor))
 spawnTracked(function()
     while true do
         task.wait(0.25)
@@ -5780,6 +5905,11 @@ end
 local bsSp, bsDi, bsTg, bsCu = bsLabel(1), bsLabel(2), bsLabel(3), bsLabel(4)
 local uiLast = 0
 addHeartbeatHandler(function()
+    if not UIFlags.KBShow and not UIFlags.BSOn then
+        if kbF.Visible then kbF.Visible = false end
+        if bsF.Visible then bsF.Visible = false end
+        return
+    end
     local now = os.clock()
     if now - uiLast < 0.1 then return end
     uiLast = now
@@ -5893,7 +6023,11 @@ local _statsLast = 0
 local _lastFpsTxt  = ""
 local _lastPingTxt = ""
 addHeartbeatHandler(function(dt)
-    if dt and dt > 0 then
+    if not UIFlags.StatsShowFPS and not UIFlags.StatsShowPing then
+        if statsF.Visible then statsF.Visible = false end
+        return
+    end
+    if UIFlags.StatsShowFPS and dt and dt > 0 then
         _fpsAvg = _fpsAvg * 0.9 + (1 / dt) * 0.1
     end
     local now = os.clock()
@@ -6190,6 +6324,7 @@ do
     local spoofedLabels       = setmetatable({}, {__mode = "k"})
     local hookedLabels        = setmetatable({}, {__mode = "k"})
     local watchedRoots        = setmetatable({}, {__mode = "k"})
+    local spoofHeadshotImage
 
     -- ---------------------------------------------------------
     -- SHARED HELPERS
@@ -6477,7 +6612,7 @@ do
     local function hookLabel(lbl)
         if hookedLabels[lbl] then return end
         hookedLabels[lbl] = true
-        lbl:GetPropertyChangedSignal("Text"):Connect(function()
+        qzxpTrackUI(lbl:GetPropertyChangedSignal("Text"):Connect(function()
             if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
             local info = ProfileSpoofer.info
             local state = spoofedLabels[lbl]
@@ -6490,7 +6625,7 @@ do
                 lbl.Text = want
                 state._lastSet = want
             end
-        end)
+        end))
     end
     local function getLocalNames()
         return LocalPlayer.Name, LocalPlayer.DisplayName
@@ -6545,13 +6680,16 @@ do
     local function watchRoot(root)
         if not root or watchedRoots[root] then return end
         watchedRoots[root] = true
-        root.DescendantAdded:Connect(function(d)
+        qzxpTrackUI(root.DescendantAdded:Connect(function(d)
+            if Options.AvatarChanger and Options.AvatarChanger.Value and spoofHeadshotImage then
+                spoofHeadshotImage(d)
+            end
             if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
             local info = ProfileSpoofer.info
             if not info then return end
             classifyLabel(d, info)
             classifyImage(d, info)
-        end)
+        end))
     end
     local function applyAll(info)
         local roots = currentRoots()
@@ -6607,7 +6745,7 @@ do
     -- ---------------------------------------------------------
     -- PFP SPOOFING (automatic with Avatar Changer)
     -- ---------------------------------------------------------
-    local function spoofHeadshotImage(img)
+    spoofHeadshotImage = function(img)
         if not img or not img.Parent then return end
         if not (img:IsA("ImageLabel") or img:IsA("ImageButton")) then return end
         local target = getTargetHeadshotUrl()
@@ -6624,6 +6762,7 @@ do
         for i = 1, #roots do
             local root = roots[i]
             if root and root.Parent then
+                watchRoot(root)
                 pcall(function()
                     for _, d in ipairs(root:GetDescendants()) do
                         spoofHeadshotImage(d)
@@ -6792,16 +6931,29 @@ do
     -- ---------------------------------------------------------
     -- RENDER HANDLERS
     -- ---------------------------------------------------------
+    local profileScanAt, profileScanBusy = 0, false
     addHeartbeatHandler(function()
         if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
-        local info = ProfileSpoofer.info
-        if not info then
-            info = getSpoofedProfileInfo()
-            if not info then return end
-            ProfileSpoofer.info = info
-        end
-        if not info._displayNameFetched then retryDisplayNameInBackground() end
-        pcall(applyAll, info)
+        if not getgenv().qzxp_avatarUserId or profileScanBusy then return end
+        local now = os.clock()
+        if now - profileScanAt < 0.25 then return end
+        profileScanAt, profileScanBusy = now, true
+        task.spawn(function()
+            pcall(function()
+                local info = ProfileSpoofer.info
+                if not info then
+                    info = getSpoofedProfileInfo()
+                    if not info then return end
+                    if not Det.alive or not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
+                    if getgenv().qzxp_avatarUserId ~= info.userId then return end
+                    ProfileSpoofer.info = info
+                end
+                if not Det.alive or not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
+                if not info._displayNameFetched then retryDisplayNameInBackground() end
+                applyAll(info)
+            end)
+            profileScanBusy = false
+        end)
     end, 9)
 
     local _avatarHSPrev = 0
@@ -6810,27 +6962,26 @@ do
         if not on then return end
         if not getgenv().qzxp_avatarUserId then return end
         local now = os.clock()
-        if now - _avatarHSPrev < 0.15 then return end
+        if now - _avatarHSPrev < 0.5 then return end
         _avatarHSPrev = now
         pcall(refreshAvatarHeadshots)
     end, 7)
 
     addHeartbeatHandler(function()
+        local visible = Window.Toggle and Options.ProfilePreviewToggle and Options.ProfilePreviewToggle.Value or false
+        if profilePrev.Visible ~= visible then profilePrev.Visible = visible end
+        if not visible then return end
         local mainPos = Window._main.AbsolutePosition
         local mainSize = Window._main.AbsoluteSize
-        profilePrev.Visible = Window.Toggle and Options.ProfilePreviewToggle and Options.ProfilePreviewToggle.Value or false
-        if profilePrev.Visible then
-            profilePrev.Position = UDim2.fromOffset(mainPos.X + mainSize.X + 10, mainPos.Y + 115)
-            if ProfileSpoofer.info then
-                profileImg.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", ProfileSpoofer.info.userId)
-                profileDisp.Text = ProfileSpoofer.info.displayName
-                profileUser.Text = "@" .. ProfileSpoofer.info.username
-            else
-                profileImg.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", LocalPlayer.UserId)
-                profileDisp.Text = "No Target"
-                profileUser.Text = "@none"
-            end
-        end
+        local pos = UDim2.fromOffset(mainPos.X + mainSize.X + 10, mainPos.Y + 115)
+        if profilePrev.Position ~= pos then profilePrev.Position = pos end
+        local info = ProfileSpoofer.info
+        local image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", info and info.userId or LocalPlayer.UserId)
+        local display = info and info.displayName or "No Target"
+        local username = info and ("@" .. info.username) or "@none"
+        if profileImg.Image ~= image then profileImg.Image = image end
+        if profileDisp.Text ~= display then profileDisp.Text = display end
+        if profileUser.Text ~= username then profileUser.Text = username end
     end, 11)
 end -- Avatar/Profile spoofer scope
 
@@ -6932,12 +7083,16 @@ task.delay(1, function()
 end)
 
 -- Cleanup
+local _priorCleanupHook = getgenv().qzxp_Cleanup
 getgenv().qzxp_Cleanup = function()
     pcall(function()
         Det.alive = false
         Det.resetSF()
         AutoClash.reset()
         for _, conn in pairs(Det.ballConnections) do pcall(function() conn:Disconnect() end) end
+        for _, conn in pairs(Det.apBallConnections or {}) do pcall(function() conn:Disconnect() end) end
+        for _, conn in pairs(Det.tbConnections or {}) do pcall(function() conn:Disconnect() end) end
+        for child in pairs(_ballAttributeConns) do pcall(_unhookBallAttribute, child) end
         for _, connection in ipairs(qzxpUIConnections) do pcall(function() connection:Disconnect() end) end
         for _, conn in ipairs(Det.connections) do pcall(function() conn:Disconnect() end) end
         if getgenv().qzxp_VFXConns then
@@ -6966,6 +7121,7 @@ getgenv().qzxp_Cleanup = function()
             pcall(getgenv().qzxp_StopRender)
             getgenv().qzxp_StopRender = nil
         end
+        if _priorCleanupHook then pcall(_priorCleanupHook); _priorCleanupHook = nil end
         pcall(function() if PRV and PRV.Destroy then PRV.Destroy() end end)
         local cg = GetSafeUIParent()
         for _, o in ipairs(cg:GetChildren()) do
