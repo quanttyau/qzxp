@@ -198,6 +198,21 @@ local function closeDropdown()
     if _openDropdown then pcall(function() _openDropdown:Destroy() end); _openDropdown = nil end
 end
 
+-- Auto-save support: mark config as dirty for debounced save
+local qzxp_autoSaveEnabled = false
+local qzxp_autoSaveQueued = false
+local function qzxp_markDirty()
+    if qzxp_autoSaveQueued then return end
+    qzxp_autoSaveQueued = true
+    task.delay(0.3, function()
+        qzxp_autoSaveQueued = false
+        if qzxp_autoSaveEnabled then
+            local f = getgenv().qzxp_saveConfig
+            if f then f() end
+        end
+    end)
+end
+
 Section = {}; Section.__index = Section
 function Section:_row(h)
     self._rowN += 1
@@ -229,6 +244,7 @@ function Section:AddToggle(id, opts)
     local function set(v, animate)
         v = not not v; if obj.Value == v then return end
         obj.Value = v; apply(v, animate ~= false)
+        qzxp_markDirty()
         if opts.Callback then pcall(opts.Callback, v) end
     end
     obj.SetValue = function(_, v) set(v, false) end
@@ -265,7 +281,8 @@ function Section:AddSlider(id, opts)
     local function set(v)
         v = rv(math.clamp(v, minV, maxV))
         if obj.Value == v then return end
-        obj.Value = v; update(); if opts.Callback then pcall(opts.Callback, v) end
+        obj.Value = v; update(); qzxp_markDirty()
+    if opts.Callback then pcall(opts.Callback, v) end
     end
     obj.SetValue = function(_, v) set(v) end
     local dragging = false
@@ -341,15 +358,15 @@ function Section:AddDropdown(id, opts)
             item.MouseButton1Click:Connect(function()
                 if multi then
                     if sel[v] then sel[v] = nil else sel[v] = true end
-                    refresh(); if opts.Callback then pcall(opts.Callback, v) end
+                    refresh(); qzxp_markDirty(); if opts.Callback then pcall(opts.Callback, v) end
                 else
-                    obj.Value = v; refresh(); closeDropdown(); if opts.Callback then pcall(opts.Callback, v) end
+                    obj.Value = v; refresh(); closeDropdown(); qzxp_markDirty(); if opts.Callback then pcall(opts.Callback, v) end
                 end
             end)
         end
     end)
     refresh()
-    obj.SetValue = function(_, v) obj.Value = v; refresh(); if opts.Callback then pcall(opts.Callback, v) end end
+    obj.SetValue = function(_, v) obj.Value = v; refresh(); qzxp_markDirty(); if opts.Callback then pcall(opts.Callback, v) end end
     obj.SetValues = function(_, v) values = v or {}; if _openDropdown then closeDropdown() end end
     Options[id] = obj; return obj
 end
@@ -377,6 +394,7 @@ function Section:AddKeybind(id, opts)
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
         if listening then
             obj.Value = input.KeyCode; listening = false; suppressUntil = os.clock() + 0.25; refresh()
+            qzxp_markDirty()
             if opts.ChangedCallback then pcall(opts.ChangedCallback, obj.Value) end
         else
             if os.clock() < suppressUntil then return end
@@ -397,6 +415,7 @@ function Section:AddKeybind(id, opts)
     refresh()
     obj.SetValue = function(_, v)
         obj.Value = toKey(v); suppressUntil = os.clock() + 0.25; refresh()
+        qzxp_markDirty()
         if opts.ChangedCallback then pcall(opts.ChangedCallback, obj.Value) end
     end
     Options[id] = obj; return obj
@@ -415,10 +434,12 @@ function Section:AddInput(id, opts)
     local obj = {Value = tostring(opts.Default or "")}
     box.FocusLost:Connect(function(enter)
         obj.Value = box.Text
+        qzxp_markDirty()
         if opts.Callback then pcall(opts.Callback, box.Text, enter) end
     end)
     obj.SetValue = function(_, v)
         box.Text = tostring(v or ""); obj.Value = box.Text
+        qzxp_markDirty()
         if opts.Callback then pcall(opts.Callback, obj.Value) end
     end
     Options[id] = obj; return obj
@@ -606,6 +627,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
         WindowSignal.Tabs = {}
         WindowSignal.Config = config
         WindowSignal.Toggle = true
+        WindowSignal.HideWhenMinimized = false
 
         local Content = Instance.new("ScreenGui")
         local WindowFrame = Instance.new("Frame")
@@ -711,6 +733,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
         SubTitleText.Size = UDim2.new(0, 250, 0, 15)
         SubTitleText.Font = Enum.Font.GothamMedium
         SubTitleText.Text = config.SubTitle or ""
+        SubTitleText.Visible = (config.SubTitle and config.SubTitle ~= "") or false
         SubTitleText.TextColor3 = NeverZen.Theme.Hightlight
         SubTitleText.TextSize = 10
         SubTitleText.TextTransparency = 0.5
@@ -1433,6 +1456,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
                         Callback = function(v)
                             if obj.Value == v then return end
                             obj.Value = v
+                            qzxp_markDirty()
                             if opts.Callback then pcall(opts.Callback, v) end
                         end,
                     })
@@ -1447,6 +1471,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
                     local function changed(v)
                         if obj.Value == v then return end
                         obj.Value = v
+                        qzxp_markDirty()
                         if opts.Callback then pcall(opts.Callback, v) end
                     end
                     local control = nzSlider(self, {
@@ -1489,10 +1514,19 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
         local ToggleWin = function(v)
             if llk then llk.Visible = (v and true) or false end
             if not v then
-                TweenService:Create(WindowFrame, TweenInfo.new(0.7, Enum.EasingStyle.Back, Enum.EasingDirection.In), { Size = UDim2.fromOffset(210,50) }):Play()
-                TweenService:Create(BthFrames, TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(-1,0,0,45) }):Play()
-                TweenService:Create(TabWin, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(1,170,0,45) }):Play()
+                if WindowSignal.HideWhenMinimized then
+                    WindowFrame.Visible = false
+                    Content.Enabled = false
+                else
+                    TweenService:Create(WindowFrame, TweenInfo.new(0.7, Enum.EasingStyle.Back, Enum.EasingDirection.In), { Size = UDim2.fromOffset(210,50) }):Play()
+                    TweenService:Create(BthFrames, TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(-1,0,0,45) }):Play()
+                    TweenService:Create(TabWin, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(1,170,0,45) }):Play()
+                end
             else
+                WindowFrame.Visible = true
+                Content.Enabled = true
+                HeaderText.Position = UDim2.new(0, titleLeft, 0, 6)
+                HeaderText.Size = UDim2.new(0, titleWidth + 4, 0, 16)
                 TweenService:Create(BthFrames, TweenInfo.new(0.7, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(0,0,0,45) }):Play()
                 TweenService:Create(TabWin, TweenInfo.new(0.8, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(0,170,0,45) }):Play()
                 TweenService:Create(WindowFrame, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = WindowSignal.Config.Scale }):Play()
@@ -1580,7 +1614,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
 
     function Fluent:CreateWindow(opts)
         local w = NeverZen.new({Name = opts.Title, Scale = opts.Size,
-            SubTitle = "Combat • Swords • Avatar • Visuals"})
+            SubTitle = ""})
         self.Window = w
         return w
     end
@@ -1888,6 +1922,7 @@ local function _tokenize(uid)
 end
 
 local _remote, _args = nil, nil
+task.defer(function()
 pcall(function()
     local mt = getrawmetatable(game)
     local old = mt.__index
@@ -1911,6 +1946,7 @@ pcall(function()
         return oldnew(self, key, value)
     end)
     setreadonly(mt, true)
+end)
 end)
 
 local SwordAPI = ReplicatedStorage:WaitForChild("Shared", 9e9):WaitForChild("SwordAPI", 9e9)
@@ -3018,6 +3054,7 @@ local function fireSpamBatch(ball, count)
 end
 
 local AP_Acc, AP_Div = 50, 1.1
+local AccMin, AccMax = 25, 75
 local RandAcc, AutoAbility = false, false
 local function computeTriggerDist(spd, ping, curved, acc)
     local reaction = 0.10 + ((acc or 50) - 1) * (0.08 / 99)
@@ -3035,7 +3072,7 @@ spawnTracked(function()
                 if ok and type(v) == "number" and v > 0 then rawPing = v end
             end
             local internal = math.clamp(1.5 - (rawPing / 200) * 1.5, 0, 1.5)
-            AP_Acc = math.clamp(math.floor(internal / 0.015151515151515152 + 1 + 0.5), 1, 100)
+            AP_Acc = math.clamp(math.floor(internal / 0.015151515151515152 + 1 + 0.5), AccMin, AccMax)
             updDiv()
             if Options and Options.Accuracy then pcall(function() Options.Accuracy:SetValue(AP_Acc) end) end
         end
@@ -3561,7 +3598,7 @@ local function apCheck()
     local root = char and char.PrimaryPart
     if not root then return end
     local now = tick()
-    if _apDebounce or now < _apUntilAt then return end
+    if now < _apUntilAt then return end
     local pos       = root.Position
     local pingDist  = math.clamp(getPing() / 100, 5, 17)
     local balls = getAllBalls()
@@ -3570,11 +3607,11 @@ local function apCheck()
     local runtime  = Workspace:FindFirstChild("Runtime")
     local tornado  = runtime and runtime:FindFirstChild("Tornado")
     local tornadoT = tornado and (tornado:GetAttribute("TornadoTime") or 1)
-    local acc = apAccuracy()
+    local acc = math.max(apAccuracy(), 0.1)
     for _, ball in ipairs(balls) do
-        if not ball then return end
+        if not ball then continue end
         local z = ball:FindFirstChild("zoomies")
-        if not z then return end
+        if not z then continue end
         local target = ball:GetAttribute("target")
         local spd    = z.VectorVelocity.Magnitude
         local dist   = (pos - apPosition(ball)).Magnitude
@@ -3587,11 +3624,10 @@ local function apCheck()
             return
         end
         if firstTarget == _lpName and apCurved(ball) then
-            return
+            continue
         end
         if target == _lpName
-           and dist <= pingDist + math.max(spd / n31, 9.5)
-           and acc * 0.8 then
+           and dist <= pingDist + math.max(spd / n31, 9.5) then
             if apFire() then
                 _apLastFire = os.clock()
                 if AnimFix_AP then PlaySingleParryAnimation() end
@@ -4186,7 +4222,8 @@ UA = {
     _savedButtonState  = {},
     original_buy_conns = {},
 }
-do
+task.defer(function()
+    do
     local remotes = ReplicatedStorage:FindFirstChild("Remotes")
     if remotes then
         local psAll = remotes:FindFirstChild("ParrySuccessAll")
@@ -4216,7 +4253,8 @@ do
             end
         end
     end
-end
+    end
+end)
 function UA.set_sword_override(_, on)
     for _, c in ipairs(UA.fire_connections) do
         pcall(function()
@@ -5064,6 +5102,7 @@ local DEFAULT_V = {
 }
 local Config = { Enabled = true, V = {}, Custom = {} }
 for k, v in pairs(DEFAULT_V) do Config.V[k] = v end
+getgenv().qzxp_Config = Config
 
 local function loadConfig()
     if not canFile then return end
@@ -5086,14 +5125,37 @@ local function loadConfig()
         end
         Config.Custom = l
     end
+    Config.Options = {}
+    if type(data.Options) == "table" then
+        for id, entry in pairs(data.Options) do
+            if type(id) == "string" and type(entry) == "table" and entry.v ~= nil then
+                Config.Options[id] = entry
+            end
+        end
+    end
 end
 local function saveConfig()
     if not canFile then return end
     pcall(function()
         if isfolder and makefolder and not isfolder(DIR) then makefolder(DIR) end
+        local optionsData = {}
+        if type(Fluent) == "table" and type(Fluent.Options) == "table" then
+            for id, opt in pairs(Fluent.Options) do
+                if type(id) == "string" and id:sub(1, 2) ~= "__" and opt and opt.Value ~= nil then
+                    local v = opt.Value
+                    if typeof(v) == "EnumItem" then
+                        optionsData[id] = {t = "EnumItem", c = tostring(v.EnumType), v = v.Name}
+                    elseif v ~= nil then
+                        optionsData[id] = {t = type(v), v = v}
+                    end
+                end
+            end
+        end
+        Config.Options = optionsData
         writefile(FILE, HttpService:JSONEncode(Config))
     end)
 end
+getgenv().qzxp_saveConfig = saveConfig
 loadConfig()
 
 -- ============ MAPTEX ============
@@ -5482,12 +5544,46 @@ sC._rowN += 2
 local function makeCustomToggleRow(name, value, initialOn, onChange)
     local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0 }, customListRow)
     mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = UITheme.Border, BackgroundTransparency = 0.4, BorderSizePixel = 0 }, row)
-    mk("TextLabel", { Size = UDim2.new(1, -252, 1, 0), Position = UDim2.fromOffset(16, 0), BackgroundTransparency = 1,
+    local nameBox = mk("TextBox", { Size = UDim2.new(1, -252, 1, 0), Position = UDim2.fromOffset(16, 0), BackgroundTransparency = 1,
         Font = FONT, TextSize = 12, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd, Text = tostring(name) }, row)
-    mk("TextLabel", { Size = UDim2.new(0, 90, 1, 0), Position = UDim2.new(1, -230, 0, 0), BackgroundTransparency = 1,
+        Text = tostring(name) }, row)
+    nameBox.FocusLost:Connect(function()
+        local nv = (nameBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub('"', "")
+        if nv == "" then nameBox.Text = name; return end
+        if nv ~= name then
+            for i, e in ipairs(Config.Custom) do
+                if e.name == name then
+                    e.name = nv
+                    break
+                end
+            end
+            name = nv
+            saveConfig()
+            if Config.Enabled then pcall(FF.restore, name); pcall(FF.set, nv, value or "") end
+            if Config.Enabled then Flags.applyAll() end
+            FF.refreshMaterials()
+        end
+    end)
+    local valBox = mk("TextBox", { Size = UDim2.new(0, 90, 1, 0), Position = UDim2.new(1, -230, 0, 0), BackgroundTransparency = 1,
         Font = FONTM, TextSize = 11, TextColor3 = UITheme.TextDim, TextXAlignment = Enum.TextXAlignment.Right,
-        TextTruncate = Enum.TextTruncate.AtEnd, Text = tostring(value or "") }, row)
+        Text = tostring(value or "") }, row)
+    valBox.FocusLost:Connect(function()
+        local vv = (valBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if vv == "" then vv = "true" end
+        if vv ~= (value or "") then
+            value = vv
+            for i, e in ipairs(Config.Custom) do
+                if e.name == name then
+                    e.value = vv
+                    break
+                end
+            end
+            saveConfig()
+            if Config.Enabled then pcall(FF.restore, name); pcall(FF.set, name, vv) end
+            if Config.Enabled then Flags.applyAll() end
+            FF.refreshMaterials()
+        end
+    end)
     local sw = mk("Frame", { Size = UDim2.new(0, 40, 0, 22), Position = UDim2.new(1, -56, 0.5, -11),
         BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, ClipsDescendants = true }, row)
     addCorner(sw, 11); addStroke(sw, UITheme.Border, 1, 0.35)
@@ -6079,11 +6175,17 @@ do
         ChangedCallback = function() end})
     s1:AddDropdown("APMode", {Title = "Key Mode", Values = {"Toggle", "Hold"}, Default = "Toggle", Multi = false,
         Callback = function(v) APKeyMode = v end})
-    s1:AddSlider("Accuracy", {Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 1, Callback = function(v)
+    s1:AddSlider("Accuracy", {Title = "Accuracy", Default = 50, Min = 1, Max = 100, Rounding = 0, Callback = function(v)
         AP_Acc = v; updDiv()
     end})
     s1:AddToggle("RandAccToggle", {Title = "Auto Accuracy", Default = false, Callback = function(v)
         RandAcc = v
+    end})
+    s1:AddSlider("AccMin", {Title = "Auto Acc Min", Default = 25, Min = 1, Max = 100, Rounding = 0, Callback = function(v)
+        AccMin = v
+    end})
+    s1:AddSlider("AccMax", {Title = "Auto Acc Max", Default = 75, Min = 1, Max = 100, Rounding = 0, Callback = function(v)
+        AccMax = v
     end})
     s1:AddDropdown("CurveMode", {Title = "Curve", Values = CURVES, Default = "Camera", Multi = false, Callback = function(v)
         CurveMode = v
@@ -7005,13 +7107,23 @@ end)()
 ;(function()
 do
     local fpsSection = Tabs.Utility:AddSection("Performance")
+    local FPSEnabled  = true
     local FPSUncapped = false
     local FPSCap      = 240
     local _setFPS = type(setfpscap) == "function" and setfpscap or nil
     local function applyFPS()
         if type(_setFPS) ~= "function" then return end
-        pcall(function() _setFPS(FPSUncapped and 1000 or FPSCap) end)
+        if FPSEnabled then
+            pcall(function() _setFPS(FPSUncapped and 1000 or FPSCap) end)
+        else
+            pcall(function() _setFPS(0) end)
+        end
     end
+    fpsSection:AddToggle("FPSEnabled", {
+        Title = "Enable FPS Cap",
+        Default = true,
+        Callback = function(v) FPSEnabled = v; applyFPS() end,
+    })
     fpsSection:AddToggle("FPSUncap", {
         Title = "Uncap FPS",
         Default = false,
@@ -7025,7 +7137,7 @@ do
         Rounding = 0,
         Callback = function(v)
             FPSCap = math.clamp(math.floor(v + 0.5), 15, 360)
-            if not FPSUncapped then applyFPS() end
+            if FPSEnabled and not FPSUncapped then applyFPS() end
         end,
     })
     task.defer(function()
@@ -7043,8 +7155,11 @@ do
     local interfaceSection = Tabs.Settings:AddSection("Interface")
     interfaceSection:AddKeybind("GUIToggleKey", {Title = "GUI Toggle", Default = "LeftControl", Callback = function()
         local w = Fluent.Window
-        if w and w._gui then w._gui.Enabled = not w._gui.Enabled end
+        if w then w:SetOpen(not w.Toggle) end
     end, ChangedCallback = function() end})
+    interfaceSection:AddToggle("HideWhenMinimized", {Title = "Hide When Minimized", Default = false, Callback = function(v)
+        if Fluent.Window then Fluent.Window.HideWhenMinimized = v end
+    end})
 
 end
 end)()
@@ -7077,6 +7192,27 @@ pcall(function()
         Fluent:Notify({Title = "Sword Changer", Content = "Off - this config has Unlock All enabled", Duration = 4})
     end
 end)
+-- Apply saved UI options (combat, swords, avatar, visuals, utility, fflags)
+pcall(function()
+    local _appCfg = getgenv().qzxp_Config
+    if type(_appCfg.Options) == "table" and next(_appCfg.Options) then
+        for id, entry in pairs(_appCfg.Options) do
+            local opt = Options[id]
+            if opt and opt.SetValue and entry.v ~= nil then
+                local v = entry.v
+                if entry.t == "EnumItem" and type(entry.c) == "string" and type(entry.v) == "string" then
+                    local ok3, e = pcall(function() return Enum[entry.c][entry.v] end)
+                    if ok3 and e then v = e end
+                end
+                if id == "SofDelay" and type(v) == "number" and v > 0.35 then
+                    v = v / 1000
+                end
+                pcall(function() opt:SetValue(v) end)
+            end
+        end
+    end
+end)
+qzxp_autoSaveEnabled = true
 task.delay(1, function()
     getgenv().qzxp_suppressNotify = false
     Fluent:Notify({Title = "qzxp", Content = "Loaded", Duration = 4})
