@@ -3867,34 +3867,170 @@ spawnTracked(function()
     watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
 end)
 
--- Spam engine
-local SpamRPS, SpamInt, SpamDetect = 100, 0.01, true
-local function spamOk()
-    if not SpamDetect then return true end
-    local blocked = (Det.InfDet and Det.InfOn) or (Det.DSDet and Det.DSOn) or (Det.THDet and Det.isTimeHole()) or (Det.SFDet and (Det.SFOn or Det.SFActive))
-    if blocked then return false end
-    return true
+-- Spam engine: Tsukuyomi spam with qzxp's original PlaySingleParryAnimation.
+local SpamRPS, SpamInt, SpamDetect = 200, 0.005, true
+local TsukuyomiSafeMode = true
+
+do
+    local function spamOk()
+        if not SpamDetect then return true end
+        local blocked = (Det.InfDet and Det.InfOn) or (Det.DSDet and Det.DSOn)
+            or (Det.THDet and Det.isTimeHole()) or (Det.SFDet and (Det.SFOn or Det.SFActive))
+        return not blocked
+    end
+
+    local Mouse = LocalPlayer:GetMouse()
+    local CollectionService = game:GetService("CollectionService")
+
+    local function IsClashing()
+        local char = LocalPlayer.Character
+        if not char or not char.PrimaryPart then return false end
+        local bf = Workspace:FindFirstChild("Balls")
+        if not bf then return false end
+        for _, ball in pairs(bf:GetChildren()) do
+            if ball:GetAttribute("realBall") then
+                local dist = (char.PrimaryPart.Position - ball.Position).Magnitude
+                if ball:GetAttribute("Target") == LocalPlayer.Name and dist <= 12 then
+                    return true, ball
+                end
+            end
+        end
+        return false, nil
+    end
+
+    local function GetParryData()
+        local PlayerPositions = {}
+        local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+        local MousePos
+        if not isMobile then
+            MousePos = {Mouse.X, Mouse.Y}
+        else
+            local vp = Workspace.CurrentCamera.ViewportSize
+            MousePos = {vp.X / 2, vp.Y / 2}
+        end
+
+        local isInLobbyTraining = LocalPlayer:GetAttribute("LobbyTraining")
+            and LocalPlayer.Character
+            and LocalPlayer.Character.Parent == Workspace.Dead
+
+        if isInLobbyTraining then
+            local dead = Workspace:FindFirstChild("Dead")
+            if dead then
+                for _, pc in ipairs(dead:GetChildren()) do
+                    local player = Players:GetPlayerFromCharacter(pc)
+                    if player and player:GetAttribute("LobbyTraining") and pc.PrimaryPart then
+                        PlayerPositions[pc.Name] = Workspace.CurrentCamera:WorldToScreenPoint(pc.PrimaryPart.Position)
+                    end
+                end
+            end
+            for _, target in CollectionService:GetTagged("LobbyTrainingTarget") do
+                PlayerPositions[target.Name] = Workspace.CurrentCamera:WorldToScreenPoint(target.Position)
+            end
+        else
+            local aliveFolder = Workspace:FindFirstChild("Alive")
+            if aliveFolder then
+                for _, entity in ipairs(aliveFolder:GetChildren()) do
+                    if entity.PrimaryPart then
+                        PlayerPositions[entity.Name] = Workspace.CurrentCamera:WorldToScreenPoint(entity.PrimaryPart.Position)
+                    end
+                end
+            end
+        end
+
+        local camCF = Workspace.CurrentCamera.CFrame
+        local clashing, clashBall = IsClashing()
+        if clashing and clashBall then
+            camCF = CFrame.new(camCF.Position, clashBall.Position)
+        end
+        return {CFrame = camCF, Positions = PlayerPositions, Mouse = MousePos}
+    end
+
+    local function ShouldFireLegit()
+        local char = LocalPlayer.Character
+        if not char or not char.PrimaryPart then return false end
+        local bf = Workspace:FindFirstChild("Balls")
+        if not bf then return false end
+        for _, ball in ipairs(bf:GetChildren()) do
+            if ball:GetAttribute("realBall") then
+                if ball:GetAttribute("target") == LocalPlayer.Name then return true end
+                local okd, dist = pcall(function()
+                    return (char.PrimaryPart.Position - ball.Position).Magnitude
+                end)
+                if okd and dist < 65 then return true end
+            end
+        end
+        return false
+    end
+
+    local function Tokenize(uid)
+        local time_str = tostring(math.floor(Workspace:GetServerTimeNow() * 100))
+        local key = _token(uid, "TIME")
+        local chars = table.create(#time_str)
+        for i = 1, #time_str do
+            chars[i] = string.char(bit32.bxor(
+                (string.byte(time_str, i) + i) % 256,
+                string.byte(key, (i - 1) % #key + 1)
+            ))
+        end
+        return table.concat(chars)
+    end
+
+    local macroParryData = nil
+    local macroDataStamp = 0
+    local timeAccumulator = 0
+
+    local function MacroBurst(fires)
+        if not _remote or not _args or not _tokenFound or not _token then return end
+        local data = macroParryData
+        if not data then return end
+        local okTok, token = pcall(Tokenize, _args[2])
+        if not okTok or not token or token == "" then return end
+        pcall(function()
+            local remote = _remote
+            local a1 = _args[1]
+            local a2 = _args[2]
+            local cframe = data.CFrame
+            local pos = data.Positions
+            local mouse = data.Mouse
+            for _ = 1, fires do
+                remote:FireServer(a1, a2, token, 0.5, cframe, pos, mouse, false)
+            end
+        end)
+    end
+
+    addRenderHandler(function(dt)
+        if not Spam_On and not AutoClash.active then timeAccumulator = 0 return end
+        if TsukuyomiSafeMode and not IsBlockLegit() then timeAccumulator = 0 return end
+        if not ShouldFireLegit() then timeAccumulator = 0 return end
+
+        -- Keep qzxp's original safety and detection controls functional.
+        local char = LocalPlayer.Character
+        if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild("SingularityCape") then
+            timeAccumulator = 0
+            return
+        end
+        if not spamOk() then timeAccumulator = 0 return end
+
+        local now = os.clock()
+        if not macroParryData or now - macroDataStamp >= 0.04 then
+            macroParryData = GetParryData()
+            macroDataStamp = now
+        end
+
+        local targetCPS = math.clamp(SpamRPS or 200, 5, 500)
+        local interval = 1 / targetCPS
+        timeAccumulator += dt
+        if timeAccumulator >= interval then
+            local fires = math.floor(timeAccumulator / interval)
+            timeAccumulator -= fires * interval
+            if timeAccumulator > interval * 2 then timeAccumulator = 0 end
+            if fires > 200 then fires = 200 end
+            MacroBurst(fires)
+            -- Exact original qzxp animation call and cooldown/bypass behavior.
+            if AnimFix_Spam then PlaySingleParryAnimation() end
+        end
+    end, 4)
 end
-local timeAccumulator = 0
-addPostSimHandler(function(dt)
-    if not Spam_On and not AutoClash.active then timeAccumulator = 0 return end
-    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
-    if not _frameBlockOk then timeAccumulator = 0 return end
-    local char = LocalPlayer.Character
-    if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild('SingularityCape') then
-        timeAccumulator = 0; return
-    end
-    if not spamOk() then timeAccumulator = 0 return end
-    local interval = (SpamInt and SpamInt > 0) and SpamInt or 0.01
-    timeAccumulator += dt
-    if timeAccumulator >= interval then
-        local fires = math.floor(timeAccumulator / interval)
-        timeAccumulator -= fires * interval
-        local ball = getBall()
-        if ball then fireSpamBatch(ball, fires) end
-        if AnimFix_Spam then PlaySingleParryAnimation() end
-    end
-end, 4)
 
 -- ============================================================
 -- SWORD CHANGER (fixed revert + real-sword tracking)
@@ -6239,9 +6375,12 @@ do
         ChangedCallback = function() end})
     s3:AddDropdown("SpamMode", {Title = "Key Mode", Values = {"Toggle", "Hold"}, Default = "Toggle", Multi = false,
         Callback = function(v) SpamKeyMode = v end})
+    s3:AddToggle("TsukuyomiSafeMode", {Title = "Safe Mode", Default = true, Callback = function(v)
+        TsukuyomiSafeMode = v
+    end})
     local spamRPSSlider
-    spamRPSSlider = s3:AddSlider("SpamRPS", {Title = "RPS", Default = 100, Min = 5, Max = 1000, Rounding = 0, Callback = function(v)
-        local snapped = math.clamp(math.floor(v / 10 + 0.5) * 10, 5, 1000)
+    spamRPSSlider = s3:AddSlider("SpamRPS", {Title = "CPS", Default = 200, Min = 5, Max = 500, Rounding = 0, Callback = function(v)
+        local snapped = math.clamp(math.floor(v / 5 + 0.5) * 5, 5, 500)
         SpamRPS = snapped; SpamInt = 1 / snapped
         if SpamAnimMatchRPS then SpamAnimRate = snapped end
         if spamRPSSlider and spamRPSSlider.Value ~= snapped then
