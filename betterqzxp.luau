@@ -1654,12 +1654,14 @@ function SaveManager:Save(name)
     Fluent:Notify({Title = "Config", Content = ok and ("Saved: " .. name) or "Save failed", Duration = 3})
 end
 local LOAD_PRIORITY = {
-    ManualSword = 10, AvatarSaver = 10, LockTarget = 10,
+    ManualSword = 10, ManualSwordFX = 10, ManualSwordAnimations = 10,
+    AvatarSaver = 10, LockTarget = 10,
     Accuracy    = 10, SpamRPS     = 10, FPSCap     = 10,
     CurveMode   = 10, HLR = 10, HLG = 10, HLB = 10,
     APKey = 20, SpamKey = 20, TBKey = 20,
     CursorKey = 20, LockKey = 20, GUIToggleKey = 20,
-    SkinToggle = 30, AvatarChanger = 30,
+    ModelToggle = 30, FXToggle = 30, AnimationToggle = 30, AvatarChanger = 30,
+    SkinToggle = 35,
     UnlockAllToggle = 40, ThunderDashToggle = 40,
 }
 function SaveManager:Load(name)
@@ -2199,25 +2201,31 @@ local function swordLibStats()
     return #SwordLib.list, table.concat(parts, " ")
 end
 
--- the single entry point the UI uses: remembers the pick, applies it only while
--- the changer is enabled (so configs / autoload can never stomp the real sword)
-local function applyManualSword(name)
+-- Manual slots are independent: Model, FX (slash VFX/SFX), and Animations.
+-- Selections are remembered while disabled, but only the active slot is applied.
+local function applyManualSword(name, kind)
     if type(name) ~= "string" or name == "" then return false end
+    kind = kind or "Model"
     local hit = resolveExact(name) or searchSwords(name, 1)[1] or name
-    local changed = getgenv().manualSword ~= hit
-    getgenv().manualSword = hit
-    if not getgenv().skinChanger then
+    local env = getgenv()
+    local inputKey = kind == "FX" and "manualSwordFX"
+        or kind == "Animations" and "manualSwordAnimations" or "manualSword"
+    local valueKey = kind == "FX" and "swordFX"
+        or kind == "Animations" and "swordAnimations" or "swordModel"
+    local enabledKey = kind == "FX" and "swordFXEnabled"
+        or kind == "Animations" and "swordAnimationsEnabled" or "swordModelEnabled"
+    local changed = env[inputKey] ~= hit
+    env[inputKey] = hit
+    if not env.skinChanger or not env[enabledKey] then
         if changed and notify then
-            notify({ Title = "Sword Changer", Content = "Selected " .. hit .. " - switch Enabled on", Duration = 3 })
+            notify({Title = kind .. " Changer", Content = "Selected " .. hit .. " - enable its slot and Master", Duration = 3})
         end
         return false
     end
-    getgenv().swordModel = hit
-    getgenv().swordAnimations = hit
-    getgenv().swordFX = hit
-    pcall(getgenv().updateSword)
-    pcall(getgenv().saveLastEquippedSword, hit)
-    if changed and notify then notify({ Title = "Sword Changer", Content = hit, Duration = 2 }) end
+    env[valueKey] = hit
+    if kind == "Model" then pcall(env.saveLastEquippedSword, hit) end
+    pcall(env.updateSword)
+    if changed and notify then notify({Title = kind .. " Changer", Content = hit, Duration = 2}) end
     return true
 end
 -- fill the library in as soon as the shop module exists: it is required
@@ -2244,9 +2252,18 @@ local function PlayParryAnimation()
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
     local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
     if not animator then return end
-    local attribute = character:GetAttribute("CurrentlyEquippedSword")
-                   or LocalPlayer:GetAttribute("CurrentlyEquippedSword")
-    if not attribute then return end
+    local env = getgenv()
+    local attribute
+    if env.qzxp_unlockAllActive or (env.skinChanger and env.swordAnimationsEnabled) then
+        attribute = env.swordAnimations
+    elseif env.skinChanger and type(env.qzxp_realSword) == "string" and env.qzxp_realSword ~= "" then
+        -- A model-only change must not silently change the animation set.
+        attribute = env.qzxp_realSword
+    else
+        attribute = character:GetAttribute("CurrentlyEquippedSword")
+            or LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+    end
+    if not attribute or attribute == "" then return end
     local swordInfo = swordModule:GetSword(attribute)
     if not swordInfo or character ~= LocalPlayer.Character then return end
     for _, track in animationController:GetPlayingAnimationTracks(animator) do
@@ -2878,7 +2895,8 @@ end
 
 local _cachedCFBall = nil
 local function getCurveCF(ballArg)
-    if ArenaAim.active() then return (Workspace.CurrentCamera or Camera).CFrame end
+    -- Parry Lock takes priority over training/arena camera aim as well.
+    if ArenaAim.active() and not LockEnabled then return (Workspace.CurrentCamera or Camera).CFrame end
     if cachedCF and frameCount == lastCFCalcFrame and _cachedCFBall == ballArg then return cachedCF end
     lastCFCalcFrame = frameCount
     _cachedCFBall = ballArg
@@ -3027,7 +3045,24 @@ local function prepareParryPayload(ball)
     end
     return rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}
 end
-local function sendPreparedParry(rcf, ed, mouse)
+
+-- Final common lock override for every script-generated parry payload.
+-- This also covers paths which originally used their own camera/clash/arena aim.
+local function applyParryLock(rcf, mouse, ball)
+    if not LockEnabled then return rcf, mouse end
+    local lockedCF = getCurveCF(ball)
+    local lockPart = LockTarget ~= "None" and findPart(LockTarget) or nil
+    local aimPosition = lockPart and lockPart.Position
+        or (lockedCF.Position + lockedCF.LookVector * 100)
+    local ok, screenPoint = pcall(Camera.WorldToScreenPoint, Camera, aimPosition)
+    if ok and screenPoint then
+        mouse = {math.floor(screenPoint.X), math.floor(screenPoint.Y)}
+    end
+    return lockedCF, mouse
+end
+
+local function sendPreparedParry(rcf, ed, mouse, ball)
+    rcf, mouse = applyParryLock(rcf, mouse, ball)
     -- Generate the token for each actual remote call, as in the original.
     return pcall(function()
         _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, mouse, false)
@@ -3037,19 +3072,20 @@ local function fireRemote(ball)
     if not ball or not ball.Parent then return false end
     if not _remote or not _args or not _tokenFound then return false end
     local rcf, ed, mouse = prepareParryPayload(ball)
-    return sendPreparedParry(rcf, ed, mouse)
+    return sendPreparedParry(rcf, ed, mouse, ball)
 end
 local function fireParryGeneric()
     if not _remote or not _args or not _tokenFound then return false end
-    local rcf, ed, mouse = prepareParryPayload(getBall())
-    return sendPreparedParry(rcf, ed, mouse)
+    local ball = getBall()
+    local rcf, ed, mouse = prepareParryPayload(ball)
+    return sendPreparedParry(rcf, ed, mouse, ball)
 end
 local function fireSpamBatch(ball, count)
     if not ball or not ball.Parent or not _remote or not _args or not _tokenFound then return end
     local rcf, ed, mouse = prepareParryPayload(ball)
     for _ = 1, count do
         if not ball.Parent or not _remote or not _args or not _tokenFound then break end
-        sendPreparedParry(rcf, ed, mouse)
+        sendPreparedParry(rcf, ed, mouse, ball)
     end
 end
 
@@ -3455,6 +3491,7 @@ local function apFire()
             end
         end
     end
+    rcf, mp = applyParryLock(rcf, mp, apFirstBall())
     local ok = pcall(function()
         _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]),
             0.5, rcf, ed, mp, false)
@@ -3992,6 +4029,8 @@ do
             local cframe = data.CFrame
             local pos = data.Positions
             local mouse = data.Mouse
+            -- Spam and AutoClash share this sender; both must honor Parry Lock.
+            cframe, mouse = applyParryLock(cframe, mouse, getBall())
             for _ = 1, fires do
                 remote:FireServer(a1, a2, token, 0.5, cframe, pos, mouse, false)
             end
@@ -4001,7 +4040,8 @@ do
     addRenderHandler(function(dt)
         if not Spam_On and not AutoClash.active then timeAccumulator = 0 return end
         if TsukuyomiSafeMode and not IsBlockLegit() then timeAccumulator = 0 return end
-        if not ShouldFireLegit() then timeAccumulator = 0 return end
+        -- Manual spam runs continuously while active; AutoClash keeps its proximity gate.
+        if not Spam_On and AutoClash.active and not ShouldFireLegit() then timeAccumulator = 0 return end
 
         -- Keep qzxp's original safety and detection controls functional.
         local char = LocalPlayer.Character
@@ -4056,11 +4096,27 @@ getgenv().saveLastEquippedSword = function(n)
 end
 local s = loadSaved()
 do
-    getgenv().skinChanger = false
-    getgenv().manualSword = ""   -- never inherit a typed name from a previous run
-    getgenv().swordModel = type(getgenv().swordModel) == "string" and getgenv().swordModel ~= "" and getgenv().swordModel or s
-    getgenv().swordAnimations = type(getgenv().swordAnimations) == "string" and getgenv().swordAnimations ~= "" and getgenv().swordAnimations or s
-    getgenv().swordFX = type(getgenv().swordFX) == "string" and getgenv().swordFX ~= "" and getgenv().swordFX or s
+    local env = getgenv()
+    env.skinChanger = false -- master switch for all three manual slots
+    env.swordModelEnabled = true
+    env.swordFXEnabled = true
+    env.swordAnimationsEnabled = true
+    env.manualSword = "" -- model input; retained for old-config compatibility
+    env.manualSwordFX = ""
+    env.manualSwordAnimations = ""
+    env.swordModel = type(env.swordModel) == "string" and env.swordModel ~= "" and env.swordModel or s
+    env.swordAnimations = type(env.swordAnimations) == "string" and env.swordAnimations ~= "" and env.swordAnimations or s
+    env.swordFX = type(env.swordFX) == "string" and env.swordFX ~= "" and env.swordFX or s
+end
+
+local function manualModelActive()
+    return getgenv().skinChanger and getgenv().swordModelEnabled
+end
+local function manualFXActive()
+    return getgenv().skinChanger and getgenv().swordFXEnabled
+end
+local function manualAnimationsActive()
+    return getgenv().skinChanger and getgenv().swordAnimationsEnabled
 end
 
 local realSword = ""
@@ -4069,7 +4125,7 @@ local function trackReal()
     local c = LocalPlayer.Character; if not c then return end
     if _realSwordConn then pcall(function() _realSwordConn:Disconnect() end) end
     _realSwordConn = c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
-        if not getgenv().skinChanger and not getgenv().qzxp_unlockAllActive then
+        if not manualModelActive() and not getgenv().qzxp_unlockAllActive then
             realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
             getgenv().qzxp_realSword = realSword
         end
@@ -4120,8 +4176,24 @@ local function slashName(n)
     local ok, d = pcall(function() return swordModule:GetSword(e) end)
     return (ok and d and d.SlashName) or "SlashEffect"
 end
+local function effectiveFX(fallback)
+    if getgenv().qzxp_unlockAllActive or manualFXActive() then
+        local selected = getgenv().swordFX
+        if type(selected) == "string" and selected ~= "" then return selected end
+    end
+    if type(realSword) == "string" and realSword ~= "" then return realSword end
+    return fallback or ""
+end
+local function effectiveAnimations(fallback)
+    if getgenv().qzxp_unlockAllActive or manualAnimationsActive() then
+        local selected = getgenv().swordAnimations
+        if type(selected) == "string" and selected ~= "" then return selected end
+    end
+    if type(realSword) == "string" and realSword ~= "" then return realSword end
+    return fallback or ""
+end
 local function refreshSlash()
-    local fx = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
+    local fx = effectiveFX("")
     getgenv().slashName = fx ~= "" and slashName(fx) or "SlashEffect"
 end
 refreshSlash()
@@ -4146,13 +4218,17 @@ local function equip(name, notifyServer)
         local att = 0
         while not sc and att < 20 do task.wait(0.5); att += 1 end
         if not sc then return end
-        pcall(function() if sc.SetSword then sc:SetSword(exact) end end)
+        -- SetSword is the game's full sword-behavior driver, not just a parry
+        -- animation lookup. Feed it the animation slot so its complete pose,
+        -- grip/position offsets, and animation handling come from that sword.
+        local animationSword = effectiveAnimations(exact)
+        pcall(function() if sc.SetSword then sc:SetSword(animationSword) end end)
         pcall(function()
             if notifyServer and rs.Remotes:FindFirstChild("FireSwordInfo") then
                 rs.Remotes.FireSwordInfo:FireServer(exact)
             end
-            if sc.currentSword ~= nil then pcall(function() sc.currentSword = exact end) end
-            if sc.SwordFX ~= nil then pcall(function() sc.SwordFX = exact end) end
+            if sc.currentSword ~= nil then pcall(function() sc.currentSword = animationSword end) end
+            if sc.SwordFX ~= nil then pcall(function() sc.SwordFX = effectiveFX(exact) end) end
         end)
     end)
     return true
@@ -4160,15 +4236,22 @@ end
 getgenv().updateSword = function()
     refreshSlash()
     AnimFix_Cache = {}
-    if getgenv().skinChanger and getgenv().swordModel ~= "" then
-        -- the same trick Unlock All uses: stop the game's own FireSwordInfo
-        -- handler from putting the real sword straight back on
+    if getgenv().qzxp_unlockAllActive then return end -- Unlock All owns all three while active
+    if manualModelActive() and getgenv().swordModel ~= "" then
+        -- Model only: stop FireSwordInfo restoring the real equipped model.
         pcall(function()
             local ua = getgenv().qzxp_UA
             if ua and type(ua.set_sword_override) == "function" then ua:set_sword_override(true) end
         end)
         getgenv().saveLastEquippedSword(getgenv().swordModel)
         equip(getgenv().swordModel, false)
+    else
+        -- Disabling Model must not disable the independent FX/animation slots.
+        pcall(function()
+            local ua = getgenv().qzxp_UA
+            if ua and type(ua.set_sword_override) == "function" then ua:set_sword_override(false) end
+        end)
+        if realSword ~= "" then equip(realSword, false) end
     end
 end
 getgenv().revertSword = function()
@@ -4199,7 +4282,7 @@ end
 
 spawnTracked(function()
     while task.wait(0.5) do
-        if getgenv().skinChanger and getgenv().swordModel ~= "" then
+        if manualModelActive() and getgenv().swordModel ~= "" then
             local char = LocalPlayer.Character
             if char then
                 local want = resolve(getgenv().swordModel)
@@ -4245,8 +4328,8 @@ spawnTracked(function()
                                 for _, a in ipairs(args) do
                                     if tostring(a) == _lpName or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then isMe = true; break end
                                 end
-                                if isMe and (getgenv().skinChanger or getgenv().qzxp_unlockAllActive) then
-                                    local fx = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
+                                if isMe and (manualFXActive() or getgenv().qzxp_unlockAllActive) then
+                                    local fx = effectiveFX("")
                                     refreshSlash()
                                     local sf, slF = false, false
                                     for i, a in ipairs(args) do
@@ -4279,7 +4362,7 @@ spawnTracked(function()
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
-    if (getgenv().skinChanger or getgenv().qzxp_unlockAllActive) and getgenv().swordModel ~= "" then
+    if (manualModelActive() or getgenv().qzxp_unlockAllActive) and getgenv().swordModel ~= "" then
         task.wait(2)
         local char = LocalPlayer.Character
         if char then
@@ -4298,12 +4381,7 @@ LocalPlayer.CharacterAdded:Connect(function()
 end)
 LocalPlayer.CharacterAdded:Connect(function()
     if getgenv().skinChanger then
-        getgenv().skinChanger = false
-        if getgenv().setSkinUI then getgenv().setSkinUI(false) end
-        task.wait(2)
-        getgenv().skinChanger = true
-        if getgenv().setSkinUI then getgenv().setSkinUI(true) end
-        task.wait(0.5)
+        task.wait(2.5)
         pcall(getgenv().updateSword)
     end
 end)
@@ -4651,7 +4729,7 @@ function UA.restore_sword(_)
     UA.selected_sword = nil
     UA:set_sword_override(false)
     getgenv().qzxp_unlockAllActive = false
-    if getgenv().skinChanger and getgenv().swordModel ~= "" then
+    if getgenv().skinChanger then
         pcall(getgenv().updateSword)
     elseif prev and prev ~= "" then
         UA:equip_sword(prev, true)
@@ -6434,48 +6512,105 @@ do
     end})
 end
 do
-    local s5 = Tabs.Swords:AddSection("Sword Changer")
-    local skinRef = s5:AddToggle("SkinToggle", {Title = "Enabled", Default = false, Callback = function(v)
-        getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
+    local s5 = Tabs.Swords:AddSection("Manual Sword Changers")
+    local function syncManualSlot(kind)
+        local env = getgenv()
+        local inputKey = kind == "FX" and "manualSwordFX"
+            or kind == "Animations" and "manualSwordAnimations" or "manualSword"
+        local valueKey = kind == "FX" and "swordFX"
+            or kind == "Animations" and "swordAnimations" or "swordModel"
+        local selected = env[inputKey]
+        if type(selected) == "string" and selected ~= "" then env[valueKey] = selected end
+    end
+    local function syncAllManualSlots()
+        syncManualSlot("Model")
+        syncManualSlot("FX")
+        syncManualSlot("Animations")
+    end
+
+    local skinRef = s5:AddToggle("SkinToggle", {Title = "Master Enabled", Default = false, Callback = function(v)
+        getgenv().skinChanger = v
+        getgenv().skinChangerEnabled = v
         if v then
-            -- only one sword driver at a time: turning the changer on switches Unlock All off
+            syncAllManualSlots()
+            -- Manual master and Unlock All remain mutually exclusive.
             local uaOpt = Options.UnlockAllToggle
             if uaOpt and uaOpt.Value then
                 uaOpt:SetValue(false)
                 notify({Title = "Sword Changer", Content = "Unlock All switched off", Duration = 2})
             end
-            local m = getgenv().manualSword
-            if type(m) == "string" and m ~= "" then
-                getgenv().swordModel = m; getgenv().swordAnimations = m; getgenv().swordFX = m
-            end
-            if type(getgenv().swordModel) == "string" and getgenv().swordModel ~= "" then
-                pcall(getgenv().updateSword)
-            end
+            pcall(getgenv().updateSword)
         else
             pcall(getgenv().revertSword)
         end
     end})
     getgenv().setSkinUI = function(v)
-        if skinRef and skinRef.Value ~= v then
-            skinRef:SetValue(v)
-            getgenv().skinChanger = v; getgenv().skinChangerEnabled = v
-        end
+        if skinRef and skinRef.Value ~= v then skinRef:SetValue(v) end
     end
-    s5:AddInput("ManualSword", {Title = "Sword Name", Default = "", Placeholder = "type sword name...", Callback = function(v)
+
+    s5:AddToggle("ModelToggle", {Title = "Model Enabled", Default = true, Callback = function(v)
+        getgenv().swordModelEnabled = v
+        if v then syncManualSlot("Model") end
+        if getgenv().skinChanger then pcall(getgenv().updateSword) end
+    end})
+    s5:AddInput("ManualSword", {Title = "Sword Model", Default = "", Placeholder = "model sword name...", Callback = function(v)
         local n = v and v:match("^%s*(.-)%s*$") or ""
         if n == "" then
             getgenv().manualSword = ""
+            getgenv().swordModel = ""
+            if getgenv().skinChanger then pcall(getgenv().updateSword) end
             return
         end
-        -- the typed text goes through the real search engine: exact, prefix,
-        -- substring or a one/two letter typo, never a silent miss
         local hit = resolveExact(n) or searchSwords(n, 1)[1]
         if not hit then
-            notify({Title = "Sword Changer", Content = "No sword matching '" .. n .. "'", Duration = 4})
+            notify({Title = "Model Changer", Content = "No sword matching '" .. n .. "'", Duration = 4})
             return
         end
-        applyManualSword(hit)
+        applyManualSword(hit, "Model")
     end})
+
+    s5:AddToggle("FXToggle", {Title = "Slash VFX/SFX Enabled", Default = true, Callback = function(v)
+        getgenv().swordFXEnabled = v
+        if v then syncManualSlot("FX") end
+        if getgenv().skinChanger then pcall(getgenv().updateSword) end
+    end})
+    s5:AddInput("ManualSwordFX", {Title = "Slash VFX/SFX", Default = "", Placeholder = "effect sword name...", Callback = function(v)
+        local n = v and v:match("^%s*(.-)%s*$") or ""
+        if n == "" then
+            getgenv().manualSwordFX = ""
+            getgenv().swordFX = ""
+            if getgenv().skinChanger then pcall(getgenv().updateSword) end
+            return
+        end
+        local hit = resolveExact(n) or searchSwords(n, 1)[1]
+        if not hit then
+            notify({Title = "FX Changer", Content = "No sword matching '" .. n .. "'", Duration = 4})
+            return
+        end
+        applyManualSword(hit, "FX")
+    end})
+
+    s5:AddToggle("AnimationToggle", {Title = "Animations Enabled", Default = true, Callback = function(v)
+        getgenv().swordAnimationsEnabled = v
+        if v then syncManualSlot("Animations") end
+        if getgenv().skinChanger then pcall(getgenv().updateSword) end
+    end})
+    s5:AddInput("ManualSwordAnimations", {Title = "Sword Animations", Default = "", Placeholder = "animation sword name...", Callback = function(v)
+        local n = v and v:match("^%s*(.-)%s*$") or ""
+        if n == "" then
+            getgenv().manualSwordAnimations = ""
+            getgenv().swordAnimations = ""
+            if getgenv().skinChanger then pcall(getgenv().updateSword) end
+            return
+        end
+        local hit = resolveExact(n) or searchSwords(n, 1)[1]
+        if not hit then
+            notify({Title = "Animation Changer", Content = "No sword matching '" .. n .. "'", Duration = 4})
+            return
+        end
+        applyManualSword(hit, "Animations")
+    end})
+
     local s5b = Tabs.Swords:AddSection("Unlock All (Swords)")
     s5b:AddToggle("UnlockAllToggle", {Title = "Enabled", Default = false, Callback = function(v)
         if v and getgenv().skinChanger then
@@ -6485,13 +6620,13 @@ do
                 getgenv().skinChanger = false; getgenv().skinChangerEnabled = false
                 pcall(function() if getgenv().revertSword then getgenv().revertSword() end end)
             end
-            notify({Title = "Unlock All", Content = "Sword Changer switched off", Duration = 2})
+            notify({Title = "Unlock All", Content = "Manual Master switched off", Duration = 2})
         end
         UA:set_enabled(v)
         notify({Title = "Unlock All", Content = v and "On" or "Off", Duration = 2})
     end})
     if type(s5b.AddLabel) == "function" then
-        s5b:AddLabel("Turning this on switches the Sword Changer off.")
+        s5b:AddLabel("Turning this on switches the manual Master off.")
     end
     s5b:AddButton({Title = "Refresh Shop", Callback = function()
         if UA.enabled then UA:schedule_refresh() end
@@ -7351,6 +7486,11 @@ pcall(function()
         end
     end
 end)
+-- The legacy second application pass is unordered; enforce Unlock All priority again.
+pcall(function()
+    local uaOpt, skOpt = Options.UnlockAllToggle, Options.SkinToggle
+    if uaOpt and skOpt and uaOpt.Value and skOpt.Value then skOpt:SetValue(false) end
+end)
 qzxp_autoSaveEnabled = true
 task.delay(1, function()
     getgenv().qzxp_suppressNotify = false
@@ -7415,6 +7555,8 @@ getgenv().qzxp_Cleanup = function()
             end
         end)
         getgenv().skinChanger = nil; getgenv().skinChangerEnabled = nil
+        getgenv().swordModelEnabled = nil; getgenv().swordFXEnabled = nil; getgenv().swordAnimationsEnabled = nil
+        getgenv().manualSword = nil; getgenv().manualSwordFX = nil; getgenv().manualSwordAnimations = nil
         getgenv().qzxp_unlockAllActive = nil
         getgenv().swordModel = nil; getgenv().swordAnimations = nil; getgenv().swordFX = nil
         getgenv().slashName = nil; getgenv().updateSword = nil; getgenv().revertSword = nil
