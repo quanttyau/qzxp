@@ -1,16 +1,263 @@
 -- CREDITS: S14X (spam, anim, fflags), EAGLE HUB, ANGELI (triggerbot), OXY (autoparry)
 
--- Dispose the previous run before replacing shared cleanup references.
+local RawTask, RawInstance = task, Instance
+local env = getgenv()
+local launch = {}
+env.qzxp_Launch = launch
+local previous = env.qzxp_Runtime
+local previousCleanup = env.qzxp_Cleanup
+local previousStopRender = env.qzxp_StopRender
+local previousThreads = env.qzxp_Threads
+local previousVFX = env.qzxp_VFXConns
+local previousDisabledVFX = env.qzxp_VFXDisabled
+local replacing = type(previous) == "table" or type(previousCleanup) == "function"
+local function cleanupBeforeLaunch(label, callback)
+    if type(callback) ~= "function" then return end
+    local ok, err = pcall(callback)
+    if not ok then error("[qzxp] Previous " .. label .. " failed: " .. tostring(err)) end
+end
+if type(previousCleanup) == "function" then
+    cleanupBeforeLaunch("cleanup", previousCleanup)
+elseif type(previous) == "table" then
+    cleanupBeforeLaunch("runtime cleanup", previous.stop)
+end
+if env.qzxp_Launch ~= launch then return end
+if type(previous) == "table" then
+    local deadline = os.clock() + 5
+    while previous.stopping and not previous.finished and os.clock() < deadline and env.qzxp_Launch == launch do
+        RawTask.wait()
+    end
+    if env.qzxp_Launch ~= launch then return end
+    if (previous.stopping and not previous.finished) or previous.alive == true then
+        error("[qzxp] Previous runtime has not finished unloading; new launch cancelled.")
+    end
+end
+if type(previous) ~= "table" or previous.finished ~= true then
+    cleanupBeforeLaunch("render cleanup", previousStopRender)
+    if env.qzxp_Launch ~= launch then return end
+    for _, thread in pairs(previousThreads or {}) do
+        if thread ~= coroutine.running() then pcall(RawTask.cancel, thread) end
+    end
+    for _, conn in pairs(previousVFX or {}) do pcall(function() conn:Disconnect() end) end
+    for _, conn in pairs(previousDisabledVFX or {}) do pcall(function() conn:Enable() end) end
+end
+for _, id in ipairs({"AP", "TB", "Spam"}) do
+    pcall(function() game:GetService("RunService"):UnbindFromRenderStep("qzxp_CombatLoop_" .. id) end)
+end
+
+local function uiRoots()
+    local roots = {}
+    local function add(root)
+        if root and not table.find(roots, root) then table.insert(roots, root) end
+    end
+    pcall(function()
+        local player = game:GetService("Players").LocalPlayer
+        add(player and player:FindFirstChildOfClass("PlayerGui"))
+    end)
+    pcall(function() add(game:GetService("CoreGui")) end)
+    if type(gethui) == "function" then pcall(function() add(gethui()) end) end
+    return roots
+end
+local knownUI = {qzxp_UI=true, qzxp_Notify=true, qzxp_LockIndicator=true,
+    qzxp_Stats=true, q_KB=true, q_BS=true}
+local stopTimedOut = false
+for _, root in ipairs(uiRoots()) do
+    pcall(function()
+        for _, child in ipairs(root:GetDescendants()) do
+            if child:IsA("BindableEvent") and child.Name == "qzxp_RuntimeStop" and child:GetAttribute("qzxpOwned") then
+                replacing = true
+                child:Fire()
+                local deadline = os.clock() + 5
+                while child.Parent and not child:GetAttribute("Stopped") and os.clock() < deadline and env.qzxp_Launch == launch do RawTask.wait() end
+                if child.Parent and not child:GetAttribute("Stopped") then
+                    stopTimedOut = true
+                end
+            end
+        end
+    end)
+end
+if env.qzxp_Launch ~= launch then return end
+if stopTimedOut then error("[qzxp] Previous runtime is still unloading; refusing to create duplicate UI.") end
+for _, root in ipairs(uiRoots()) do
+    pcall(function()
+        for _, child in ipairs(root:GetDescendants()) do
+            if child:IsA("LayerCollector") and (knownUI[child.Name] or child:GetAttribute("qzxpOwned")) then
+                pcall(function() child:Destroy() end)
+            end
+        end
+    end)
+end
+if replacing then
+    for _ = 1, 2 do
+        game:GetService("RunService").Heartbeat:Wait()
+        if env.qzxp_Launch ~= launch then return end
+    end
+end
+if env.qzxp_Launch ~= launch then return end
+if env.qzxp_Runtime and env.qzxp_Runtime ~= previous then
+    error("[qzxp] Another runtime started during cleanup; this launch was cancelled.")
+end
+previous, previousCleanup, previousStopRender = nil, nil, nil
+previousThreads, previousVFX, previousDisabledVFX = nil, nil, nil
+local Life = {alive = true, stopping = false, connections = {}, threads = {}, restorers = {},
+    instances = {}, errors = {}}
+env.qzxp_Runtime = Life
+function Life.report(err)
+    local text = tostring(err)
+    if #Life.errors >= 40 then table.remove(Life.errors, 1) end
+    table.insert(Life.errors, text)
+    warn("[qzxp] " .. text)
+end
+function Life.current()
+    return Life.alive and env.qzxp_Runtime == Life
+end
+function Life.guard(fn)
+    return function(...)
+        if not Life.current() then return end
+         
+        local running = coroutine.running()
+        local wasTracked = Life.threads[running]
+        Life.threads[running] = true
+        local result = table.pack(xpcall(fn, debug.traceback, ...))
+        if not wasTracked then Life.threads[running] = nil end
+        if not result[1] then Life.report(result[2]); return end
+        return table.unpack(result, 2, result.n)
+    end
+end
+function Life.connect(signal, fn)
+    Life.connectionAdds = (Life.connectionAdds or 0) + 1
+    if Life.connectionAdds % 128 == 0 then
+        for connection in pairs(Life.connections) do
+            if typeof(connection) == "RBXScriptConnection" and not connection.Connected then
+                Life.connections[connection] = nil
+            end
+        end
+    end
+    local conn = signal:Connect(Life.guard(fn))
+    if Life.current() then Life.connections[conn] = true else conn:Disconnect() end
+    return conn
+end
+function Life.once(signal, fn)
+    local conn
+    conn = signal:Once(Life.guard(function(...)
+        Life.connections[conn] = nil
+        return fn(...)
+    end))
+    if Life.current() then Life.connections[conn] = true else conn:Disconnect() end
+    return conn
+end
+function Life.onStop(fn) table.insert(Life.restorers, fn) end
+function Life.stop()
+    if Life.stopping or not Life.alive then return end
+    Life.stopping = true
+    Life.alive = false  
+    for conn in pairs(Life.connections) do pcall(function() conn:Disconnect() end) end
+    table.clear(Life.connections)
+    for thread in pairs(Life.threads) do
+        if thread ~= coroutine.running() then pcall(RawTask.cancel, thread) end
+    end
+    table.clear(Life.threads)
+    if Life.stopRender then pcall(Life.stopRender) end
+    if Life.control then pcall(function() Life.control:SetAttribute("Stopping", true) end) end
+     
+    for object in pairs(Life.instances) do
+        pcall(function()
+            if object:IsA("LayerCollector") then object:Destroy() end
+        end)
+    end
+    for i = #Life.restorers, 1, -1 do
+        local ok, err = pcall(Life.restorers[i])
+        if not ok then Life.report("Restore: " .. tostring(err)) end
+    end
+    table.clear(Life.restorers)
+    if Life.featureCleanup then
+        local ok, err = pcall(Life.featureCleanup)
+        if not ok then Life.report(err) end
+    end
+     
+    if Life.restoreFlags then pcall(Life.restoreFlags) end
+    for object in pairs(Life.instances) do pcall(function() object:Destroy() end) end
+    table.clear(Life.instances)
+    if env.qzxp_Runtime == Life then
+        env.qzxp_Runtime = nil
+        env.qzxp_Cleanup = nil
+        env.qzxp_StopRender = nil
+        env.qzxp_Threads = nil
+        env.qzxp_resetSpamState = nil
+        env.qzxp_resetAPState = nil
+        env.qzxp_suppressNotify = nil
+        env.qzxp_rearm = nil
+        env.qzxp_UA = nil
+        env.qzxp_swordBusy = nil
+        env.qzxp_captureRealSword = nil
+        if env.qzxp_saveConfig == Life.saveConfig then env.qzxp_saveConfig = nil end
+    end
+    if Life.control then
+        pcall(function() Life.control:SetAttribute("Stopped", true); Life.control:Destroy() end)
+        Life.control = nil
+    end
+    Life.featureCleanup, Life.restoreFlags, Life.stopRender, Life.initializer = nil, nil, nil, nil
+    Life.saveConfig = nil
+    Life.finished = true
+end
+env.qzxp_Cleanup = Life.stop
 pcall(function()
-    local cleanup = getgenv().qzxp_Cleanup
-    if cleanup then cleanup() end
+    local player = game:GetService("Players").LocalPlayer
+    local parent = player and (player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui"))
+    if not parent then return end
+    local control = RawInstance.new("BindableEvent")
+    control.Name = "qzxp_RuntimeStop"
+    control:SetAttribute("qzxpOwned", true)
+    control.Parent = parent
+    Life.control = control
+    local conn = control.Event:Connect(function() Life.stop() end)
+    Life.connections[conn] = true
 end)
+ 
+local task = setmetatable({}, {__index = RawTask})
+local function schedule(kind, seconds, fn, ...)
+    if not Life.current() then return coroutine.create(function() end) end
+    local args = table.pack(...)
+    local thread = coroutine.create(function()
+        if not Life.current() then return end
+        local running = coroutine.running()
+        local ok, err = xpcall(function() fn(table.unpack(args, 1, args.n)) end, debug.traceback)
+        Life.threads[running] = nil
+        if not ok then
+            Life.report(err)
+            if Life.initializer == running then Life.stop() end
+        end
+    end)
+    Life.threads[thread] = true
+    if kind == "delay" then RawTask.delay(seconds, thread) else RawTask[kind](thread) end
+    return thread
+end
+function task.spawn(fn, ...) return schedule("spawn", 0, fn, ...) end
+function task.defer(fn, ...) return schedule("defer", 0, fn, ...) end
+function task.delay(seconds, fn, ...) return schedule("delay", seconds, fn, ...) end
+function task.cancel(thread)
+    Life.threads[thread] = nil
+    if thread ~= coroutine.running() then return RawTask.cancel(thread) end
+end
+local Instance = setmetatable({}, {__index = RawInstance})
+function Instance.new(...)
+    local object = RawInstance.new(...)
+    if Life.current() then
+        Life.instances[object] = true
+        pcall(function()
+            if object:IsA("LayerCollector") then object:SetAttribute("qzxpOwned", true) end
+        end)
+    end
+    return object
+end
+
+ 
+
 
 local function GetSafeUIParent()
     return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 end
 
--- VFX hooks — detach/restore on reload
 pcall(function()
     if getgenv().qzxp_VFXConns then
         for _, conn in ipairs(getgenv().qzxp_VFXConns) do
@@ -35,17 +282,33 @@ local function spawnTracked(fn, ...)
 end
 getgenv().qzxp_Threads = _threads
 
+local _handlerSerial = 0
+local function nextHandlerSerial()
+    _handlerSerial += 1
+    return _handlerSerial
+end
+local function handlerFailed(handler, label, err)
+    local now = os.clock()
+    if now < (handler.nextWarning or 0) then return end
+    handler.nextWarning = now + 5
+    warn("[qzxp] " .. label .. " handler: " .. tostring(err))
+end
+local function orderedHandlers(a, b)
+    if a.order ~= b.order then return a.order < b.order end
+    return a.serial < b.serial
+end
+
 local _renderHandlers = {}
 local _renderConn = nil
 local function addRenderHandler(fn, order)
-    table.insert(_renderHandlers, {fn = fn, order = order or 0})
-    table.sort(_renderHandlers, function(a, b) return a.order < b.order end)
+    table.insert(_renderHandlers, {fn = fn, order = order or 0, serial = nextHandlerSerial()})
+    table.sort(_renderHandlers, orderedHandlers)
     if _renderHandlers[#_renderHandlers] ~= nil and not _renderConn then
-        _renderConn = game:GetService("RunService").RenderStepped:Connect(function(dt)
+        _renderConn = Life.connect(game:GetService("RunService").RenderStepped, function(dt)
             for i = 1, #_renderHandlers do
                 local h = _renderHandlers[i]
                 local ok, err = pcall(h.fn, dt)
-                if not ok then warn("[qzxp] render handler: " .. tostring(err)) end
+                if not ok then handlerFailed(h, "render", err) end
             end
         end)
     end
@@ -53,14 +316,14 @@ end
 local _postSimHandlers = {}
 local _postSimConn = nil
 local function addPostSimHandler(fn, order)
-    table.insert(_postSimHandlers, {fn = fn, order = order or 0})
-    table.sort(_postSimHandlers, function(a, b) return a.order < b.order end)
+    table.insert(_postSimHandlers, {fn = fn, order = order or 0, serial = nextHandlerSerial()})
+    table.sort(_postSimHandlers, orderedHandlers)
     if _postSimHandlers[#_postSimHandlers] ~= nil and not _postSimConn then
-        _postSimConn = game:GetService("RunService").PostSimulation:Connect(function(dt)
+        _postSimConn = Life.connect(game:GetService("RunService").PostSimulation, function(dt)
             for i = 1, #_postSimHandlers do
                 local h = _postSimHandlers[i]
                 local ok, err = pcall(h.fn, dt)
-                if not ok then warn("[qzxp] postsim handler: " .. tostring(err)) end
+                if not ok then handlerFailed(h, "postsim", err) end
             end
         end)
     end
@@ -68,19 +331,59 @@ end
 local _heartbeatHandlers = {}
 local _heartbeatConn = nil
 local function addHeartbeatHandler(fn, order)
-    table.insert(_heartbeatHandlers, {fn = fn, order = order or 0})
-    table.sort(_heartbeatHandlers, function(a, b) return a.order < b.order end)
+    table.insert(_heartbeatHandlers, {fn = fn, order = order or 0, serial = nextHandlerSerial()})
+    table.sort(_heartbeatHandlers, orderedHandlers)
     if _heartbeatHandlers[#_heartbeatHandlers] ~= nil and not _heartbeatConn then
-        _heartbeatConn = game:GetService("RunService").Heartbeat:Connect(function(dt)
+        _heartbeatConn = Life.connect(game:GetService("RunService").Heartbeat, function(dt)
             for i = 1, #_heartbeatHandlers do
                 local h = _heartbeatHandlers[i]
                 local ok, err = pcall(h.fn, dt)
-                if not ok then warn("[qzxp] heartbeat handler: " .. tostring(err)) end
+                if not ok then handlerFailed(h, "heartbeat", err) end
             end
         end)
     end
 end
-getgenv().qzxp_StopRender = function()
+ 
+local CombatLoops = {jobs = {}, stopped = false}
+function CombatLoops.disconnect(job)
+    if job.conn then pcall(function() job.conn:Disconnect() end); job.conn = nil end
+    if job.binding then
+        pcall(function() game:GetService("RunService"):UnbindFromRenderStep(job.binding) end)
+        job.binding = nil
+    end
+end
+function CombatLoops.run(job)
+    if not job or CombatLoops.stopped or not Life.current() or job.busy then return end
+    local now = os.clock()
+    local dt = math.max(now - job.last, 0)
+    job.last, job.busy = now, true
+    local ok, err = pcall(job.fn, dt)
+    job.busy = false
+    if not ok then handlerFailed(job, job.id, err) end
+end
+function CombatLoops.register(id, fn)
+    local job = {id = id, fn = fn, last = os.clock()}
+    CombatLoops.jobs[id] = job
+    local step = function() CombatLoops.run(job) end
+    if id == "AP" then
+        job.conn = Life.connect(game:GetService("RunService").PostSimulation, step)
+    elseif id == "Spam" then
+        job.binding = "qzxp_CombatLoop_Spam"
+        game:GetService("RunService"):BindToRenderStep(job.binding,
+            Enum.RenderPriority.Input.Value - 1, Life.guard(step))
+    else
+        error("Unknown fixed scheduler: " .. tostring(id))
+    end
+end
+function CombatLoops.stop()
+    CombatLoops.stopped = true
+    for _, job in pairs(CombatLoops.jobs) do
+        CombatLoops.disconnect(job)
+    end
+end
+
+Life.stopRender = function()
+    CombatLoops.stop()
     if _renderConn then pcall(function() _renderConn:Disconnect() end); _renderConn = nil end
     _renderHandlers = {}
     if _postSimConn then pcall(function() _postSimConn:Disconnect() end); _postSimConn = nil end
@@ -88,12 +391,11 @@ getgenv().qzxp_StopRender = function()
     if _heartbeatConn then pcall(function() _heartbeatConn:Disconnect() end); _heartbeatConn = nil end
     _heartbeatHandlers = {}
 end
+getgenv().qzxp_StopRender = Life.stopRender
 
 task.spawn(function()
+Life.initializer = coroutine.running()
 
--- ============================================================
--- UI LIBRARY
--- ============================================================
 local _UIS = game:GetService("UserInputService")
 local _HS  = game:GetService("HttpService")
 local _TS  = game:GetService("TweenService")
@@ -187,7 +489,6 @@ function Fluent:Notify(opts)
     task.delay(dur, function() if card and card.Parent then pcall(function() card:Destroy() end) end end)
 end
 
--- Release input-service listeners for this UI on reload/cleanup.
 local qzxpUIConnections = {}
 local function qzxpTrackUI(connection)
     table.insert(qzxpUIConnections, connection)
@@ -198,11 +499,10 @@ local function closeDropdown()
     if _openDropdown then pcall(function() _openDropdown:Destroy() end); _openDropdown = nil end
 end
 
--- Auto-save support: mark config as dirty for debounced save
 local qzxp_autoSaveEnabled = false
 local qzxp_autoSaveQueued = false
 local function qzxp_markDirty()
-    if qzxp_autoSaveQueued then return end
+    if qzxp_autoSaveEnabled == nil or qzxp_autoSaveQueued then return end
     qzxp_autoSaveQueued = true
     task.delay(0.3, function()
         qzxp_autoSaveQueued = false
@@ -248,7 +548,7 @@ function Section:AddToggle(id, opts)
         if opts.Callback then pcall(opts.Callback, v) end
     end
     obj.SetValue = function(_, v) set(v, false) end
-    click.MouseButton1Click:Connect(function() set(not obj.Value, true) end)
+    Life.connect(click.MouseButton1Click, function() set(not obj.Value, true) end)
     apply(obj.Value, false); Options[id] = obj; return obj
 end
 function Section:AddSlider(id, opts)
@@ -279,6 +579,8 @@ function Section:AddSlider(id, opts)
         fill.Size = UDim2.new(a, 0, 1, 0); knob.Position = UDim2.new(a, 0, 0.5, 0); valLbl.Text = tostring(obj.Value)
     end
     local function set(v)
+        v = tonumber(v)
+        if not v or v ~= v or v == math.huge or v == -math.huge then return end
         v = rv(math.clamp(v, minV, maxV))
         if obj.Value == v then return end
         obj.Value = v; update(); qzxp_markDirty()
@@ -292,19 +594,19 @@ function Section:AddSlider(id, opts)
     end
     local dragArea = mk("TextButton", {Size = UDim2.new(1, 0, 0, 22), Position = UDim2.new(0, 0, 0.5, -11),
         BackgroundTransparency = 1, Text = ""}, bar)
-    dragArea.InputBegan:Connect(function(i)
+    Life.connect(dragArea.InputBegan, function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = true; posToVal(i.Position.X)
         end
     end)
-    _UIS.InputChanged:Connect(function(i)
+    qzxpTrackUI(Life.connect(_UIS.InputChanged, function(i)
         if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
             posToVal(i.Position.X)
         end
-    end)
-    _UIS.InputEnded:Connect(function(i)
+    end))
+    qzxpTrackUI(Life.connect(_UIS.InputEnded, function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
-    end)
+    end))
     update(); Options[id] = obj; return obj
 end
 function Section:AddDropdown(id, opts)
@@ -317,8 +619,8 @@ function Section:AddDropdown(id, opts)
         TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Text = ""}, btn)
     mk("TextLabel", {Size = UDim2.new(0, 16, 1, 0), Position = UDim2.new(1, -20, 0, 0),
         BackgroundTransparency = 1, Font = FONT, TextSize = 10, TextColor3 = UITheme.TextDim, Text = "v"}, btn)
-    btn.MouseEnter:Connect(function() tween(btn, TI_FAST, {BackgroundColor3 = UITheme.Hover}) end)
-    btn.MouseLeave:Connect(function() tween(btn, TI_FAST, {BackgroundColor3 = UITheme.Panel}) end)
+    Life.connect(btn.MouseEnter, function() tween(btn, TI_FAST, {BackgroundColor3 = UITheme.Hover}) end)
+    Life.connect(btn.MouseLeave, function() tween(btn, TI_FAST, {BackgroundColor3 = UITheme.Panel}) end)
     local values = opts.Values or {}
     local multi = opts.Multi or false
     local sel = {}
@@ -333,11 +635,14 @@ function Section:AddDropdown(id, opts)
         return tostring(obj.Value or "")
     end
     local function refresh() lbl.Text = display() end
-    btn.MouseButton1Click:Connect(function()
+    Life.connect(btn.MouseButton1Click, function()
         if _openDropdown then closeDropdown() end
         local abs = btn.AbsolutePosition; local sz = btn.AbsoluteSize
         local h = math.min(#values * 26 + 6, 190)
-        local panel = mk("ScrollingFrame", {Position = UDim2.fromOffset(abs.X, abs.Y + sz.Y + 4),
+        local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280,720)
+        local popupY = abs.Y + sz.Y + 4
+        if popupY + h > view.Y - 8 then popupY = math.max(8, abs.Y - h - 4) end
+        local panel = mk("ScrollingFrame", {Position = UDim2.fromOffset(abs.X, popupY),
             Size = UDim2.fromOffset(sz.X, h), BackgroundColor3 = UITheme.Panel, BorderSizePixel = 0,
             ScrollBarThickness = 3, ScrollBarImageColor3 = UITheme.Off,
             CanvasSize = UDim2.new(0, 0, 0, #values * 26), ZIndex = 250, ClipsDescendants = true}, self._tab._window._gui)
@@ -353,9 +658,9 @@ function Section:AddDropdown(id, opts)
             mk("TextLabel", {Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 10, 0, 0),
                 BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = UITheme.Text,
                 TextXAlignment = Enum.TextXAlignment.Left, Text = tostring(v), ZIndex = 252}, item)
-            item.MouseEnter:Connect(function() item.BackgroundTransparency = 0; item.BackgroundColor3 = UITheme.Hover end)
-            item.MouseLeave:Connect(function() item.BackgroundTransparency = 1 end)
-            item.MouseButton1Click:Connect(function()
+            Life.connect(item.MouseEnter, function() item.BackgroundTransparency = 0; item.BackgroundColor3 = UITheme.Hover end)
+            Life.connect(item.MouseLeave, function() item.BackgroundTransparency = 1 end)
+            Life.connect(item.MouseButton1Click, function()
                 if multi then
                     if sel[v] then sel[v] = nil else sel[v] = true end
                     refresh(); qzxp_markDirty(); if opts.Callback then pcall(opts.Callback, v) end
@@ -382,14 +687,14 @@ function Section:AddKeybind(id, opts)
     local suppressUntil = 0
     local obj = {Value = toKey(opts.Default), isHeld = false}
     local function refresh() lbl.Text = listening and "press key..." or keyDisplay(obj.Value) end
-    btn.MouseButton1Click:Connect(function()
+    Life.connect(btn.MouseButton1Click, function()
         if obj.isHeld then
             obj.isHeld = false
             if opts.ReleasedCallback then pcall(opts.ReleasedCallback, obj.Value) end
         end
         listening = true; suppressUntil = os.clock() + 0.25; refresh()
     end)
-    qzxpTrackUI(_UIS.InputBegan:Connect(function(input, gp)
+    qzxpTrackUI(Life.connect(_UIS.InputBegan, function(input, gp)
         if gp then return end
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
         if listening then
@@ -404,7 +709,7 @@ function Section:AddKeybind(id, opts)
             end
         end
     end))
-    qzxpTrackUI(_UIS.InputEnded:Connect(function(input, gp)
+    qzxpTrackUI(Life.connect(_UIS.InputEnded, function(input, gp)
         if gp then return end
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
         if input.KeyCode == obj.Value and obj.isHeld then
@@ -432,7 +737,7 @@ function Section:AddInput(id, opts)
         Text = tostring(opts.Default or "")}, bg)
     mk("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)}, box)
     local obj = {Value = tostring(opts.Default or "")}
-    box.FocusLost:Connect(function(enter)
+    Life.connect(box.FocusLost, function(enter)
         obj.Value = box.Text
         qzxp_markDirty()
         if opts.Callback then pcall(opts.Callback, box.Text, enter) end
@@ -454,9 +759,9 @@ function Section:AddButton(opts)
     local btn = mk("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
         Font = FONT, TextSize = 12, TextColor3 = Color3.fromRGB(255, 255, 255),
         Text = opts.Title or "Button", AutoButtonColor = false}, bg)
-    btn.MouseEnter:Connect(function() tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Hover}) end)
-    btn.MouseLeave:Connect(function() tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Panel}) end)
-    btn.MouseButton1Click:Connect(function() if opts.Callback then pcall(opts.Callback) end end)
+    Life.connect(btn.MouseEnter, function() tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Hover}) end)
+    Life.connect(btn.MouseLeave, function() tween(bg, TI_FAST, {BackgroundColor3 = UITheme.Panel}) end)
+    Life.connect(btn.MouseButton1Click, function() if opts.Callback then pcall(opts.Callback) end end)
     return btn
 end
 
@@ -515,9 +820,9 @@ function Window:AddTab(opts)
     local tab = setmetatable({_btn = btn, _label = lbl, _indicator = ind, _page = page,
         _window = self, _sections = {}, Title = title}, Tab)
     self._tabs[index] = tab
-    btn.MouseEnter:Connect(function() if self._active ~= index then tween(btn, TI_FAST, {BackgroundTransparency = 0.25}) end end)
-    btn.MouseLeave:Connect(function() if self._active ~= index then tween(btn, TI_FAST, {BackgroundTransparency = 1}) end end)
-    btn.MouseButton1Click:Connect(function() self:SelectTab(index); closeDropdown() end)
+    Life.connect(btn.MouseEnter, function() if self._active ~= index then tween(btn, TI_FAST, {BackgroundTransparency = 0.25}) end end)
+    Life.connect(btn.MouseLeave, function() if self._active ~= index then tween(btn, TI_FAST, {BackgroundTransparency = 1}) end end)
+    Life.connect(btn.MouseButton1Click, function() self:SelectTab(index); closeDropdown() end)
     return tab
 end
 function Fluent:CreateWindow(opts)
@@ -542,9 +847,9 @@ function Fluent:CreateWindow(opts)
         Text = opts.Title or "Window"}, titleBar)
     local closeBtn = mk("TextButton", {Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(1, -36, 0.5, -14),
         BackgroundTransparency = 1, Font = FONTB, TextSize = 14, TextColor3 = UITheme.TextDim, Text = "×", AutoButtonColor = false}, titleBar)
-    closeBtn.MouseEnter:Connect(function() closeBtn.TextColor3 = UITheme.White end)
-    closeBtn.MouseLeave:Connect(function() closeBtn.TextColor3 = UITheme.TextDim end)
-    closeBtn.MouseButton1Click:Connect(function() gui.Enabled = false end)
+    Life.connect(closeBtn.MouseEnter, function() closeBtn.TextColor3 = UITheme.White end)
+    Life.connect(closeBtn.MouseLeave, function() closeBtn.TextColor3 = UITheme.TextDim end)
+    Life.connect(closeBtn.MouseButton1Click, function() gui.Enabled = false end)
     local sidebar = mk("Frame", {Size = UDim2.new(0, 140, 1, -38), Position = UDim2.new(0, 0, 0, 38),
         BackgroundColor3 = UITheme.Sidebar, BorderSizePixel = 0}, main)
     addGrad(sidebar, Color3.fromRGB(13, 13, 17), Color3.fromRGB(8, 8, 10), 90)
@@ -555,20 +860,20 @@ function Fluent:CreateWindow(opts)
         BackgroundColor3 = UITheme.Bg, BackgroundTransparency = 1, BorderSizePixel = 0}, main)
     local window = setmetatable({_gui = gui, _main = main, _sidebar = sidebar, _content = content, _tabs = {}, _active = nil}, Window)
     local dragging, dragStart, startPos
-    titleBar.InputBegan:Connect(function(i)
+    Life.connect(titleBar.InputBegan, function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = true; dragStart = i.Position; startPos = main.Position
-            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then dragging = false end end)
+            Life.connect(i.Changed, function() if i.UserInputState == Enum.UserInputState.End then dragging = false end end)
         end
     end)
-    _UIS.InputChanged:Connect(function(i)
+    Life.connect(_UIS.InputChanged, function(i)
         if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
             local d = i.Position - dragStart
             main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
     end)
     if opts.MinimizeKey then
-        _UIS.InputBegan:Connect(function(i, gp)
+        Life.connect(_UIS.InputBegan, function(i, gp)
             if gp then return end
             if i.KeyCode == opts.MinimizeKey then main.Visible = not main.Visible end
         end)
@@ -577,7 +882,7 @@ function Fluent:CreateWindow(opts)
     return window
 end
 
-do -- Tsukuyomi UI, adapted to qzxp's existing control API
+do
     local SectionClass = Section
     local function softStroke()
         local stroke = Instance.new("UIStroke")
@@ -611,7 +916,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
         button.Size = UDim2.fromScale(1, 1)
         button.BackgroundTransparency = 1
         button.TextTransparency = 1
-        if call then button.MouseButton1Click:Connect(call) end
+        if call then Life.connect(button.MouseButton1Click, call) end
         return button
     end
     function NeverZen.new(config)
@@ -817,7 +1122,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
         UIListLayout_2.HorizontalAlignment = Enum.HorizontalAlignment.Center
         UIListLayout_2.SortOrder = Enum.SortOrder.LayoutOrder
         UIListLayout_2.Padding = UDim.new(0,10)
-        UIListLayout_2:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+        Life.connect(UIListLayout_2:GetPropertyChangedSignal('AbsoluteContentSize'), function()
             TBSFrame.CanvasSize = UDim2.fromOffset(0, UIListLayout_2.AbsoluteContentSize.Y + 5)
         end)
 
@@ -845,7 +1150,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
             config.Name = config.Name or config.Title or 'Example'
             config.Icon = config.Icon or "cycle"
 
-            local TabSignal = {}
+            local TabSignal = {Title = config.Name}
             local TabButton = Instance.new("Frame")
             local UICorner = Instance.new("UICorner")
             local TabIcon = Instance.new("ImageLabel")
@@ -916,7 +1221,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
             ContentLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
             ContentLayout.SortOrder = Enum.SortOrder.LayoutOrder
             ContentLayout.Padding = UDim.new(0, 8)
-            ContentLayout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+            Life.connect(ContentLayout:GetPropertyChangedSignal('AbsoluteContentSize'), function()
                 ContentFrame.CanvasSize = UDim2.fromOffset(0, ContentLayout.AbsoluteContentSize.Y + 8)
             end)
 
@@ -1010,7 +1315,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
                 UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
                 UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
                 UIListLayout.Padding = UDim.new(0,6)
-                UIListLayout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+                Life.connect(UIListLayout:GetPropertyChangedSignal('AbsoluteContentSize'), function()
                     TweenService:Create(Section, TweenInfo.new(0.3, Enum.EasingStyle.Quint), {
                         Size = UDim2.new(1,0,0, UIListLayout.AbsoluteContentSize.Y + 6)
                     }):Play()
@@ -1175,10 +1480,10 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
                         if not Content.Enabled or not Content.Parent then return end
                         cfg.Callback(cfg)
                     end)
-                    button.MouseEnter:Connect(function()
+                    Life.connect(button.MouseEnter, function()
                         TweenService:Create(Button, TweenInfo.new(0.1), { BackgroundColor3 = NeverZen.Theme.Hightlight }):Play()
                     end)
-                    button.MouseLeave:Connect(function()
+                    Life.connect(button.MouseLeave, function()
                         TweenService:Create(Button, TweenInfo.new(0.1), { BackgroundColor3 = NeverZen.Theme.BackgroundColor }):Play()
                     end)
 
@@ -1311,13 +1616,13 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
                             update(Input)
                         end
                     end
-                    con.InputBegan:Connect(onInputBegan)
-                    hitArea.InputBegan:Connect(onInputBegan)
+                    Life.connect(con.InputBegan, onInputBegan)
+                    Life.connect(hitArea.InputBegan, onInputBegan)
 
-                    NeverZen:Track(UserInputService.InputEnded:Connect(function(Input)
+                    NeverZen:Track(Life.connect(UserInputService.InputEnded, function(Input)
                         if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then IsHold = false end
                     end))
-                    NeverZen:Track(UserInputService.InputChanged:Connect(function(Input)
+                    NeverZen:Track(Life.connect(UserInputService.InputChanged, function(Input)
                         if IsHold and (Input.UserInputType == Enum.UserInputType.MouseMovement or Input.UserInputType == Enum.UserInputType.Touch) then update(Input) end
                     end))
 
@@ -1416,7 +1721,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
                     local Button = NeverZen:NewInput(Keybind)
                     local IsBinding = false
 
-                    Button.MouseButton1Click:Connect(function()
+                    Life.connect(Button.MouseButton1Click, function()
                         if not Content.Enabled or not Content.Parent then return end
                         if IsBinding then return end
                         IsBinding = true
@@ -1489,8 +1794,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
                 function SectionSignal:AddButton(opts)
                     return nzButton(self, {Name = opts.Title, Callback = opts.Callback})
                 end
-                -- Reuse qzxp's controls and section row helpers where the supplied
-                -- shell has no compatible implementation (notably key hold/release).
+
                 SectionSignal._row = SectionClass._row
                 SectionSignal._label = SectionClass._label
                 SectionSignal.AddDropdown = SectionClass.AddDropdown
@@ -1538,7 +1842,7 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
             if not self.Toggle then closeDropdown() end
             ToggleWin(self.Toggle)
         end
-        MinButton.MouseButton1Click:Connect(function()
+        Life.connect(MinButton.MouseButton1Click, function()
             WindowSignal:SetOpen(not WindowSignal.Toggle)
         end)
 
@@ -1564,17 +1868,17 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
             label.Position = UDim2.fromScale(0.5,0.5)
             label.AnchorPoint = Vector2.new(0.5,0.5)
 
-            Resize.InputBegan:Connect(function(std)
+            Life.connect(Resize.InputBegan, function(std)
                 if std.UserInputType == Enum.UserInputType.MouseButton1 or std.UserInputType == Enum.UserInputType.Touch then
                     IsHold = true
                 end
             end)
-            Resize.InputEnded:Connect(function(std)
+            Life.connect(Resize.InputEnded, function(std)
                 if std.UserInputType == Enum.UserInputType.MouseButton1 or std.UserInputType == Enum.UserInputType.Touch then
                     IsHold = false
                 end
             end)
-            NeverZen:Track(UserInputService.InputChanged:Connect(function(input)
+            NeverZen:Track(Life.connect(UserInputService.InputChanged, function(input)
                 if IsHold and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and WindowSignal.Toggle then
                     local pios = input.Position
                     local x = (pios.X - WindowFrame.AbsolutePosition.X)
@@ -1595,17 +1899,17 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
             local position = UDim2.new(startPos.X.Scale, math.max(startPos.X.Offset + delta.X, -10), startPos.Y.Scale, startPos.Y.Offset + delta.Y)
             TweenService:Create(WindowFrame, TweenInfo.new(dragSpeed), { Position = position }):Play()
         end
-        Header.InputBegan:Connect(function(input)
+        Life.connect(Header.InputBegan, function(input)
             if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
                 dragToggle = true
                 dragStart = input.Position
                 startPos = WindowFrame.Position
-                input.Changed:Connect(function()
+                Life.connect(input.Changed, function()
                     if input.UserInputState == Enum.UserInputState.End then dragToggle = false end
                 end)
             end
         end)
-        NeverZen:Track(UserInputService.InputChanged:Connect(function(input)
+        NeverZen:Track(Life.connect(UserInputService.InputChanged, function(input)
             if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragToggle then updateInput(input) end
         end))
 
@@ -1620,9 +1924,46 @@ do -- Tsukuyomi UI, adapted to qzxp's existing control API
     end
 end
 
--- SaveManager / InterfaceManager
 local SaveManager = {}
 local InterfaceManager = {}
+function SaveManager:_cleanConfigName(name, allowEmpty)
+    name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    name = name:gsub("[/\\%c]", "")
+    if #name > 80 then name = name:sub(1, 80) end
+    if name == "" and not allowEmpty then return "default" end
+    return name
+end
+function SaveManager:_decodeConfigOption(opt, id, entry)
+    if type(entry) ~= "table" or entry.v == nil then return nil, false end
+    local current, value = opt.Value, entry.v
+    if id == "SofDelay" and type(value) == "number" and value > 0.35 then value = value / 1000 end
+    if typeof(current) == "EnumItem" then
+        if entry.t ~= "EnumItem" or type(entry.c) ~= "string" or type(value) ~= "string" then return nil, false end
+        local ok, decoded = pcall(function() return Enum[entry.c][value] end)
+        if not ok or typeof(decoded) ~= "EnumItem" or decoded.EnumType ~= current.EnumType then return nil, false end
+        return decoded, true
+    end
+    local expected = type(current)
+    if expected == "number" then
+        value = tonumber(value)
+        if not value or value ~= value or value == math.huge or value == -math.huge then return nil, false end
+        return value, true
+    end
+    if expected == "boolean" then
+        if type(value) ~= "boolean" then return nil, false end
+        return value, true
+    end
+    if expected == "string" then
+        if type(value) ~= "string" then return nil, false end
+        return value, true
+    end
+    if expected == "table" then
+        if type(value) ~= "table" then return nil, false end
+        return value, true
+    end
+    if type(value) == expected then return value, true end
+    return nil, false
+end
 function SaveManager:SetLibrary(lib) self.Library = lib end
 function SaveManager:IgnoreThemeSettings() end
 function SaveManager:SetFolder(f)
@@ -1639,6 +1980,7 @@ function SaveManager:SetFolder(f)
     end)
 end
 function SaveManager:Save(name)
+    name = self:_cleanConfigName(name, false)
     local data = {}
     for id, opt in pairs(Fluent.Options) do
         if type(id) == "string" and id:sub(1, 2) ~= "__" then
@@ -1652,6 +1994,8 @@ function SaveManager:Save(name)
         writefile((self.folder or "qzxp/configs") .. "/" .. name .. ".json", _HS:JSONEncode(data))
     end)
     Fluent:Notify({Title = "Config", Content = ok and ("Saved: " .. name) or "Save failed", Duration = 3})
+    if ok then self:SetConfigDisplay(name) end
+    return ok
 end
 local LOAD_PRIORITY = {
     ManualSword = 10, ManualSwordFX = 10, ManualSwordAnimations = 10,
@@ -1665,6 +2009,7 @@ local LOAD_PRIORITY = {
     UnlockAllToggle = 40, ThunderDashToggle = 40,
 }
 function SaveManager:Load(name)
+    name = self:_cleanConfigName(name, false)
     local ok, contents = pcall(function()
         return readfile((self.folder or "qzxp/configs") .. "/" .. name .. ".json")
     end)
@@ -1693,25 +2038,30 @@ function SaveManager:Load(name)
     local applied, failed = 0, 0
     for _, item in ipairs(entries) do
         local opt = Fluent.Options[item.id]
-        local v   = item.entry.v
-        if item.id == "SofDelay" and type(v) == "number" and v > 0.35 then
-            v = v / 1000
-        end
-        if item.entry.t == "EnumItem" then
-            if type(item.entry.c) == "string" and type(item.entry.v) == "string" then
-                local ok3, e = pcall(function() return Enum[item.entry.c][item.entry.v] end)
-                if ok3 and e then v = e end
-            end
-        end
-        if pcall(function() opt:SetValue(v) end) then applied += 1 else failed += 1 end
+        local v, valid = self:_decodeConfigOption(opt, item.id, item.entry)
+        if valid and pcall(function() opt:SetValue(v) end) then applied += 1 else failed += 1 end
     end
     getgenv().qzxp_suppressNotify = wasSuppressed
+    self:SetConfigDisplay(name)
     Fluent:Notify({
         Title   = "Config",
         Content = ("Loaded: %s (%d applied%s)"):format(
             name, applied, failed > 0 and (", " .. failed .. " failed") or ""),
         Duration = 3,
     })
+end
+function SaveManager:AutoloadName()
+    local folder = self.folder or "qzxp/configs"
+    local ok, name = pcall(function() return readfile(folder .. "/_autoload.txt") end)
+    if not ok or type(name) ~= "string" then return "" end
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    return name
+end
+function SaveManager:SetConfigDisplay(name)
+    name = tostring(name or "")
+    if name == "" then return end
+    self.currentName = name
+    if self._syncConfig then pcall(self._syncConfig, name) end
 end
 function SaveManager:BuildConfigSection(tab)
     local s = tab:AddSection("Config")
@@ -1731,7 +2081,15 @@ function SaveManager:BuildConfigSection(tab)
         return list
     end
     local cfgDropdown
-    cfgDropdown = s:AddDropdown("__cfglst", {Title = "Saved Configs", Values = listConfigs(), Default = "(no configs)", Multi = false, Callback = function(v)
+    local initial = listConfigs()
+    local startup = self.currentName or self:AutoloadName()
+    if startup == "" then startup = "default" end
+    local startupListed = false
+    for _, item in ipairs(initial) do
+        if item == startup then startupListed = true break end
+    end
+    local dropdownDefault = startupListed and startup or initial[1]
+    cfgDropdown = s:AddDropdown("__cfglst", {Title = "Saved Configs", Values = initial, Default = dropdownDefault, Multi = false, Callback = function(v)
         if v and v ~= "(no configs)" and Options.__cfgname then
             Options.__cfgname:SetValue(v)
         end
@@ -1743,7 +2101,12 @@ function SaveManager:BuildConfigSection(tab)
             Options.__cfgname:SetValue(new[1])
         end
     end})
-    s:AddInput("__cfgname", {Title = "Config Name", Default = "default", Placeholder = "name"})
+    s:AddInput("__cfgname", {Title = "Config Name", Default = startup, Placeholder = "name"})
+    self._syncConfig = function(name)
+        if not name or name == "" then return end
+        if Options.__cfgname and Options.__cfgname.SetValue then Options.__cfgname:SetValue(name) end
+        if cfgDropdown and cfgDropdown.SetValue then cfgDropdown:SetValue(name) end
+    end
     s:AddButton({Title = "Save", Callback = function()
         local n = Fluent.Options.__cfgname and Fluent.Options.__cfgname.Value or "default"
         if n == "" then n = "default" end
@@ -1765,6 +2128,7 @@ function SaveManager:BuildConfigSection(tab)
     s:AddButton({Title = "Clear Autoload", Callback = function() self:SetAutoload("") end})
 end
 function SaveManager:SetAutoload(name)
+    name = self:_cleanConfigName(name, true)
     local folder = self.folder or "qzxp/configs"
     pcall(function()
         if makefolder and not isfolder(folder) then
@@ -1784,7 +2148,7 @@ function SaveManager:LoadAutoloadConfig()
     local folder = self.folder or "qzxp/configs"
     local ok, name = pcall(function() return readfile(folder .. "/_autoload.txt") end)
     if not ok or type(name) ~= "string" then return end
-    name = name:gsub("%s+$", "")
+    name = self:_cleanConfigName(name, true)
     if name == "" then return end
     self:Load(name)
 end
@@ -1794,7 +2158,7 @@ function InterfaceManager:BuildInterfaceSection(tab) end
 
 local Window = Fluent:CreateWindow({Title = "qzxp", TabWidth = 130,
     Size = UDim2.fromOffset(750, 450)})
--- Opaque UI: remove the old transparency option and clear its exported hook.
+
 getgenv().qzxp_applyUITransparency = nil
 local Tabs = {
     Combat   = Window:AddTab({Title = "Combat"}),
@@ -1816,6 +2180,10 @@ local CoreGui           = GetSafeUIParent()
 local HttpService       = game:GetService("HttpService")
 local LocalPlayer       = Players.LocalPlayer
 local Camera            = Workspace.CurrentCamera
+qzxpTrackUI(Life.connect(Workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+    local current = Workspace.CurrentCamera
+    if current then Camera = current end
+end))
 
 local function isRealPlayerModel(model)
     if not model then return false end
@@ -1859,7 +2227,6 @@ local function notify(cfg)
     task.defer(function() pcall(function() Fluent:Notify(cfg) end) end)
 end
 
--- Anticheat token finder
 local _token, _tokenFound = nil, false
 local _tokenAttempts = 0
 local MAX_TOKEN_ATTEMPTS = 8
@@ -1892,6 +2259,7 @@ local function scheduleTokenRetry()
     end
     _tokenAttempts += 1
     task.delay(1.5, function()
+        if not Det.alive or _tokenFound then return end
         if findToken() then
             notify({Title = "AC", Content = "Bypassed (attempt " .. _tokenAttempts .. ")", Duration = 4})
         else
@@ -1900,6 +2268,7 @@ local function scheduleTokenRetry()
     end)
 end
 task.defer(function()
+    if not Det.alive then return end
     if findToken() then
         notify({Title = "AC", Content = "Bypassed", Duration = 4})
     else
@@ -1915,6 +2284,7 @@ local function _tokenize(uid)
     if not ok or type(k) ~= "string" or #k == 0 then return "" end
     local n = #t
     local klen = #k
+    if n > buffer.len(_tokenBuf) then _tokenBuf = buffer.create(n) end
     for i = 1, n do
         local b = (string.byte(t, i) + i) % 256
         local kb = string.byte(k, (i - 1) % klen + 1)
@@ -1924,31 +2294,54 @@ local function _tokenize(uid)
 end
 
 local _remote, _args = nil, nil
-task.defer(function()
-pcall(function()
-    local mt = getrawmetatable(game)
-    local old = mt.__index
-    local oldnew = mt.__newindex or function(s, k, v) rawset(s, k, v) end
+
+local _metaHook = {}
+Life.onStop(function()
+    if not _metaHook.mt then return end
+    local mt = _metaHook.mt
     setreadonly(mt, false)
-    mt.__index = newcclosure(function(self, key)
-        if key == 'FireServer' and self:IsA('RemoteEvent') then
-            return function(_, ...)
-                local a = {...}
-                if #a >= 8 and not _remote then
-                    _remote = self; _args = a
-                    notify({Title = "Hook", Content = self.Name, Duration = 3})
-                end
-                return old(self, key)(_, unpack(a))
-            end
-        end
-        return old(self, key)
-    end)
-    mt.__newindex = newcclosure(function(self, key, value)
-        if typeof(self) == "Instance" and self:IsA("LayerCollector") and (key == "ZIndexBehavior" or key == "ZIndex") then return end
-        return oldnew(self, key, value)
-    end)
-    setreadonly(mt, true)
+    if mt.__index == _metaHook.indexHook then mt.__index = _metaHook.oldIndex end
+    if mt.__newindex == _metaHook.newIndexHook then mt.__newindex = _metaHook.oldNewIndex end
+    setreadonly(mt, _metaHook.readonly)
 end)
+task.defer(function()
+    if not Det.alive then return end
+    pcall(function()
+        local mt = getrawmetatable(game)
+        local oldIndex = mt.__index
+        local oldNewIndex = mt.__newindex or function(s, k, v) rawset(s, k, v) end
+        local wasReadonly = isreadonly and isreadonly(mt) or true
+        local indexHook, newIndexHook
+        _metaHook.mt, _metaHook.oldIndex, _metaHook.oldNewIndex = mt, oldIndex, oldNewIndex
+        _metaHook.readonly = wasReadonly
+        setreadonly(mt, false)
+        indexHook = newcclosure(function(self, key)
+            if not Life.current() then return oldIndex(self, key) end
+            if key == "FireServer" and self:IsA("RemoteEvent") then
+                return function(_, ...)
+                    local a = {...}
+
+                    if #a >= 8 and not _remote and typeof(a[5]) == "CFrame"
+                        and type(a[6]) == "table" and type(a[7]) == "table" then
+                        _remote, _args = self, a
+                        notify({Title = "Hook", Content = self.Name, Duration = 3})
+                    end
+                    return oldIndex(self, key)(_, unpack(a))
+                end
+            end
+            return oldIndex(self, key)
+        end)
+        newIndexHook = newcclosure(function(self, key, value)
+            if not Life.current() then return oldNewIndex(self, key, value) end
+            if typeof(self) == "Instance" and self:IsA("LayerCollector")
+                and (key == "ZIndexBehavior" or key == "ZIndex") then return end
+            return oldNewIndex(self, key, value)
+        end)
+        _metaHook.indexHook, _metaHook.newIndexHook = indexHook, newIndexHook
+        mt.__index = indexHook
+        mt.__newindex = newIndexHook
+        setreadonly(mt, wasReadonly)
+    end)
 end)
 
 local SwordAPI = ReplicatedStorage:WaitForChild("Shared", 9e9):WaitForChild("SwordAPI", 9e9)
@@ -1957,25 +2350,14 @@ local swordModule = require(swordModuleInstance)
 local swordApi = require(SwordAPI)
 local animationController = require(ReplicatedStorage:WaitForChild("Controllers"):WaitForChild("AnimationController"))
 
--- >>> SWORD SEARCH ENGINE (shared by every build)
--- One library + one resolver for everything that needs a sword name: the manual
--- changer, the VFX hooker and the 0.5s enforcement loop.
--- Sources, in order of authority:
---   1. the Swords module Unlock All uses (ua.swords:GetCollection()) - authored at
---      runtime, so this is the only list that is guaranteed complete
---   2. the shared sword module that equip() actually calls (swordModule)
---   3. replicated sword models / SwordAPI.Collection (exact model casing)
---   4. names we have actually seen equipped this session
 local SwordRegistry = {}
 local SwordRegistryReverse = {}
 local function norm(s) return s and tostring(s):lower():gsub("[%s_%-%p]+", "") or "" end
 
 local SwordLib = { list = {}, map = {}, prio = {}, builtAt = -1, sources = {}, hasUA = false }
-local LIB_TTL = 5          -- rebuild at most this often, so late data is picked up
-local LIB_PREVIEW = 120    -- how many names the dropdown lists before you search
+local LIB_TTL = 30
+local LIB_PREVIEW = 120
 
--- lower is more trustworthy: the shop collection is authored, module keys may
--- contain non-sword entries
 local SRC_PRIO = { collection = 1, api = 2, instances = 3, module = 4, seen = 5 }
 
 local function uaSwords()
@@ -1991,7 +2373,9 @@ local function buildRegistry()
     local function reg(name, source)
         if type(name) ~= "string" or name == "" or seen[name] then return end
         seen[name] = true
-        SwordRegistry[norm(name)] = name
+        local normalized = norm(name)
+
+        if normalized ~= "" and SwordRegistry[normalized] == nil then SwordRegistry[normalized] = name end
         SwordRegistryReverse[name] = true
         if SwordLib.map[name] then return end
         SwordLib.map[name] = true
@@ -2000,7 +2384,7 @@ local function buildRegistry()
         SwordLib.prio[name] = SRC_PRIO[source] or 9
         SwordLib.sources[source] = (SwordLib.sources[source] or 0) + 1
     end
-    -- 1) the module Unlock All reads: whatever the shop sells is equippable
+
     pcall(function()
         local sw = uaSwords()
         if not sw then return end
@@ -2022,7 +2406,7 @@ local function buildRegistry()
             end
         end
     end)
-    -- 2) the module equip() calls
+
     pcall(function()
         if type(swordModule) ~= "table" then return end
         for k, v in pairs(swordModule) do
@@ -2039,7 +2423,7 @@ local function buildRegistry()
             end
         end
     end)
-    -- 3) replicated models + SwordAPI collection (these carry the exact casing)
+
     pcall(function()
         local rs = ReplicatedStorage
         local sh = rs and rs:FindFirstChild("Shared")
@@ -2050,7 +2434,7 @@ local function buildRegistry()
         local coll = api and api:FindFirstChild("Collection")
         if coll then for _, item in ipairs(coll:GetChildren()) do reg(item.Name, "api") end end
     end)
-    -- 4) what we have seen equipped for real this session
+
     pcall(function()
         local r = getgenv().qzxp_realSword
         if type(r) == "string" then reg(r, "seen") end
@@ -2066,12 +2450,10 @@ local function buildRegistry()
     return SwordLib.list
 end
 
--- the library is built lazily and refreshed when it is older than LIB_TTL, so a
--- list that was empty at load (ua.swords not required yet) fills itself in
 local function getSwordLibrary(force)
     if force or SwordLib.builtAt < 0 or #SwordLib.list == 0
         or (os.clock() - SwordLib.builtAt) > LIB_TTL
-        or (not SwordLib.hasUA and uaSwords() ~= nil) then   -- shop module just became available
+        or (not SwordLib.hasUA and uaSwords() ~= nil) then
         return buildRegistry()
     end
     return SwordLib.list
@@ -2086,7 +2468,6 @@ local function libraryPreview()
     return out
 end
 
--- bounded edit distance (nil when the names are further apart than maxd)
 local function editDistance(a, b, maxd)
     local la, lb = #a, #b
     if math.abs(la - lb) > maxd then return nil end
@@ -2109,7 +2490,6 @@ local function editDistance(a, b, maxd)
     return d
 end
 
--- ranked search: exact > prefix > substring > typos > gappy subsequence
 local function searchSwords(query, limit)
     limit = limit or 10
     local out = {}
@@ -2125,10 +2505,10 @@ local function searchSwords(query, limit)
         local name = list[i]
         local nn = norm(name)
         local score
-        if nn == nq then
+        if name:lower() == ql then
+            score = 1001
+        elseif nn == nq then
             score = 1000
-        elseif name:lower() == ql then
-            score = 990
         elseif nn:sub(1, #nq) == nq then
             score = 800 - math.min(#nn - #nq, 120)
         else
@@ -2136,14 +2516,14 @@ local function searchSwords(query, limit)
             if at then
                 score = 500 - math.min(at - 1, 90) - math.min(#nn - #nq, 90)
             else
-                -- typo tolerance: one or two wrong/missing letters
+
                 local maxd = (#nq <= 4) and 1 or 2
                 local ed = editDistance(nq, nn, maxd)
                 if not ed then ed = editDistance(nq, nn:sub(1, math.min(#nn, #nq + 1)), maxd) end
                 if ed then
                     score = 300 - ed * 60 - math.min(#nn, 60)
                 elseif #nq >= 3 then
-                    -- every typed letter in order, gaps allowed
+
                     local pos, fuzzy, gaps = 1, true, 0
                     for k = 1, #nq do
                         local f = nn:find(nq:sub(k, k), pos, true)
@@ -2168,28 +2548,55 @@ end
 local function swordExists(name)
     if type(name) ~= "string" or name == "" then return false end
     getSwordLibrary()
-    if SwordRegistryReverse[name] then return true end
-    local sw = uaSwords()
-    if sw then
-        local ok, s = pcall(function() return sw:GetSword(name) end)
-        if ok and s then return true end
+    if SwordLib.existsCacheStamp ~= SwordLib.builtAt then
+        SwordLib.existsCacheStamp = SwordLib.builtAt
+        SwordLib.existsCache = {}
     end
-    return false
+    local cached = SwordLib.existsCache[name]
+    if cached ~= nil then return cached end
+    local result = SwordRegistryReverse[name] == true
+    if not result then
+        local directOK, direct = pcall(function() return swordModule:GetSword(name) end)
+        result = directOK and direct ~= nil
+    end
+    if not result then
+        local sw = uaSwords()
+        if sw then
+            local ok, data = pcall(function() return sw:GetSword(name) end)
+            result = ok and data ~= nil
+        end
+    end
+    SwordLib.existsCache[name] = result
+    return result
 end
 local function resolveExact(input)
-    if type(input) ~= "string" or input == "" then return nil end
+    if type(input) ~= "string" then return nil end
+    input = input:match("^%s*(.-)%s*$") or ""
+    if input == "" then return nil end
     getSwordLibrary()
+
+    if SwordRegistryReverse[input] then return input end
     return SwordRegistry[norm(input)]
 end
 local function resolve(input)
     if not input or input == "" then return "" end
-    input = tostring(input)
+    input = tostring(input):match("^%s*(.-)%s*$") or ""
+    if input == "" then return "" end
     getSwordLibrary()
-    local hit = SwordRegistry[norm(input)]
-    if hit then return hit end
-    local best = searchSwords(input, 1)[1]
-    if best then return best end
-    return input
+    if SwordLib.resolveCacheStamp ~= SwordLib.builtAt then
+        SwordLib.resolveCacheStamp = SwordLib.builtAt
+        SwordLib.resolveCache = {}
+    end
+    local cached = SwordLib.resolveCache[input]
+    if cached ~= nil then return cached end
+    local resolved = input
+    if SwordRegistryReverse[input] then
+        resolved = input
+    else
+        resolved = SwordRegistry[norm(input)] or searchSwords(input, 1)[1] or input
+    end
+    SwordLib.resolveCache[input] = resolved
+    return resolved
 end
 local function swordLibStats()
     getSwordLibrary()
@@ -2201,8 +2608,6 @@ local function swordLibStats()
     return #SwordLib.list, table.concat(parts, " ")
 end
 
--- Manual slots are independent: Model, FX (slash VFX/SFX), and Animations.
--- Selections are remembered while disabled, but only the active slot is applied.
 local function applyManualSword(name, kind)
     if type(name) ~= "string" or name == "" then return false end
     kind = kind or "Model"
@@ -2222,14 +2627,19 @@ local function applyManualSword(name, kind)
         end
         return false
     end
+    local previousValue = env[valueKey]
     env[valueKey] = hit
-    if kind == "Model" then pcall(env.saveLastEquippedSword, hit) end
-    pcall(env.updateSword)
+    local updated, updateResult = pcall(env.updateSword)
+    if kind == "Model" and (not updated or updateResult == false) then
+        env[valueKey] = previousValue
+        pcall(env.updateSword)
+        if notify then notify({Title = "Model Changer", Content = "Could not equip " .. hit, Duration = 3}) end
+        return false
+    end
     if changed and notify then notify({Title = kind .. " Changer", Content = hit, Duration = 2}) end
     return true
 end
--- fill the library in as soon as the shop module exists: it is required
--- asynchronously, so a list built at load time can be missing every real sword
+
 spawnTracked(function()
     for _ = 1, 60 do
         if SwordLib.hasUA and #SwordLib.list > 0 then break end
@@ -2237,9 +2647,7 @@ spawnTracked(function()
         task.wait(2)
     end
 end)
--- <<< SWORD SEARCH ENGINE
 
--- Animation system
 local AnimFix_AP, AnimFix_TB, AnimFix_Spam = true, true, true
 local AnimFix_Cache = {}
 local ANIM_FAIL = false
@@ -2257,15 +2665,15 @@ local function PlayParryAnimation()
     if env.qzxp_unlockAllActive or (env.skinChanger and env.swordAnimationsEnabled) then
         attribute = env.swordAnimations
     elseif env.skinChanger and type(env.qzxp_realSword) == "string" and env.qzxp_realSword ~= "" then
-        -- A model-only change must not silently change the animation set.
+
         attribute = env.qzxp_realSword
     else
         attribute = character:GetAttribute("CurrentlyEquippedSword")
             or LocalPlayer:GetAttribute("CurrentlyEquippedSword")
     end
     if not attribute or attribute == "" then return end
-    local swordInfo = swordModule:GetSword(attribute)
-    if not swordInfo or character ~= LocalPlayer.Character then return end
+    local okInfo, swordInfo = pcall(function() return swordModule:GetSword(attribute) end)
+    if not okInfo or not swordInfo or character ~= LocalPlayer.Character then return end
     for _, track in animationController:GetPlayingAnimationTracks(animator) do
         if track:GetAttribute("GrabParry") or track:GetAttribute("Parry")
             or track.Name == "GrabParry" or track.Name == "Grab"
@@ -2274,18 +2682,25 @@ local function PlayParryAnimation()
             track:Stop(track:GetAttribute("StopFadeTime") or 0.1)
         end
     end
-    for _, animation in swordApi:GetAnimations(character, {"Parry", "GrabParry"}, swordInfo.AnimationType, swordInfo.SwordType) do
-        local track = animationController:LoadAnimation(animator, animation, true)
-        local speed = track:GetAttribute("PlaySpeed") or 1
-        track:Play(
-            track:GetAttribute("PlayFadeTime") or 0.1,
-            track:GetAttribute("PlayWeight") or 1,
-            speed
-        )
-        character:SetAttribute("ParryTime", math.max(
-            character:GetAttribute("ParryTime") or 0,
-            track.Length == 0 and 1 or (track.Length - track.TimePosition) * speed
-        ))
+    local okAnimations, animations = pcall(function()
+        return swordApi:GetAnimations(character, {"Parry", "GrabParry"}, swordInfo.AnimationType, swordInfo.SwordType)
+    end)
+    if not okAnimations or type(animations) ~= "table" then return end
+    for _, animation in animations do
+        pcall(function()
+            local track = animationController:LoadAnimation(animator, animation, true)
+            if not track then return end
+            local speed = track:GetAttribute("PlaySpeed") or 1
+            track:Play(
+                track:GetAttribute("PlayFadeTime") or 0.1,
+                track:GetAttribute("PlayWeight") or 1,
+                speed
+            )
+            character:SetAttribute("ParryTime", math.max(
+                character:GetAttribute("ParryTime") or 0,
+                track.Length == 0 and 1 or (track.Length - track.TimePosition) * speed
+            ))
+        end)
     end
 end
 local function PlaySingleParryAnimation()
@@ -2296,27 +2711,32 @@ local function PlaySingleParryAnimation()
     end
 end
 
--- Block keybind detection (for game-native parry animation)
-local Block_Keybind
+local Block_Keybind = Enum.KeyCode.F
 do
-    local pg = LocalPlayer:WaitForChild("PlayerGui")
-    Block_Keybind = pg.Settings.Frame.Frame["Keybinds/Block"].Keybind1.TextBox.Text or pg.Settings.Frame.Frame["Keybinds/Block"].Keybind2.TextBox.Text or pg.Settings.Frame.Frame["Keybinds/Block"].Keybind3.TextBox.Text
+    pcall(function()
+        local pg = LocalPlayer:WaitForChild("PlayerGui")
+        local block = pg.Settings.Frame.Frame["Keybinds/Block"]
+        for i = 1, 3 do
+            local text = block["Keybind" .. i].TextBox.Text
+            if type(text) == "string" and text ~= "" then
+                local ok, key = pcall(function() return Enum.KeyCode[text] end)
+                if ok and key and key ~= Enum.KeyCode.Unknown then
+                    Block_Keybind = key
+                    break
+                end
+            end
+        end
+    end)
 end
 local function Animation_Fix()
-    local identity = getthreadidentity()
-    if identity ~= 8 then
-        setthreadidentity(8)
-    end
+    local identity = getthreadidentity and getthreadidentity() or 8
+    if setthreadidentity and identity ~= 8 then setthreadidentity(8) end
     local ok, message = pcall(function()
         VirtualInputManager:SendKeyEvent(true, Block_Keybind, false, game)
         VirtualInputManager:SendKeyEvent(false, Block_Keybind, false, game)
     end)
-    if identity ~= 8 then
-        setthreadidentity(identity)
-    end
-    if not ok then
-        error(message, 0)
-    end
+    if setthreadidentity and identity ~= 8 then setthreadidentity(identity) end
+    return ok, message
 end
 local SpamAnimRate, SpamAnimLastPlayed, SpamAnimBypass = 100, 0, false
 local SpamAnimDelayLimit, SpamAnimSpammingMode, SpamAnimParries = 0, false, 0
@@ -2332,13 +2752,12 @@ local function StopParryGrabTracks()
         end
     end
 end
-table.insert(Det.connections, ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+table.insert(Det.connections, Life.connect(ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent, function()
     AutoClash.record()
     Bypass_Cd = true
     StopParryGrabTracks()
 end))
 
--- Ball cache
 local _ballCache = {}
 local _ballCacheDirty = true
 local _ballCanCollideSet = setmetatable({}, {__mode = "k"})
@@ -2350,8 +2769,7 @@ local function _onBallRespawn(ball)
         pcall(_ballRespawnHandlers[i], ball)
     end
 end
--- Both ChildAdded and DescendantAdded can report the same ball. Keep one
--- realBall listener per instance and release it as the instance leaves.
+
 local _ballAttributeConns = setmetatable({}, {__mode = "k"})
 local function _unhookBallAttribute(child)
     local conn = _ballAttributeConns[child]
@@ -2362,28 +2780,28 @@ spawnTracked(function()
         if not folder then return end
         local function hookRealBall(child)
             if child and child:IsA("Instance") and not _ballAttributeConns[child] then
-                _ballAttributeConns[child] = child:GetAttributeChangedSignal('realBall'):Connect(function()
+                _ballAttributeConns[child] = Life.connect(child:GetAttributeChangedSignal('realBall'), function()
                     _markBallsDirty()
                     if child:GetAttribute('realBall') then _onBallRespawn(child) end
                 end)
             end
         end
-        table.insert(Det.connections, folder.ChildAdded:Connect(function(child)
+        table.insert(Det.connections, Life.connect(folder.ChildAdded, function(child)
             _markBallsDirty()
             hookRealBall(child)
             if child:GetAttribute('realBall') then _onBallRespawn(child) end
         end))
-        table.insert(Det.connections, folder.ChildRemoved:Connect(function(child)
+        table.insert(Det.connections, Life.connect(folder.ChildRemoved, function(child)
             _markBallsDirty()
             _unhookBallAttribute(child)
         end))
-        table.insert(Det.connections, folder.DescendantAdded:Connect(function(d)
+        table.insert(Det.connections, Life.connect(folder.DescendantAdded, function(d)
             if d:IsA("Ball") or d:IsA("BasePart") then
                 _markBallsDirty()
                 hookRealBall(d)
             end
         end))
-        table.insert(Det.connections, folder.DescendantRemoving:Connect(function(d)
+        table.insert(Det.connections, Life.connect(folder.DescendantRemoving, function(d)
             _unhookBallAttribute(d)
         end))
         for _, child in ipairs(folder:GetChildren()) do hookRealBall(child) end
@@ -2396,8 +2814,10 @@ local function _scanBallsInto(folder, startN)
     local n = startN
     for _, ball in ipairs(folder:GetChildren()) do
         if ball:GetAttribute('realBall') then
-            if not _ballCanCollideSet[ball] then
-                ball.CanCollide = false; _ballCanCollideSet[ball] = true
+            if _ballCanCollideSet[ball] == nil then
+                local original = ball.CanCollide
+                _ballCanCollideSet[ball] = original
+                if original then ball.CanCollide = false end
             end
             n = n + 1; _ballCache[n] = ball
         end
@@ -2435,7 +2855,6 @@ local function getTargetingBalls(out)
     return out
 end
 
--- Ping (rolling minimum)
 local PING_SAMPLES = 12
 local _pingRing = {}
 local _pingRingN = 0
@@ -2462,7 +2881,6 @@ local function getPing()
     return _pingMin
 end
 
--- Curve detection
 local CurveState = setmetatable({}, {__mode = "k"})
 local function _newCurveState()
     return {
@@ -2620,7 +3038,6 @@ local function isApproachingPlayer(ball, playerPos, hitRadius, lookahead)
     return horizDist(Vector3.new(cx, 0, cz), playerPos) <= (hitRadius or 8)
 end
 
--- Sender tracking
 local Sender = setmetatable({}, {__mode = "k"})
 local function trackBall(ball)
     if not ball then return end
@@ -2628,32 +3045,127 @@ local function trackBall(ball)
     local s = {last = nil, prev = nil, conn = nil}
     Sender[ball] = s
     s.prev = ball:GetAttribute("target")
-    s.conn = ball:GetAttributeChangedSignal('target'):Connect(function()
+    s.conn = Life.connect(ball:GetAttributeChangedSignal('target'), function()
         local nt = ball:GetAttribute("target")
         if nt == LocalPlayer.Name and s.prev and s.prev ~= LocalPlayer.Name then
             s.last = s.prev
         end
         s.prev = nt
     end)
-    ball.Destroying:Once(function()
+    Life.once(ball.Destroying, function()
         if s.conn then pcall(function() s.conn:Disconnect() end) end
         Sender[ball] = nil
     end)
 end
 
-local function findPart(name)
-    if not name or name == "" or name == LocalPlayer.Name then return nil end
-    if not Players:FindFirstChild(name) then return nil end
-    local af = Workspace:FindFirstChild("Alive")
-    if af then local c = af:FindFirstChild(name); if c then return c.PrimaryPart or c:FindFirstChild("HumanoidRootPart") end end
-    local p = Players:FindFirstChild(name)
-    if p and p.Character then return p.Character.PrimaryPart end
-end
+local findPart, lockResolve = (function()
+    local lastPart, lastStamp
+
+    local function playerFor(name)
+        if not name or name == "" then return nil end
+        local clean = name:match("^(.-)%s*%(") or name
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LocalPlayer and (pl.Name == name or pl.Name == clean
+                or pl.DisplayName == name or pl.DisplayName == clean) then
+                return pl
+            end
+        end
+        local direct = Players:FindFirstChild(clean)
+        if direct and direct:IsA("Player") and direct ~= LocalPlayer then return direct end
+    end
+
+    local function partOf(character)
+        if not character then return nil end
+        return character.PrimaryPart
+            or character:FindFirstChild("HumanoidRootPart")
+            or character:FindFirstChild("Head", true)
+    end
+
+    local function find(name)
+        if not name or name == "" or name == LocalPlayer.Name or name == "None" then return nil end
+        local pl = playerFor(name)
+        if not pl then return nil end
+        for _, folderName in ipairs({"Alive", "Dead"}) do
+            local folder = Workspace:FindFirstChild(folderName)
+            local character = folder and folder:FindFirstChild(pl.Name)
+            local part = character and partOf(character)
+            if part then return part end
+        end
+        return partOf(pl.Character)
+    end
+
+    local function roots()
+        local list, seen = {}, {}
+        local function add(model)
+            if not model or seen[model] or model == LocalPlayer.Character then return end
+            if not Players:GetPlayerFromCharacter(model) then return end
+            local part = partOf(model)
+            if not part then return end
+            seen[model] = true
+            table.insert(list, part)
+        end
+        for _, folderName in ipairs({"Alive", "Dead"}) do
+            local folder = Workspace:FindFirstChild(folderName)
+            if folder then
+                for _, v in ipairs(folder:GetChildren()) do
+                    if v:IsA("Model") then add(v) end
+                end
+            end
+        end
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LocalPlayer then add(pl.Character) end
+        end
+        return list
+    end
+
+    local function resolve(ball)
+        local tp = nil
+        if LockTarget ~= "None" then tp = find(LockTarget) end
+        if not tp and ball then
+            local owner = ball:GetAttribute("target")
+            if owner and owner ~= LocalPlayer.Name then tp = find(owner) end
+        end
+        if not tp then
+            local cam = Workspace.CurrentCamera
+            local character = LocalPlayer.Character
+            local rp = character and character.PrimaryPart and character.PrimaryPart.Position
+                or (cam and cam.CFrame.Position) or Vector3.zero
+            local candidates = roots()
+            if cam and #candidates > 0 then
+                local ml; pcall(function() ml = UserInputService:GetMouseLocation() end)
+                local c = ml or Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+                local bs, bw = math.huge, math.huge
+                local st2, wt = nil, nil
+                for _, part in ipairs(candidates) do
+                    local pos = part.Position
+                    local sp, on = cam:WorldToScreenPoint(pos)
+                    if on then
+                        local d = (Vector2.new(sp.X, sp.Y) - c).Magnitude
+                        if d < bs then bs = d; st2 = part end
+                    end
+                    local wd = (pos - rp).Magnitude
+                    if wd < bw then bw = wd; wt = part end
+                end
+                tp = st2 or wt
+            elseif #candidates > 0 then
+                tp = candidates[1]
+            end
+        end
+
+        if not tp and lastPart and lastPart.Parent and lastStamp
+            and (os.clock() - lastStamp) < 2 then
+            tp = lastPart
+        end
+        if tp then lastPart, lastStamp = tp, os.clock() end
+        return tp
+    end
+
+    return find, resolve
+end)()
 
 local LockEnabled, LockTarget = false, "None"
 local HLEnabled, HLColor = false, Color3.fromRGB(255, 60, 60)
 
--- Lock indicator (corner brackets)
 local LockIndicator = { gui = nil, lines = {} }
 local function ensureLockIndicator()
     if LockIndicator.gui and LockIndicator.gui.Parent then return end
@@ -2788,7 +3300,6 @@ local function syncLockDD()
     end) end)
 end
 
--- Curve CFrame
 local CURVES = {"Camera", "Dot", "Nearest", "Random", "Accel", "Backwards", "Slow", "High", "Normal", "Speed", "Down", "Left", "Right"}
 local CurveMode = "Camera"
 local lastCFCalcFrame, cachedCF = 0, nil
@@ -2809,9 +3320,7 @@ local function IsBlockLegit()
     if lobbyParry and LocalPlayer:GetAttribute("InLobbyParryCooldown") then return false end
     return true
 end
--- Lobby training uses screen positions for practice targets, not only
--- players in Workspace.Alive. Keep this override scoped to the lobby area;
--- elsewhere the original match targeting and Parry Lock remain unchanged.
+
 local ArenaAim = {targetRefresh = 0, targets = {}, positionsFrame = -1}
 function ArenaAim.area()
     local spawn = Workspace:FindFirstChild("Spawn")
@@ -2822,9 +3331,9 @@ function ArenaAim.active()
     local character = LocalPlayer.Character
     local dead = Workspace:FindFirstChild("Dead")
     if not training or not character or not dead or character.Parent ~= dead then return false end
-    -- Matches Tsukuyomi's lobby-training state check.
+
     if LocalPlayer:GetAttribute("LobbyTraining") then return true end
-    -- Fallback for the scanned lobby map if the attribute is absent/delayed.
+
     local root = character:FindFirstChild("HumanoidRootPart")
     local area = training:FindFirstChild("TrainingArea")
     if not root or not area or not area:IsA("BasePart") then return false end
@@ -2895,7 +3404,7 @@ end
 
 local _cachedCFBall = nil
 local function getCurveCF(ballArg)
-    -- Parry Lock takes priority over training/arena camera aim as well.
+
     if ArenaAim.active() and not LockEnabled then return (Workspace.CurrentCamera or Camera).CFrame end
     if cachedCF and frameCount == lastCFCalcFrame and _cachedCFBall == ballArg then return cachedCF end
     lastCFCalcFrame = frameCount
@@ -2910,7 +3419,7 @@ local function getCurveCF(ballArg)
         return cachedCF
     end
     local tp = nil
-    if LockEnabled and LockTarget ~= "None" then tp = findPart(LockTarget) end
+    if LockEnabled then tp = lockResolve(ball) end
     local _s = ball and Sender[ball]
     if not tp and _s and _s.last then tp = findPart(_s.last) end
     if not tp then
@@ -2980,7 +3489,6 @@ local function getCurveCF(ballArg)
     return cachedCF
 end
 
--- Remote fire
 local _apLocked      = false
 local _apLockedUntil = 0
 local _apLockedBall  = nil
@@ -3000,7 +3508,7 @@ local function setAPLockout(ball)
     _apLockedUntil = os.clock() + 1.0
     _apLockedBall  = ball
     if ball then
-        _apLockedConn = ball:GetAttributeChangedSignal('target'):Connect(function()
+        _apLockedConn = Life.connect(ball:GetAttributeChangedSignal('target'), function()
             if ball:GetAttribute('target') ~= _lpName then clearAPLockout() end
         end)
     end
@@ -3046,12 +3554,10 @@ local function prepareParryPayload(ball)
     return rcf, ed, {math.floor(mp.X), math.floor(mp.Y)}
 end
 
--- Final common lock override for every script-generated parry payload.
--- This also covers paths which originally used their own camera/clash/arena aim.
 local function applyParryLock(rcf, mouse, ball)
     if not LockEnabled then return rcf, mouse end
     local lockedCF = getCurveCF(ball)
-    local lockPart = LockTarget ~= "None" and findPart(LockTarget) or nil
+    local lockPart = lockResolve(ball)
     local aimPosition = lockPart and lockPart.Position
         or (lockedCF.Position + lockedCF.LookVector * 100)
     local ok, screenPoint = pcall(Camera.WorldToScreenPoint, Camera, aimPosition)
@@ -3062,10 +3568,14 @@ local function applyParryLock(rcf, mouse, ball)
 end
 
 local function sendPreparedParry(rcf, ed, mouse, ball)
+    if not Det.alive or not _remote or not _args or not _tokenFound then return false end
+    if typeof(rcf) ~= "CFrame" or type(ed) ~= "table" or type(mouse) ~= "table" then return false end
     rcf, mouse = applyParryLock(rcf, mouse, ball)
-    -- Generate the token for each actual remote call, as in the original.
+
+    local token = _tokenize(_args[2])
+    if token == "" then return false end
     return pcall(function()
-        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]), 0.5, rcf, ed, mouse, false)
+        _remote:FireServer(_args[1], _args[2], token, 0.5, rcf, ed, mouse, false)
     end)
 end
 local function fireRemote(ball)
@@ -3092,10 +3602,16 @@ end
 local AP_Acc, AP_Div = 50, 1.1
 local AccMin, AccMax = 25, 75
 local RandAcc, AutoAbility = false, false
-local function computeTriggerDist(spd, ping, curved, acc)
-    local reaction = 0.10 + ((acc or 50) - 1) * (0.08 / 99)
-    if curved then reaction = reaction * 1.25 end
-    return math.max(spd * (reaction + (ping or 0) / 1000 + 0.03), 14)
+
+local AP = {}
+
+function AP.shortRadius(spd, ping, accuracy)
+    local acc = math.max((accuracy - 1) * 0.015151515151515152, 0.1)
+    local divisor = (2.4 + math.min(math.max(spd - 9.5, 0), 650) * 0.002) * acc
+    return math.clamp(ping / 100, 5, 17) + math.max(spd / divisor, 9.5)
+end
+function AP.radius(spd)
+    return AP.shortRadius(spd, getPing(), AP_Acc)
 end
 local function updDiv() AP_Div = 0.7 + (AP_Acc - 1) * (0.9 / 99) end
 updDiv()
@@ -3108,20 +3624,19 @@ spawnTracked(function()
                 if ok and type(v) == "number" and v > 0 then rawPing = v end
             end
             local internal = math.clamp(1.5 - (rawPing / 200) * 1.5, 0, 1.5)
-            AP_Acc = math.clamp(math.floor(internal / 0.015151515151515152 + 1 + 0.5), AccMin, AccMax)
+            local lo, hi = math.min(AccMin, AccMax), math.max(AccMin, AccMax)
+            AP_Acc = math.clamp(math.floor(internal / 0.015151515151515152 + 1 + 0.5), lo, hi)
             updDiv()
             if Options and Options.Accuracy then pcall(function() Options.Accuracy:SetValue(AP_Acc) end) end
         end
     end
 end)
 
-pcall(function() ReplicatedStorage.Remotes.DeathBall.OnClientEvent:Connect(function(_,d) Det.DSOn=d or false end) end)
-pcall(function() ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_,b) Det.InfOn=b or false end) end)
-pcall(function() ReplicatedStorage.Remotes.InfinityBall.OnClientEvent:Connect(function(_, on) InfinityBallRaw = on == true end) end)
+pcall(function() table.insert(Det.connections, Life.connect(ReplicatedStorage.Remotes.DeathBall.OnClientEvent, function(_,d) Det.DSOn=d or false end)) end)
+pcall(function() table.insert(Det.connections, Life.connect(ReplicatedStorage.Remotes.InfinityBall.OnClientEvent, function(_,b) Det.InfOn=b or false end)) end)
+pcall(function() table.insert(Det.connections, Life.connect(ReplicatedStorage.Remotes.InfinityBall.OnClientEvent, function(_, on) InfinityBallRaw = on == true end)) end)
 local _lpName = LocalPlayer.Name
--- Flyte's Time Hole / Slashes of Fury detection, adapted to qzxp's
--- own parry remote and input services.  SoF detection and Auto Hit are
--- independent: detecting Fury does not automatically send parries.
+
 function Det.resetSF()
     Det.generation += 1
     Det.SFOn, Det.SFActive = false, false
@@ -3157,8 +3672,7 @@ function Det.abilityPressed()
         Det.SFOn, Det.SFActive = true, false
     end
 end
--- Flyte's counter-driven remote method, using the same parry sender as qzxp
--- spam. The original Flyte logic counts accepted sender calls, not server acks.
+
 function Det.onCounter(counter)
     if not Det.alive or not Det.SFDet or not Det.SFOn then return end
     local label = counter:FindFirstChildOfClass("TextLabel")
@@ -3179,8 +3693,7 @@ function Det.onCounter(counter)
                 if Det.animFix then pcall(PlaySingleParryAnimation) end
             end
         end
-        -- Avoid a fast idle loop when Auto Hit is off or has reached its
-        -- target. Active timing stays Flyte's remote-mode task.wait(delay).
+
         local delay = Det.parryDelay or 0.12
         if not Det.autoHit or count >= Det.maxParryCount then delay = math.max(delay, 0.1) end
         task.wait(delay)
@@ -3192,7 +3705,7 @@ function Det.watchBall(ball)
     if Det.ballConnections[ball] then return end
     local counter = ball:FindFirstChild("ComboCounter")
     if counter then task.spawn(Det.onCounter, counter) end
-    Det.ballConnections[ball] = ball.ChildAdded:Connect(function(child)
+    Det.ballConnections[ball] = Life.connect(ball.ChildAdded, function(child)
         if child.Name == "ComboCounter" then task.spawn(Det.onCounter, child) end
     end)
 end
@@ -3208,8 +3721,8 @@ function Det.watchBalls(folder)
     Det.ballsFolder = folder
     Det.folderConnections = {}
     for _, ball in ipairs(folder:GetChildren()) do Det.watchBall(ball) end
-    local added = folder.ChildAdded:Connect(Det.watchBall)
-    local removed = folder.ChildRemoved:Connect(function(ball)
+    local added = Life.connect(folder.ChildAdded, Det.watchBall)
+    local removed = Life.connect(folder.ChildRemoved, function(ball)
         local connection = Det.ballConnections[ball]
         if connection then connection:Disconnect(); Det.ballConnections[ball] = nil end
     end)
@@ -3228,10 +3741,9 @@ function Det.connect(name, callback)
         warn("[qzxp] missing Flyte detection event: " .. name)
         return
     end
-    table.insert(Det.connections, event.OnClientEvent:Connect(callback))
+    table.insert(Det.connections, Life.connect(event.OnClientEvent, callback))
 end
--- Flyte uses the supplied actor only for TimeHoleActivate; Catch, FuryEnd,
--- and TimeHoleDeactivate are client events without actor filtering.
+
 Det.connect("RE/TimeHoleActivate", function(actor)
     if actor == LocalPlayer or actor == _lpName then Det.THOn = true end
 end)
@@ -3241,19 +3753,19 @@ Det.connect("RE/SlashesOfFuryCatch", function()
     Det.SFOn, Det.SFActive = true, false
 end)
 Det.connect("RE/SlashesOfFuryEnd", Det.resetSF)
--- Flyte clears its Fury/Time Hole state on character spawn.
-table.insert(Det.connections, LocalPlayer.CharacterAdded:Connect(function()
+
+table.insert(Det.connections, Life.connect(LocalPlayer.CharacterAdded, function()
     Det.resetSF()
     Det.THOn = false
 end))
 local balls = Workspace:FindFirstChild("Balls")
 if balls then Det.watchBalls(balls) end
-table.insert(Det.connections, Workspace.ChildAdded:Connect(function(child)
+table.insert(Det.connections, Life.connect(Workspace.ChildAdded, function(child)
     if child.Name == "Balls" then Det.watchBalls(child) end
 end))
 local abilityButton = ReplicatedStorage.Remotes:FindFirstChild("AbilityButtonPress")
 if abilityButton and abilityButton:IsA("BindableEvent") then
-    table.insert(Det.connections, abilityButton.Event:Connect(Det.abilityPressed))
+    table.insert(Det.connections, Life.connect(abilityButton.Event, Det.abilityPressed))
 end
 spawnTracked(function()
     local ok, input, settings = pcall(function()
@@ -3262,7 +3774,7 @@ spawnTracked(function()
     end)
     if not Det.alive then return end
     if ok and input and input.InputBegan and settings then
-        table.insert(Det.connections, input.InputBegan:Connect(function(key, processed)
+        table.insert(Det.connections, Life.connect(input.InputBegan, function(key, processed)
             if not processed then
                 local valid, use = pcall(function() return settings:UseBind(key, "Ability") end)
                 if valid and use then Det.abilityPressed() end
@@ -3302,12 +3814,12 @@ do
     end
 end
 if _apReplicator then
-    _apReplicator.OnClientEvent:Connect(function(ball, pos)
+    qzxpTrackUI(Life.connect(_apReplicator.OnClientEvent, function(ball, pos)
         if ball and ball.Parent == Workspace:FindFirstChild("Balls")
            and ball:GetAttribute("realBall") == true then
             _apPositions[ball] = pos
         end
-    end)
+    end))
 end
 local function apFirstBall()
     local all = getAllBalls()
@@ -3361,7 +3873,8 @@ local function apByMouse(aliveChildren)
         end
     end
     if #list == 0 then _apTarget.current = nil; return nil end
-    local cam = Workspace.CurrentCamera
+    local cam = Workspace.CurrentCamera or Camera
+    if not cam then _apTarget.current = nil return nil end
     local cf = cam.CFrame
     local origin = cf.Position
     local look   = cf.LookVector
@@ -3389,7 +3902,8 @@ local function apByMouse(aliveChildren)
     return bestModel
 end
 local function apGetCurveCF()
-    local cam  = Workspace.CurrentCamera
+    local cam  = Workspace.CurrentCamera or Camera
+    if not cam then return CFrame.new() end
     local cf   = cam.CFrame
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -3449,6 +3963,7 @@ local function apGetCurveCF()
 end
 local _apFireCount = 0
 local function apFire()
+    if not Det.alive or _apFireCount >= 8 then return false end
     if not _remote or not _args or not _tokenFound then return false end
     local inArena = ArenaAim.active()
     local aliveChildren
@@ -3459,7 +3974,8 @@ local function apFire()
         aliveChildren = alive and alive:GetChildren() or nil
         apByMouse(aliveChildren)
     end
-    local cam = Workspace.CurrentCamera
+    local cam = Workspace.CurrentCamera or Camera
+    if not cam then return false end
     local rcf = inArena and cam.CFrame or apGetCurveCF()
     local targetPart = not inArena and _apTarget.current and _apTarget.current.PrimaryPart
     local mp
@@ -3492,16 +4008,17 @@ local function apFire()
         end
     end
     rcf, mp = applyParryLock(rcf, mp, apFirstBall())
+    local token = _tokenize(_args[2])
+    if token == "" then return false end
     local ok = pcall(function()
-        _remote:FireServer(_args[1], _args[2], _tokenize(_args[2]),
-            0.5, rcf, ed, mp, false)
+        _remote:FireServer(_args[1], _args[2], token, 0.5, rcf, ed, mp, false)
     end)
-    if _apFireCount > 7 then return false end
+    if not ok then return false end
     _apFireCount += 1
     task.delay(0.5, function()
         if _apFireCount > 0 then _apFireCount -= 1 end
     end)
-    return ok
+    return true
 end
 local function apCurved(ball)
     local b = ball or apFirstBall()
@@ -3540,9 +4057,21 @@ local function apCurved(ball)
     if now - _apState.Curving    < n33 / 1.5 then return true end
     return dot < n32
 end
-local function apAccuracy()
-    return (AP_Acc - 1) * 0.015151515151515152
+
+getgenv().qzxp_rearm = function()
+    if getgenv().qzxp_resetSpamState then pcall(getgenv().qzxp_resetSpamState) end
+    if getgenv().qzxp_resetAPState then pcall(getgenv().qzxp_resetAPState) end
+    _frameBlockOk = nil
+    _frameEd, _frameEdFrame = nil, -1
+    cachedCF, lastCFCalcFrame, _cachedCFBall = nil, 0, nil
 end
+
+qzxpTrackUI(Life.connect(LocalPlayer.CharacterAdded, function()
+    task.delay(0.5, function()
+        if getgenv().qzxp_rearm then pcall(getgenv().qzxp_rearm) end
+    end)
+end))
+
 local _apDebounce = false
 local _apUntilAt  = 0
 getgenv().qzxp_resetAPState = function()
@@ -3616,7 +4145,7 @@ local function spamService(ball, ping)
     local rootPos = char.PrimaryPart.Position
     local pos     = ball.Position
     local dot     = (rootPos - pos).Unit:Dot(vel.Unit)
-    local threshold = ping + math.min(speed / 4.5, 120) + 6 
+    local threshold = ping + math.min(speed / 4.5, 120) + 6
     local ballProps   = getBallProperties(ball)
     local entityProps = getEntityProperties()
     if not ballProps or not entityProps then return 0 end
@@ -3637,14 +4166,13 @@ local function apCheck()
     local now = tick()
     if now < _apUntilAt then return end
     local pos       = root.Position
-    local pingDist  = math.clamp(getPing() / 100, 5, 17)
+
     local balls = getAllBalls()
     local firstBall = balls[1]
     local firstTarget = firstBall and firstBall:GetAttribute("target")
     local runtime  = Workspace:FindFirstChild("Runtime")
     local tornado  = runtime and runtime:FindFirstChild("Tornado")
     local tornadoT = tornado and (tornado:GetAttribute("TornadoTime") or 1)
-    local acc = math.max(apAccuracy(), 0.1)
     for _, ball in ipairs(balls) do
         if not ball then continue end
         local z = ball:FindFirstChild("zoomies")
@@ -3652,7 +4180,6 @@ local function apCheck()
         local target = ball:GetAttribute("target")
         local spd    = z.VectorVelocity.Magnitude
         local dist   = (pos - apPosition(ball)).Magnitude
-        local n31    = (2.4 + math.min(math.max(spd - 9.5, 0), 650) * 0.002) * acc
         if ball:FindFirstChild("AeroDynamicSlashVFX") then
             ball.AeroDynamicSlashVFX:Destroy()
             _apState.AerodynamicTime = now
@@ -3664,35 +4191,46 @@ local function apCheck()
             continue
         end
         if target == _lpName
-           and dist <= pingDist + math.max(spd / n31, 9.5) then
+           and dist <= AP.radius(spd) then
             if apFire() then
                 _apLastFire = os.clock()
-                if AnimFix_AP then PlaySingleParryAnimation() end
                 _apDebounce = true
                 _apUntilAt  = now + 1
-
+                if AnimFix_AP then PlaySingleParryAnimation() end
+                return
             end
         end
     end
+end
+CombatLoops.register("AP", function()
+    _frameBlockOk = nil
+    AutoClash.update()
+    apCheck()
+end)
+local function onAPTargetChanged(ball)
+    if not AP_On or not ball or not ball.Parent then return end
+    if ball:GetAttribute("target") ~= _lpName then return end
+    CombatLoops.run(CombatLoops.jobs.AP)
 end
 do
     Det.apBallConnections = setmetatable({}, {__mode = "k"})
     local function watchBallTarget(ball)
         if Det.apBallConnections[ball] then return end
-        Det.apBallConnections[ball] = ball:GetAttributeChangedSignal("target"):Connect(function()
+        Det.apBallConnections[ball] = Life.connect(ball:GetAttributeChangedSignal("target"), function()
             _apDebounce = false
             _apUntilAt = 0
+            onAPTargetChanged(ball)
         end)
     end
     local function watchBalls(folder)
         if not folder then return end
         for _, ball in ipairs(folder:GetChildren()) do watchBallTarget(ball) end
-        qzxpTrackUI(folder.ChildAdded:Connect(function(ball)
+        qzxpTrackUI(Life.connect(folder.ChildAdded, function(ball)
             _apDebounce = false
             _apUntilAt = 0
             watchBallTarget(ball)
         end))
-        qzxpTrackUI(folder.ChildRemoved:Connect(function(ball)
+        qzxpTrackUI(Life.connect(folder.ChildRemoved, function(ball)
             local connection = Det.apBallConnections[ball]
             if connection then connection:Disconnect(); Det.apBallConnections[ball] = nil end
             _apDebounce = false
@@ -3705,7 +4243,7 @@ do
     watchBalls(Workspace:FindFirstChild("TrainingBalls"))
 end
 pcall(function()
-    ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(_, hitPart)
+    table.insert(Det.connections, Life.connect(ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent, function(_, hitPart)
         local char = LocalPlayer.Character
         if not char or not char.PrimaryPart then return end
         local ball = apFirstBall()
@@ -3724,16 +4262,13 @@ pcall(function()
         if hitPart ~= char.PrimaryPart and dist > n32 then
             _apState.Curving = tick()
         end
-    end)
+    end))
 end)
 addPostSimHandler(function() _frameBlockOk = nil end, 0)
 addPostSimHandler(AutoClash.update, 1)
-addPostSimHandler(apCheck, 2)
-
 
 end
 
--- Parry range visualizer
 local PRV = {
     On = false, Model = nil, Segments = {}, SEG_COUNT = 48,
     COLOR = Color3.fromRGB(255, 255, 255), TRANSPARENCY = 0.35,
@@ -3803,19 +4338,33 @@ addHeartbeatHandler(function()
     end
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
-    local ball = getBall()
-    local z = ball and ball.Parent and ball:FindFirstChild("zoomies")
-    if not root or not z then
+
+    local ball, spd
+    local seen = getAllBalls()
+    for i = 1, #seen do
+        local b = seen[i]
+        local zz = b and b:FindFirstChild("zoomies")
+        if zz and b:GetAttribute("target") == _lpName then
+            ball, spd = b, zz.VectorVelocity.Magnitude
+            break
+        end
+    end
+    if not ball then
+        ball = getBall()
+        local zz = ball and ball.Parent and ball:FindFirstChild("zoomies")
+        spd = zz and zz.VectorVelocity.Magnitude or nil
+    end
+    if not root or not spd then
         if PRV.Model then PRV.Model.Parent = nil end
         return
     end
-    local radius = computeTriggerDist(z.VectorVelocity.Magnitude, getPing(), isCurvedCached(ball), AP_Acc)
-    PRV.Draw(root.Position, radius)
+    PRV.Draw(root.Position, AP.radius(spd))
     if PRV.Model and PRV.Model.Parent ~= Workspace then PRV.Model.Parent = Workspace end
 end, 6)
 
--- Triggerbot
-local function tryTBForBall(ball)
+local function checkTBForBall(ball)
+    if CombatLoops.stopped or not Life.current() then return end
+    AutoClash.update()
     if not TB_On or Spam_On or AutoClash.active or not ball or not ball.Parent then return end
     if isAPLocked() then return end
     if ball:GetAttribute('target') ~= _lpName then return end
@@ -3834,36 +4383,25 @@ local function tryTBForBall(ball)
         if AnimFix_TB then PlaySingleParryAnimation() end
     end
 end
-addPostSimHandler(function()
-    if not TB_On or Spam_On or AutoClash.active then return end
-    if _frameBlockOk == nil then _frameBlockOk = IsBlockLegit() end
-    if not _frameBlockOk then return end
-    if isAPLocked() then return end
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root or root:FindFirstChild('SingularityCape') then return end
-    local blocked = (Det.InfDet and Det.InfOn) or (Det.DSDet and Det.DSOn) or (Det.THDet and Det.isTimeHole()) or (Det.SFDet and (Det.SFOn or Det.SFActive))
-    if blocked then return end
-    local balls = getAllBalls()
-    for _, ball in pairs(balls) do
-        if ball:GetAttribute('target') ~= _lpName then continue end
-        if ball:FindFirstChild('ComboCounter') then continue end
-        local fired = fireRemote(ball)
-        if fired then
-            _tbLastFire = os.clock()
-            setAPLockout(ball)
-            if AnimFix_TB then PlaySingleParryAnimation() end
-            break
-        end
-    end
-end, 3)
+local tbBusy = false
+local tbWarning = {}
+local function tryTBForBall(ball)
+    if tbBusy or not Life.current() then return end
+    tbBusy = true
+    local ok, err = pcall(checkTBForBall, ball)
+    tbBusy = false
+    if not ok then handlerFailed(tbWarning, "TB event", err) end
+end
+CombatLoops.checkTBNow = function()
+    for _, ball in ipairs(getAllBalls()) do tryTBForBall(ball) end
+end
 local _tbConns = setmetatable({}, {__mode = "k"})
 Det.tbConnections = _tbConns
 local function _attachTB(ball)
     if not ball or _tbConns[ball] then return end
     if not ball:GetAttribute('realBall') then
         local waitConn
-        waitConn = ball:GetAttributeChangedSignal('realBall'):Connect(function()
+        waitConn = Life.connect(ball:GetAttributeChangedSignal('realBall'), function()
             if ball:GetAttribute('realBall') then
                 if waitConn then pcall(function() waitConn:Disconnect() end) end
                 if _tbConns[ball] == waitConn then _tbConns[ball] = nil end
@@ -3871,14 +4409,14 @@ local function _attachTB(ball)
             end
         end)
         _tbConns[ball] = waitConn
-        ball.Destroying:Once(function()
+        Life.once(ball.Destroying, function()
             if waitConn then pcall(function() waitConn:Disconnect() end) end
             if _tbConns[ball] == waitConn then _tbConns[ball] = nil end
         end)
         return
     end
     local conn
-    conn = ball:GetAttributeChangedSignal('target'):Connect(function()
+    conn = Life.connect(ball:GetAttributeChangedSignal('target'), function()
         if ball:GetAttribute('target') == _lpName then
             tryTBForBall(ball)
             task.defer(function()
@@ -3889,7 +4427,8 @@ local function _attachTB(ball)
         end
     end)
     _tbConns[ball] = conn
-    ball.Destroying:Once(function()
+    task.defer(function() tryTBForBall(ball) end)
+    Life.once(ball.Destroying, function()
         if conn then pcall(function() conn:Disconnect() end) end
         _tbConns[ball] = nil
     end)
@@ -3898,13 +4437,12 @@ spawnTracked(function()
     local function watchFolder(folder)
         if not folder then return end
         for _, ball in ipairs(folder:GetChildren()) do _attachTB(ball) end
-        qzxpTrackUI(folder.ChildAdded:Connect(function(child) task.defer(_attachTB, child) end))
+        qzxpTrackUI(Life.connect(folder.ChildAdded, function(child) task.defer(_attachTB, child) end))
     end
     watchFolder(Workspace:WaitForChild('Balls', 9e9))
     watchFolder(Workspace:WaitForChild('TrainingBalls', 30))
 end)
 
--- Spam engine: Tsukuyomi spam with qzxp's original PlaySingleParryAnimation.
 local SpamRPS, SpamInt, SpamDetect = 200, 0.005, true
 local TsukuyomiSafeMode = true
 
@@ -3927,22 +4465,24 @@ do
         for _, ball in pairs(bf:GetChildren()) do
             if ball:GetAttribute("realBall") then
                 local dist = (char.PrimaryPart.Position - ball.Position).Magnitude
-                if ball:GetAttribute("Target") == LocalPlayer.Name and dist <= 12 then
-                    return true, ball
-                end
+                local target = ball:GetAttribute("target")
+                if target == nil then target = ball:GetAttribute("Target") end
+                if target == LocalPlayer.Name and dist <= 12 then return true, ball end
             end
         end
         return false, nil
     end
 
     local function GetParryData()
+        local camera = Workspace.CurrentCamera or Camera
+        if not camera then return nil end
         local PlayerPositions = {}
         local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
         local MousePos
         if not isMobile then
             MousePos = {Mouse.X, Mouse.Y}
         else
-            local vp = Workspace.CurrentCamera.ViewportSize
+            local vp = camera.ViewportSize
             MousePos = {vp.X / 2, vp.Y / 2}
         end
 
@@ -3956,25 +4496,25 @@ do
                 for _, pc in ipairs(dead:GetChildren()) do
                     local player = Players:GetPlayerFromCharacter(pc)
                     if player and player:GetAttribute("LobbyTraining") and pc.PrimaryPart then
-                        PlayerPositions[pc.Name] = Workspace.CurrentCamera:WorldToScreenPoint(pc.PrimaryPart.Position)
+                        PlayerPositions[pc.Name] = camera:WorldToScreenPoint(pc.PrimaryPart.Position)
                     end
                 end
             end
             for _, target in CollectionService:GetTagged("LobbyTrainingTarget") do
-                PlayerPositions[target.Name] = Workspace.CurrentCamera:WorldToScreenPoint(target.Position)
+                PlayerPositions[target.Name] = camera:WorldToScreenPoint(target.Position)
             end
         else
             local aliveFolder = Workspace:FindFirstChild("Alive")
             if aliveFolder then
                 for _, entity in ipairs(aliveFolder:GetChildren()) do
                     if entity.PrimaryPart then
-                        PlayerPositions[entity.Name] = Workspace.CurrentCamera:WorldToScreenPoint(entity.PrimaryPart.Position)
+                        PlayerPositions[entity.Name] = camera:WorldToScreenPoint(entity.PrimaryPart.Position)
                     end
                 end
             end
         end
 
-        local camCF = Workspace.CurrentCamera.CFrame
+        local camCF = camera.CFrame
         local clashing, clashBall = IsClashing()
         if clashing and clashBall then
             camCF = CFrame.new(camCF.Position, clashBall.Position)
@@ -4016,20 +4556,28 @@ do
     local macroDataStamp = 0
     local timeAccumulator = 0
 
+    getgenv().qzxp_resetSpamState = function()
+        timeAccumulator = 0
+        macroParryData = nil
+        macroDataStamp = 0
+    end
+
     local function MacroBurst(fires)
-        if not _remote or not _args or not _tokenFound or not _token then return end
+        if not Det.alive or type(fires) ~= "number" or fires < 1 then return false end
+        if not _remote or not _args or not _tokenFound or not _token then return false end
         local data = macroParryData
-        if not data then return end
+        if not data or typeof(data.CFrame) ~= "CFrame"
+            or type(data.Positions) ~= "table" or type(data.Mouse) ~= "table" then return false end
         local okTok, token = pcall(Tokenize, _args[2])
-        if not okTok or not token or token == "" then return end
-        pcall(function()
+        if not okTok or type(token) ~= "string" or token == "" then return false end
+        return pcall(function()
             local remote = _remote
             local a1 = _args[1]
             local a2 = _args[2]
             local cframe = data.CFrame
             local pos = data.Positions
             local mouse = data.Mouse
-            -- Spam and AutoClash share this sender; both must honor Parry Lock.
+
             cframe, mouse = applyParryLock(cframe, mouse, getBall())
             for _ = 1, fires do
                 remote:FireServer(a1, a2, token, 0.5, cframe, pos, mouse, false)
@@ -4037,13 +4585,13 @@ do
         end)
     end
 
-    addRenderHandler(function(dt)
+    CombatLoops.register("Spam", function(dt)
+        AutoClash.update()
         if not Spam_On and not AutoClash.active then timeAccumulator = 0 return end
         if TsukuyomiSafeMode and not IsBlockLegit() then timeAccumulator = 0 return end
-        -- Manual spam runs continuously while active; AutoClash keeps its proximity gate.
+
         if not Spam_On and AutoClash.active and not ShouldFireLegit() then timeAccumulator = 0 return end
 
-        -- Keep qzxp's original safety and detection controls functional.
         local char = LocalPlayer.Character
         if not char or not char.PrimaryPart or char.PrimaryPart:FindFirstChild("SingularityCape") then
             timeAccumulator = 0
@@ -4065,19 +4613,17 @@ do
             timeAccumulator -= fires * interval
             if timeAccumulator > interval * 2 then timeAccumulator = 0 end
             if fires > 200 then fires = 200 end
-            MacroBurst(fires)
-            -- Exact original qzxp animation call and cooldown/bypass behavior.
-            if AnimFix_Spam then PlaySingleParryAnimation() end
+            local fired = MacroBurst(fires)
+
+            if AnimFix_Spam and fired then PlaySingleParryAnimation() end
         end
-    end, 4)
+    end)
 end
 
--- ============================================================
--- SWORD CHANGER (fixed revert + real-sword tracking)
--- ============================================================
 task.spawn(function()
 local SKIN_KEY = "Skin.LastEquippedSword"
 local CFG_FILE = "qzxp/auto_config.json"
+getgenv().qzxp_swordGeneration = (tonumber(getgenv().qzxp_swordGeneration) or 0) + 1
 local function readCfg()
     local d = {}
     pcall(function() if isfile and isfile(CFG_FILE) then d = HttpService:JSONDecode(readfile(CFG_FILE)) end end)
@@ -4097,11 +4643,13 @@ end
 local s = loadSaved()
 do
     local env = getgenv()
-    env.skinChanger = false -- master switch for all three manual slots
+    env.skinChanger = false
+    env.skinChangerEnabled = false
+    env.qzxp_swordBusy = false
     env.swordModelEnabled = true
     env.swordFXEnabled = true
     env.swordAnimationsEnabled = true
-    env.manualSword = "" -- model input; retained for old-config compatibility
+    env.manualSword = ""
     env.manualSwordFX = ""
     env.manualSwordAnimations = ""
     env.swordModel = type(env.swordModel) == "string" and env.swordModel ~= "" and env.swordModel or s
@@ -4120,37 +4668,113 @@ local function manualAnimationsActive()
 end
 
 local realSword = ""
+local realSwordBackup, realSwordBackupCharacter, realSwordBackupName
+local swordWriteCharacter, swordWriteName
+local swordBusy = false
+local swordTransaction
+local function cloneSword(model)
+    if not model then return nil end
+    local old = model.Archivable
+    local ok, result = pcall(function()
+        model.Archivable = true
+        return model:Clone()
+    end)
+    pcall(function() model.Archivable = old end)
+    return ok and result or nil
+end
+local function swordModelFor(character, name)
+    if not character or type(name) ~= "string" or name == "" then return nil end
+    for _, child in ipairs(character:GetChildren()) do
+        if child.Name == name and child:IsA("Model") then
+            for _, part in ipairs(child:GetDescendants()) do
+                if part:IsA("BasePart") and part.Transparency < 1 then return child end
+            end
+        end
+    end
+    return nil
+end
+local function preserveRealModel(character, name)
+    local model = swordModelFor(character, name)
+    if not model then return end
+    local copy = cloneSword(model)
+    if not copy then return end
+    if realSwordBackup then
+        Life.instances[realSwordBackup] = nil
+        pcall(function() realSwordBackup:Destroy() end)
+    end
+    realSwordBackup, realSwordBackupCharacter, realSwordBackupName = copy, character, name
+    Life.instances[copy] = true
+end
+local function releaseRestoredModel(model)
+    if not model then return end
+    for object in pairs(Life.instances) do
+        local ok, inside = pcall(function() return object == model or object:IsDescendantOf(model) end)
+        if ok and inside then Life.instances[object] = nil end
+    end
+end
 local _realSwordConn = nil
+local reconcileRealSword
+local realReconcileSerial = 0
+local function scheduleRealReconcile(character, expectedSword)
+    if not character or type(expectedSword) ~= "string" or expectedSword == "" then return end
+    realReconcileSerial += 1
+    local serial = realReconcileSerial
+    task.defer(function()
+        if serial ~= realReconcileSerial or not Det.alive then return end
+        if reconcileRealSword then pcall(reconcileRealSword, character, expectedSword) end
+    end)
+end
+local function recordRealSword(value, force)
+    if swordBusy or getgenv().qzxp_swordBusy then return end
+    if type(value) ~= "string" or value == "" then return end
+    local character = LocalPlayer.Character
+    if character == swordWriteCharacter and value == swordWriteName then return end
+    if force or realSword == "" then
+        realSword = value
+        getgenv().qzxp_realSword = value
+        preserveRealModel(character, value)
+    end
+end
 local function trackReal()
     local c = LocalPlayer.Character; if not c then return end
     if _realSwordConn then pcall(function() _realSwordConn:Disconnect() end) end
-    _realSwordConn = c:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
+    _realSwordConn = qzxpTrackUI(Life.connect(c:GetAttributeChangedSignal("CurrentlyEquippedSword"), function()
         if not manualModelActive() and not getgenv().qzxp_unlockAllActive then
-            realSword = c:GetAttribute("CurrentlyEquippedSword") or ""
-            getgenv().qzxp_realSword = realSword
+            recordRealSword(c:GetAttribute("CurrentlyEquippedSword"), true)
+            scheduleRealReconcile(c, c:GetAttribute("CurrentlyEquippedSword"))
         end
-    end)
+    end))
 end
-local function captureRealSword()
+local function captureRealSword(force)
+    if manualModelActive() or getgenv().qzxp_unlockAllActive then return end
     local c = LocalPlayer.Character; if not c then return end
-    local s = c:GetAttribute("CurrentlyEquippedSword")
-    if s and s ~= "" and (not realSword or realSword == "") then
-        realSword = s
-        getgenv().qzxp_realSword = s
-    end
+    local value = c:GetAttribute("CurrentlyEquippedSword") or LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+    recordRealSword(value, force == true)
+    if realSword ~= "" and value == realSword then preserveRealModel(c, realSword) end
 end
-LocalPlayer.CharacterAdded:Connect(function(char)
+getgenv().qzxp_captureRealSword = captureRealSword
+qzxpTrackUI(Life.connect(LocalPlayer:GetAttributeChangedSignal("CurrentlyEquippedSword"), function()
+    if not manualModelActive() and not getgenv().qzxp_unlockAllActive then
+        recordRealSword(LocalPlayer:GetAttribute("CurrentlyEquippedSword"), true)
+        scheduleRealReconcile(LocalPlayer.Character, LocalPlayer:GetAttribute("CurrentlyEquippedSword"))
+    end
+end))
+qzxpTrackUI(Life.connect(LocalPlayer.CharacterAdded, function(char)
     task.defer(function()
         task.wait(0.2)
-        if not char or not char.Parent then return end
-        captureRealSword()
+        if not Det.alive or not char or not char.Parent then return end
+        captureRealSword(true)
         trackReal()
     end)
-end)
+end))
 if LocalPlayer.Character then
+
+    captureRealSword(true)
+    trackReal()
     task.defer(function()
         task.wait(0.2)
-        captureRealSword()
+        if not Det.alive then return end
+        captureRealSword(true)
         trackReal()
     end)
 end
@@ -4164,7 +4788,17 @@ spawnTracked(function()
             for _, v in ipairs(cn) do
                 if v.Function and islclosure and islclosure(v.Function) then
                     local ok2, up = pcall(getupvalues, v.Function)
-                    if ok2 and #up == 1 and type(up[1]) == "table" then sc = up[1]; break end
+                    if ok2 and #up == 1 and type(up[1]) == "table" then
+                        local candidate = up[1]
+                        if type(candidate.SetSword) == "function"
+                            or candidate.currentSword ~= nil or candidate.SwordFX ~= nil then
+                            sc = candidate
+                            task.defer(function()
+                                if Det.alive and getgenv().updateSword then pcall(getgenv().updateSword) end
+                            end)
+                            break
+                        end
+                    end
                 end
             end
         end
@@ -4198,60 +4832,208 @@ local function refreshSlash()
 end
 refreshSlash()
 
-local function equip(name, notifyServer)
-    if not name or name == "" then return false end
-    if notifyServer == nil then notifyServer = false end
-    if not LocalPlayer.Character then return false end
-    local exact = resolve(name)
-    LocalPlayer:SetAttribute("CurrentlyEquippedSword", exact)
-    LocalPlayer.Character:SetAttribute("CurrentlyEquippedSword", exact)
-    pcall(function()
-        local f = swordModule.EquipSwordTo or rawget(swordModule, "EquipSwordTo")
-        if type(f) == "function" then
-            for k, v in pairs(getupvalues(f)) do
-                if v == true then setupvalue(f, k, false); break end
-            end
+local swordModelCheckCache = {}
+local function isRecognizedSwordModel(model)
+    if not model or not model:IsA("Model") then return false end
+    if SwordRegistryReverse[model.Name] then return true end
+    local cached = swordModelCheckCache[model.Name]
+    if cached and cached.stamp == SwordLib.builtAt then return cached.result end
+    local ok, data = pcall(function() return swordModule:GetSword(model.Name) end)
+    swordModelCheckCache[model.Name] = {stamp = SwordLib.builtAt, result = ok and data ~= nil}
+    return ok and data ~= nil
+end
+local function removeStaleSwordModels(character, keepName)
+    local keep = swordModelFor(character, keepName)
+    if not keep then return false end
+    for _, model in ipairs(character:GetChildren()) do
+        if model ~= keep and isRecognizedSwordModel(model) then
+            pcall(function() model:Destroy() end)
         end
-    end)
-    pcall(function() swordModule:EquipSwordTo(LocalPlayer.Character, exact) end)
-    task.spawn(function()
-        local att = 0
-        while not sc and att < 20 do task.wait(0.5); att += 1 end
-        if not sc then return end
-        -- SetSword is the game's full sword-behavior driver, not just a parry
-        -- animation lookup. Feed it the animation slot so its complete pose,
-        -- grip/position offsets, and animation handling come from that sword.
-        local animationSword = effectiveAnimations(exact)
-        pcall(function() if sc.SetSword then sc:SetSword(animationSword) end end)
-        pcall(function()
-            if notifyServer and rs.Remotes:FindFirstChild("FireSwordInfo") then
-                rs.Remotes.FireSwordInfo:FireServer(exact)
-            end
-            if sc.currentSword ~= nil then pcall(function() sc.currentSword = animationSword end) end
-            if sc.SwordFX ~= nil then pcall(function() sc.SwordFX = effectiveFX(exact) end) end
-        end)
-    end)
+    end
     return true
 end
+getgenv().qzxp_removeStaleSwordModels = removeStaleSwordModels
+
+local function syncSwordController(exact)
+    local animationSword = effectiveAnimations(exact)
+    local applied = false
+    if sc and type(sc.SetSword) == "function" then
+        local ok, result = pcall(function() return sc:SetSword(animationSword) end)
+        applied = ok and result ~= false
+    end
+    if not applied then
+        local ua = getgenv().qzxp_UA
+        if ua and type(ua.sword_fn) == "function" then
+            local ok, result = pcall(ua.sword_fn, animationSword)
+            applied = ok and result ~= false
+        end
+    end
+    if sc then
+        pcall(function()
+            if applied and sc.currentSword ~= nil then sc.currentSword = animationSword end
+            if sc.SwordFX ~= nil then sc.SwordFX = effectiveFX(exact) end
+        end)
+    end
+end
+local function rollbackSwordTransaction(transaction)
+    if not transaction then return end
+    local character = transaction.character
+    swordWriteCharacter, swordWriteName = transaction.writeCharacter, transaction.writeName
+    if LocalPlayer.Character == character then
+        pcall(function() LocalPlayer:SetAttribute("CurrentlyEquippedSword", transaction.playerSword) end)
+    end
+    pcall(function() character:SetAttribute("CurrentlyEquippedSword", transaction.characterSword) end)
+    for _, entry in ipairs(transaction.saved) do
+        if entry.copy and not swordModelFor(character, entry.name) then
+            pcall(function() entry.copy.Parent = character end)
+            if entry.copy.Parent == character then entry.copy = nil end
+        end
+    end
+    if swordModelFor(character, transaction.characterSword) then
+        removeStaleSwordModels(character, transaction.characterSword)
+    end
+end
+local function clearSwordTransaction(transaction)
+    if not transaction then return end
+    for _, entry in ipairs(transaction.saved) do
+        if entry.copy then pcall(function() entry.copy:Destroy() end) end
+    end
+    if swordTransaction == transaction then swordTransaction = nil end
+end
+local function equip(name, notifyServer, forceRebuild)
+    if swordBusy or type(name) ~= "string" or name == "" then return false end
+    local character = LocalPlayer.Character
+    if not character then return false end
+    local exact = resolve(name)
+    if type(exact) ~= "string" or exact == "" then return false end
+    local valid, data = pcall(function() return swordModule:GetSword(exact) end)
+    if not valid or not data then return false end
+    local previousLocal = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+    local previousCharacter = character:GetAttribute("CurrentlyEquippedSword")
+    local previousWriteCharacter, previousWriteName = swordWriteCharacter, swordWriteName
+    local saved = {}
+    for _, model in ipairs(character:GetChildren()) do
+        if isRecognizedSwordModel(model) then
+            local copy = cloneSword(model)
+            if copy then saved[#saved + 1] = {original = model, copy = copy, name = model.Name} end
+        end
+    end
+    local transaction = {character = character, saved = saved,
+        playerSword = previousLocal, characterSword = previousCharacter,
+        writeCharacter = previousWriteCharacter, writeName = previousWriteName}
+    swordTransaction = transaction
+    local manualAtStart, unlockAtStart = manualModelActive() == true, getgenv().qzxp_unlockAllActive == true
+    swordBusy = true
+    getgenv().qzxp_swordBusy = true
+    realReconcileSerial += 1
+    local generation = (tonumber(getgenv().qzxp_swordGeneration) or 0) + 1
+    getgenv().qzxp_swordGeneration = generation
+    swordWriteCharacter, swordWriteName = character, exact
+    local ok, result = pcall(function()
+        local model = swordModelFor(character, exact)
+        if not model then
+            local equipped, value = pcall(function() return swordModule:EquipSwordTo(character, exact) end)
+            model = swordModelFor(character, exact)
+            if equipped and value ~= false and not model then
+                local deadline = os.clock() + 0.2
+                while not model and os.clock() < deadline and LocalPlayer.Character == character do
+                    RawTask.wait()
+                    model = swordModelFor(character, exact)
+                end
+            end
+            if (not equipped or value == false or not model)
+                and realSwordBackup and realSwordBackupCharacter == character and realSwordBackupName == exact then
+                local copy = cloneSword(realSwordBackup)
+                if copy then copy.Parent = character end
+                model = swordModelFor(character, exact)
+            end
+            if not model then return false end
+        end
+        if LocalPlayer.Character ~= character then return false end
+        if manualAtStart ~= (manualModelActive() == true)
+            or unlockAtStart ~= (getgenv().qzxp_unlockAllActive == true) then return false end
+        if (manualAtStart or unlockAtStart) and resolve(getgenv().swordModel or "") ~= exact then return false end
+        LocalPlayer:SetAttribute("CurrentlyEquippedSword", exact)
+        character:SetAttribute("CurrentlyEquippedSword", exact)
+        syncSwordController(exact)
+        model = swordModelFor(character, exact)
+        if not model and realSwordBackup and realSwordBackupCharacter == character and realSwordBackupName == exact then
+            local copy = cloneSword(realSwordBackup)
+            if copy then copy.Parent = character end
+            model = swordModelFor(character, exact)
+        end
+        if not model then return false end
+        removeStaleSwordModels(character, exact)
+        if not manualModelActive() and not getgenv().qzxp_unlockAllActive and exact == realSword then
+            releaseRestoredModel(model)
+        end
+        if notifyServer == true and Life.current() then
+            pcall(function()
+                local remote = rs.Remotes:FindFirstChild("FireSwordInfo")
+                if remote then remote:FireServer(exact) end
+            end)
+        end
+        return true
+    end)
+    if not ok or result ~= true then
+        rollbackSwordTransaction(transaction)
+        if not ok then warn("[qzxp] Sword equip: " .. tostring(result)) end
+    end
+    clearSwordTransaction(transaction)
+    swordBusy = false
+    getgenv().qzxp_swordBusy = false
+    return ok and result == true
+end
+
+reconcileRealSword = function(character, expectedSword)
+    if manualModelActive() or getgenv().qzxp_unlockAllActive then return false end
+    if not character or LocalPlayer.Character ~= character then return false end
+    local characterSword = character:GetAttribute("CurrentlyEquippedSword")
+    local playerSword = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
+    local current = expectedSword
+    if type(current) ~= "string" or current == ""
+        or (characterSword ~= current and playerSword ~= current) then
+        current = characterSword or playerSword
+    end
+    if type(current) ~= "string" or current == "" then return false end
+    if swordBusy or getgenv().qzxp_swordBusy then return false end
+    if character == swordWriteCharacter and current == swordWriteName then return false end
+    recordRealSword(current, true)
+    if swordModelFor(character, current) then
+        preserveRealModel(character, current)
+        return removeStaleSwordModels(character, current)
+    end
+    return false
+end
+
 getgenv().updateSword = function()
     refreshSlash()
     AnimFix_Cache = {}
-    if getgenv().qzxp_unlockAllActive then return end -- Unlock All owns all three while active
+    if getgenv().qzxp_unlockAllActive then return true end
     if manualModelActive() and getgenv().swordModel ~= "" then
-        -- Model only: stop FireSwordInfo restoring the real equipped model.
+
         pcall(function()
             local ua = getgenv().qzxp_UA
             if ua and type(ua.set_sword_override) == "function" then ua:set_sword_override(true) end
         end)
-        getgenv().saveLastEquippedSword(getgenv().swordModel)
-        equip(getgenv().swordModel, false)
+        local equipped = equip(getgenv().swordModel, false)
+        if equipped then getgenv().saveLastEquippedSword(getgenv().swordModel) end
+        return equipped
     else
-        -- Disabling Model must not disable the independent FX/animation slots.
+
         pcall(function()
             local ua = getgenv().qzxp_UA
             if ua and type(ua.set_sword_override) == "function" then ua:set_sword_override(false) end
         end)
-        if realSword ~= "" then equip(realSword, false) end
+        if realSword ~= "" then
+            local character = LocalPlayer.Character
+            local needsRebuild = character ~= nil and (
+                character:GetAttribute("CurrentlyEquippedSword") ~= realSword
+                or not character:FindFirstChild(realSword)
+            )
+            return equip(realSword, false, needsRebuild)
+        end
+        return true
     end
 end
 getgenv().revertSword = function()
@@ -4269,33 +5051,53 @@ getgenv().revertSword = function()
             getgenv().swordAnimations = ua.selected_sword
             getgenv().swordFX = ua.selected_sword
             refreshSlash()
-            equip(ua.selected_sword, false)
+            return equip(ua.selected_sword, false, true)
         end
     elseif realSword ~= "" then
         getgenv().swordModel = realSword
         getgenv().swordAnimations = realSword
         getgenv().swordFX = realSword
         refreshSlash()
-        equip(realSword, true)
+        return equip(realSword, false, true)
     end
+    return false
 end
 
 spawnTracked(function()
+    local lastInput, lastWant, lastChar, nextModelScan = nil, nil, nil, 0
     while task.wait(0.5) do
         if manualModelActive() and getgenv().swordModel ~= "" then
             local char = LocalPlayer.Character
-            if char then
-                local want = resolve(getgenv().swordModel)
-                if want ~= "" and char:GetAttribute("CurrentlyEquippedSword") ~= want then
+            local input = getgenv().swordModel
+            if input ~= lastInput then
+                lastInput = input
+                lastWant = resolve(input)
+                nextModelScan = 0
+            end
+            if char ~= lastChar then
+                lastChar = char
+                nextModelScan = 0
+            end
+            local want = lastWant
+            if char and want and want ~= "" then
+                if char:GetAttribute("CurrentlyEquippedSword") ~= want then
                     pcall(function() char:SetAttribute("CurrentlyEquippedSword", want) end)
                     pcall(function() LocalPlayer:SetAttribute("CurrentlyEquippedSword", want) end)
                 end
+                local now = os.clock()
+                if now >= nextModelScan then
+                    removeStaleSwordModels(char, want)
+                    nextModelScan = now + 2
+                end
+                if not char:FindFirstChild(want) then pcall(function() equip(want, false) end) end
             end
+        else
+            lastChar = nil
+            nextModelScan = 0
         end
     end
 end)
 
--- VFX hooker
 local hooked = getgenv().qzxp_VFXHooked
 local vfxConns = getgenv().qzxp_VFXConns
 local vfxDisabled = getgenv().qzxp_VFXDisabled
@@ -4313,22 +5115,26 @@ spawnTracked(function()
                     for _, v in ipairs(cn) do
                         local fn = v.Function
                         if fn and not hooked[fn] and not scanned[v] then
-                            scanned[v] = true; hooked[fn] = true; v:Disable()
+                            scanned[v] = true
+                            local disabled = pcall(function() v:Disable() end)
+                            if not disabled then continue end
+                            hooked[fn] = true
                             table.insert(vfxDisabled, v)
                             local target = fn
                             local rnLocal = rn
                             local ours = function(...)
                                 local args = {...}
-                                if rnLocal == "PlaySound" then
-                                    local now = os.clock()
-                                    if (now - lastPlaySoundTime) < 0.15 then return end
-                                    lastPlaySoundTime = now
-                                end
                                 local isMe = false
                                 for _, a in ipairs(args) do
                                     if tostring(a) == _lpName or (typeof(a) == "Instance" and (a == LocalPlayer.Character or a == LocalPlayer)) then isMe = true; break end
                                 end
-                                if isMe and (manualFXActive() or getgenv().qzxp_unlockAllActive) then
+                                local customFX = isMe and (manualFXActive() or getgenv().qzxp_unlockAllActive)
+                                if customFX and rnLocal == "PlaySound" then
+                                    local now = os.clock()
+                                    if (now - lastPlaySoundTime) < 0.15 then return end
+                                    lastPlaySoundTime = now
+                                end
+                                if customFX then
                                     local fx = effectiveFX("")
                                     refreshSlash()
                                     local sf, slF = false, false
@@ -4339,7 +5145,7 @@ spawnTracked(function()
                                             elseif fx ~= "" and not sf then
                                                 local isSw = false
                                                 pcall(function()
-                                                    if rs.Shared.ReplicatedInstances.Swords:FindFirstChild(resolve(a)) or SwordRegistry[norm(a)] then isSw = true end
+                                                    if swordExists(a) then isSw = true end
                                                 end)
                                                 if isSw or a == LocalPlayer:GetAttribute("CurrentlyEquippedSword") then args[i] = fx; sf = true end
                                             end
@@ -4351,8 +5157,12 @@ spawnTracked(function()
                                 pcall(target, unpack(args))
                             end
                             hooked[ours] = true
-                            local conn = rem.OnClientEvent:Connect(ours)
-                            table.insert(vfxConns, conn)
+                            local connected, conn = pcall(function() return Life.connect(rem.OnClientEvent, ours) end)
+                            if connected then
+                                table.insert(vfxConns, conn)
+                            else
+                                pcall(function() v:Enable() end)
+                            end
                         end
                     end
                 end
@@ -4361,31 +5171,52 @@ spawnTracked(function()
     end
 end)
 
-LocalPlayer.CharacterAdded:Connect(function()
+qzxpTrackUI(Life.connect(LocalPlayer.CharacterAdded, function()
     if (manualModelActive() or getgenv().qzxp_unlockAllActive) and getgenv().swordModel ~= "" then
         task.wait(2)
+        if not Det.alive then return end
         local char = LocalPlayer.Character
         if char then
             local exact = resolve(getgenv().swordModel)
             if exact and exact ~= "" then
-                if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact then equip(exact, false) end
-                if not char:FindFirstChild(exact) then equip(exact, false) end
-                for _, v in pairs(char:GetChildren()) do
-                    if v:IsA("Model") and v.Name ~= exact and SwordRegistryReverse[v.Name] then
-                        pcall(function() v:Destroy() end)
-                    end
+                if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= exact
+                    or not char:FindFirstChild(exact) then
+                    equip(exact, false)
                 end
+                removeStaleSwordModels(char, exact)
             end
         end
     end
-end)
-LocalPlayer.CharacterAdded:Connect(function()
+end))
+qzxpTrackUI(Life.connect(LocalPlayer.CharacterAdded, function()
     if getgenv().skinChanger then
         task.wait(2.5)
-        pcall(getgenv().updateSword)
+        if Det.alive then pcall(getgenv().updateSword) end
+    end
+end))
+
+Life.onStop(function()
+    if swordTransaction then
+        pcall(rollbackSwordTransaction, swordTransaction)
+        clearSwordTransaction(swordTransaction)
+    end
+    swordBusy = false
+    getgenv().qzxp_swordBusy = false
+    local ua = getgenv().qzxp_UA
+    if ua then
+        ua.enabled = false
+        ua.selected_sword = nil
+        pcall(function() ua:set_sword_override(false) end)
+    end
+    getgenv().qzxp_unlockAllActive = false
+    getgenv().skinChanger = false
+    getgenv().skinChangerEnabled = false
+    if realSword ~= "" then
+        getgenv().swordModel, getgenv().swordAnimations, getgenv().swordFX = realSword, realSword, realSword
+        refreshSlash()
+        if not equip(realSword, false, false) then warn("[qzxp] Sword restoration could not be verified") end
     end
 end)
-
 getgenv().qzxp_equipSword   = equip
 getgenv().qzxp_resolveSword = resolve
 getgenv().qzxp_forceEquipSword = function(name)
@@ -4393,17 +5224,14 @@ getgenv().qzxp_forceEquipSword = function(name)
     getgenv().swordModel      = name
     getgenv().swordAnimations = name
     getgenv().swordFX         = name
-    pcall(getgenv().saveLastEquippedSword, name)
     refreshSlash()
     AnimFix_Cache = {}
-    equip(name, false)
-    return true
+    local equipped = equip(name, false)
+    if equipped then pcall(getgenv().saveLastEquippedSword, name) end
+    return equipped
 end
 end)
 
--- ============================================================
--- UNLOCK ALL (fixed revert + ownership detection)
--- ============================================================
 local UA
 task.spawn(function()
 UA = {
@@ -4663,83 +5491,74 @@ function UA.is_actually_owned(_, swordName)
 end
 
 function UA.equip_sword(_, swordName, restore)
-    if type(swordName) ~= "string" or swordName == "" then return false end
-    if not UA.swords then return false end
-    local isEquip = not restore
-    local isOwned = UA:is_actually_owned(swordName)
-    if isEquip and UA:is_deleted("Sword", swordName) then
-        UA:undelete_item("Sword", swordName)
-    end
-    local sword = UA.swords:GetSword(swordName)
-    if not sword then return false end
+    if type(swordName) ~= "string" or swordName == "" or not UA.swords then return false end
+    if getgenv().qzxp_swordBusy then return false end
+    local equipSword = getgenv().qzxp_equipSword
+    if type(equipSword) ~= "function" then return false end
+    local okData, sword = pcall(function() return UA.swords:GetSword(swordName) end)
+    if not okData or not sword then return false end
     local character = LocalPlayer.Character
     if not character then return false end
-    if isEquip and not UA.original_sword then
-        local scReal = getgenv().qzxp_realSword
-        if scReal and scReal ~= "" then
-            UA.original_sword = scReal
-        else
-            UA.original_sword = LocalPlayer:GetAttribute("CurrentlyEquippedSword")
-                             or character:GetAttribute("CurrentlyEquippedSword")
-                             or ""
-        end
+    local isOwned = UA:is_actually_owned(swordName)
+    if not restore and getgenv().qzxp_captureRealSword then pcall(getgenv().qzxp_captureRealSword, true) end
+    local prior = {
+        selected = UA.selected_sword, original = UA.original_sword, last = UA.last_equipped_sword,
+        active = getgenv().qzxp_unlockAllActive, model = getgenv().swordModel,
+        animations = getgenv().swordAnimations, fx = getgenv().swordFX,
+    }
+    if not restore and not UA.original_sword then
+        local real = getgenv().qzxp_realSword
+        UA.original_sword = type(real) == "string" and real ~= "" and real
+            or character:GetAttribute("CurrentlyEquippedSword")
+            or LocalPlayer:GetAttribute("CurrentlyEquippedSword")
     end
-    if restore then
-        UA.selected_sword = nil
-    else
-        UA.selected_sword = sword.Name
-        UA.last_equipped_sword = sword.Name
-        UA:set_sword_override(not isOwned)
-        getgenv().qzxp_unlockAllActive = true
-        getgenv().swordModel      = sword.Name
-        getgenv().swordAnimations = sword.Name
-        getgenv().swordFX         = sword.Name
-        pcall(getgenv().saveLastEquippedSword, sword.Name)
-    end
-    LocalPlayer:SetAttribute("CurrentlyEquippedSword", sword.Name)
-    character:SetAttribute("CurrentlyEquippedSword", sword.Name)
-    pcall(function()
-        local equipSwordTo = UA.swords.EquipSwordTo
-        for k, v in pairs(getupvalues(equipSwordTo)) do
-            if v == true then
-                setupvalue(equipSwordTo, k, false)
-                break
-            end
-        end
-    end)
-    if not pcall(function() UA.swords:EquipSwordTo(character, sword.Name) end) then
+    if not restore and UA:is_deleted("Sword", swordName) then UA:undelete_item("Sword", swordName) end
+    UA.selected_sword = not restore and sword.Name or nil
+    getgenv().qzxp_unlockAllActive = not restore
+    getgenv().swordModel, getgenv().swordAnimations, getgenv().swordFX = sword.Name, sword.Name, sword.Name
+    UA:set_sword_override(not restore and not isOwned)
+    local ok, equipped = pcall(equipSword, sword.Name, not restore and isOwned, false)
+    if not ok or equipped ~= true then
+        UA.selected_sword, UA.original_sword, UA.last_equipped_sword = prior.selected, prior.original, prior.last
+        getgenv().qzxp_unlockAllActive = prior.active
+        getgenv().swordModel, getgenv().swordAnimations, getgenv().swordFX = prior.model, prior.animations, prior.fx
+        UA:set_sword_override(prior.active == true or getgenv().skinChanger == true)
+        warn("[qzxp] Sword equip failed; previous model retained")
         return false
+    end
+    if not restore then
+        UA.last_equipped_sword = sword.Name
+        pcall(getgenv().saveLastEquippedSword, sword.Name)
     end
     local model = character:FindFirstChild(sword.Name)
     if model then UA:apply_chroma(model, sword) end
-    if isOwned then
-        if ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo") then
-            pcall(function()
-                ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo"):FireServer(sword.Name)
-            end)
-        end
-    end
-    if UA.sword_fn then pcall(UA.sword_fn, sword.Name) end
     return true
 end
 
 function UA.restore_sword(_)
-    local prev = UA.original_sword
-    UA.original_sword = nil
+    local prev = UA.original_sword or getgenv().qzxp_realSword
     UA.selected_sword = nil
     UA:set_sword_override(false)
     getgenv().qzxp_unlockAllActive = false
-    if getgenv().skinChanger then
-        pcall(getgenv().updateSword)
-    elseif prev and prev ~= "" then
-        UA:equip_sword(prev, true)
-        getgenv().swordModel      = prev
-        getgenv().swordAnimations = prev
-        getgenv().swordFX         = prev
-        if getgenv().slashName ~= nil then
-            pcall(function() getgenv().slashName = prev end)
+    local ok, restored
+    if getgenv().skinChanger and Life.current() then
+        ok, restored = pcall(getgenv().updateSword)
+    elseif type(prev) == "string" and prev ~= "" and type(getgenv().qzxp_equipSword) == "function" then
+        getgenv().swordModel, getgenv().swordAnimations, getgenv().swordFX = prev, prev, prev
+        ok, restored = pcall(getgenv().qzxp_equipSword, prev, false, false)
+        if ok and restored then
+            pcall(function()
+                local data = swordModule:GetSword(prev)
+                getgenv().slashName = (data and data.SlashName) or "SlashEffect"
+            end)
         end
     end
+    if ok and restored == true then
+        UA.original_sword = nil
+        return true
+    end
+    if UA.original_sword then warn("[qzxp] Unlock All restoration could not be verified; restore target retained") end
+    return false
 end
 
 function UA.is_deleted(_, category, name)
@@ -4819,7 +5638,7 @@ function UA.hook_shop(_)
     local shop = pg:FindFirstChild("Shop")
     if not shop then
         if not UA._shopWatchConn then
-            UA._shopWatchConn = pg.ChildAdded:Connect(function(child)
+            UA._shopWatchConn = Life.connect(pg.ChildAdded, function(child)
                 if child.Name == "Shop" and not UA._hookedBuy then
                     task.defer(function() UA:hook_shop() end)
                 end
@@ -4833,7 +5652,7 @@ function UA.hook_shop(_)
     local buyButton = infoBG and infoBG:FindFirstChild("BuyButton")
     if not buyButton then
         if not UA._shopChildConn then
-            UA._shopChildConn = shop.DescendantAdded:Connect(function(d)
+            UA._shopChildConn = Life.connect(shop.DescendantAdded, function(d)
                 if d.Name == "BuyButton" and not UA._hookedBuy then
                     task.defer(function() UA:hook_shop() end)
                 end
@@ -4854,7 +5673,7 @@ function UA.hook_shop(_)
             end
         end
     end
-    buyButton.Activated:Connect(function()
+    Life.connect(buyButton.Activated, function()
         if not UA.enabled then return end
         local sel = UA.shop_controller and UA.shop_controller._selectedItem
         if not sel then return end
@@ -4871,7 +5690,7 @@ function UA.hook_shop(_)
         for _, fn in ipairs(UA.original_buy_fns) do spawnTracked(fn) end
     end)
     if UA.shop_controller.itemSelected then
-        UA.shop_controller.itemSelected:Connect(function(sel)
+        Life.connect(UA.shop_controller.itemSelected, function(sel)
             if sel and UA.unlocked[sel.type] then
                 UA:set_category_unlock(sel.type, true)
             end
@@ -4879,12 +5698,12 @@ function UA.hook_shop(_)
         end)
     end
     pcall(function()
-        game:GetService("GuiService"):GetPropertyChangedSignal("SelectedObject"):Connect(function()
+        Life.connect(game:GetService("GuiService"):GetPropertyChangedSignal("SelectedObject"), function()
             if not UA.enabled or not UA.shop or not UA.shop.Enabled then return end
             task.defer(function() UA:refresh_selected() end)
         end)
     end)
-    shop:GetPropertyChangedSignal("Enabled"):Connect(function()
+    Life.connect(shop:GetPropertyChangedSignal("Enabled"), function()
         if not shop.Enabled or not UA.enabled then return end
         for _, cat in ipairs({"Sword", "Explosion"}) do
             if UA.unlocked[cat] then UA:schedule_refresh(cat) end
@@ -4902,14 +5721,14 @@ end
 function UA.hook_chroma(_)
     if UA.chroma_bound then return end
     UA.chroma_bound = true
-    UA.added_connection = LocalPlayer.CharacterAdded:Connect(function(character)
+    UA.added_connection = Life.connect(LocalPlayer.CharacterAdded, function(character)
         UA:setup_character(character)
     end)
     if LocalPlayer.Character then
         task.defer(function() UA:setup_character(LocalPlayer.Character) end)
     end
-    UA.sword_attr_connection = LocalPlayer:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(function()
-        if getgenv().skinChanger then return end
+    UA.sword_attr_connection = Life.connect(LocalPlayer:GetAttributeChangedSignal("CurrentlyEquippedSword"), function()
+        if getgenv().skinChanger or getgenv().qzxp_swordBusy then return end
         local selected = UA.selected_sword
         if not UA.enabled or not selected then return end
         if LocalPlayer:GetAttribute("CurrentlyEquippedSword") == selected then return end
@@ -4934,6 +5753,7 @@ function UA.setup_character(_, character)
         end)
     end
     local function checkChild(child)
+        if getgenv().qzxp_swordBusy then return end
         if not UA.enabled or not child:IsA("Model") or not UA.swords or not UA.selected_sword then return end
         local sword = UA.swords:GetSword(child.Name)
         if not sword then return end
@@ -4955,7 +5775,7 @@ function UA.setup_character(_, character)
             end
         end
     end
-    UA.character_connection = character.ChildAdded:Connect(checkChild)
+    UA.character_connection = Life.connect(character.ChildAdded, checkChild)
     for _, child in ipairs(character:GetChildren()) do checkChild(child) end
 end
 function UA.initialize(_)
@@ -5004,6 +5824,19 @@ function UA.initialize(_)
     UA:set_enabled(UA.enabled)
     return true
 end
+Life.onStop(function()
+    UA.enabled = false
+    UA.selected_sword = nil
+    getgenv().qzxp_unlockAllActive = false
+    pcall(function() UA:set_sword_override(false) end)
+    for _, category in ipairs({"Sword", "Explosion"}) do
+        UA.refresh_generation[category] = (UA.refresh_generation[category] or 0) + 1
+        pcall(function() UA:set_category_unlock(category, false) end)
+        pcall(function() UA:set_modern_unlock(category, false) end)
+    end
+    for _, conn in ipairs(UA.original_buy_conns) do pcall(function() conn:Enable() end) end
+    if UA.shop_api and UA.original_set_equipped then UA.shop_api.SetEquipped = UA.original_set_equipped end
+end)
 function UA.set_enabled(_, on)
     UA.enabled = on == true
     if not UA.ready then return end
@@ -5052,9 +5885,6 @@ end)
 getgenv().qzxp_UA = UA
 end)
 
--- ============================================================
--- HEADLESS / KORBLOX
--- ============================================================
 local HK = {
     Headless = false, Korblox = false,
     headBak = nil, kBuilt = {}, legBak = {},
@@ -5152,23 +5982,21 @@ local function doKorblox()
     table.insert(HK.kBuilt, fake)
 end
 local function undoKorblox() clearK(); restoreLegs(); cleanK(LocalPlayer.Character) end
-LocalPlayer.CharacterAdded:Connect(function()
+qzxpTrackUI(Life.connect(LocalPlayer.CharacterAdded, function()
     HK.headBak = nil; HK.kBuilt, HK.legBak = {}, {}
     task.wait(1)
+    if not Det.alive then return end
     if HK.Korblox then doKorblox() end
     if HK.Headless then doHeadless() end
-end)
+end))
 HK.doHeadless = doHeadless; HK.undoHeadless = undoHeadless
 HK.doKorblox = doKorblox; HK.undoKorblox = undoKorblox
+Life.onStop(function() pcall(undoHeadless); pcall(undoKorblox) end)
 end
 
--- ============================================================
--- FFLAGS TAB  (Quality / Lighting & World / Custom / Import-Export)
--- ============================================================
 ;(function()
 local FFTab = Tabs.FFlags
 
--- ============ FF ENGINE ============
 local FF = {
     canSet = type(setfflag) == "function",
     canGet = type(getfflag) == "function",
@@ -5256,9 +6084,9 @@ do
         local before, known = FF.get(name)
         if FF.orig[name] == nil then FF.orig[name] = before or false end
         if known and not FF.key[name] then FF.key[name] = known end
-        
+
         local accepted, matched = writeFlag(name, value)
-        
+
         if matched then FF.result[name] = "ok"
         elseif accepted then FF.result[name] = FF.canGet and "reverted" or "sent"
         else FF.result[name] = (FF.canGet and before == nil) and "unknown" or "fail" end
@@ -5306,7 +6134,6 @@ do
     end
 end
 
--- ============ CONFIG ============
 local DIR, FILE = "MonoFFlags", "MonoFFlags/settings.json"
 local canFile = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
 
@@ -5370,9 +6197,9 @@ local function saveConfig()
     end)
 end
 getgenv().qzxp_saveConfig = saveConfig
+Life.saveConfig = saveConfig
 loadConfig()
 
--- ============ MAPTEX ============
 local MapTex = { mode = "Normal", saved = setmetatable({}, {__mode = "k"}), conns = {}, gen = 0, over = {} }
 local MaterialService = game:GetService("MaterialService")
 local PlayersS = game:GetService("Players")
@@ -5481,7 +6308,7 @@ function MapTex.set(mode)
     local gen = MapTex.gen
     local flat = mode == "Flat"
     MapTex.overrides = makeOverrides()
-    table.insert(MapTex.conns, workspace.DescendantAdded:Connect(function(inst)
+    table.insert(MapTex.conns, Life.connect(workspace.DescendantAdded, function(inst)
         task.defer(function() if MapTex.gen == gen and inst.Parent then pcall(lowInst, inst, flat) end end)
     end))
     task.spawn(function()
@@ -5507,7 +6334,6 @@ function MapTex.sweep()
     end)
 end
 
--- ============ FORCE ============
 local Force = { orig = {}, ok = {}, want = {}, watch = {} }
 local Lighting = game:GetService("Lighting")
 do
@@ -5542,7 +6368,7 @@ do
             Force.want[id] = want
             if not Force.watch[id] then
                 pcall(function()
-                    Force.watch[id] = obj:GetPropertyChangedSignal(prop):Connect(function()
+                    Force.watch[id] = Life.connect(obj:GetPropertyChangedSignal(prop), function()
                         local w = Force.want[id]
                         if w ~= nil and getP(obj, prop) ~= w then task.defer(setP, obj, prop, w) end
                     end)
@@ -5562,9 +6388,9 @@ do
     function Force.apply()
         local V = Config.V
         local R, U = objs()
-        local q = math.floor(tonumber(V.Quality) or 0)
+
+        local q = TEX_LEVEL[V.Textures] or 0
         local tq = TEX_LEVEL[V.Textures]
-        if q <= 0 and tq then q = tq end
         if q > 0 then
             local lvl, saved
             pcall(function() lvl = Enum.QualityLevel[("Level%02d"):format(math.clamp(q, 1, 21))] end)
@@ -5590,7 +6416,6 @@ do
     end
 end
 
--- ============ FLAGS ============
 local Flags = {}
 do
     local MSAA = { ["1x"] = 1, ["2x"] = 2, ["4x"] = 4, ["8x"] = 8 }
@@ -5676,7 +6501,6 @@ do
     Flags.Force = Force
 end
 
--- ============ UI HELPERS ============
 local function addLabel(section, text)
     section._rowN += 1
     local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundColor3 = UITheme.Row,
@@ -5706,15 +6530,12 @@ local function addMultilineBox(section, height, placeholder, default)
     return box
 end
 
--- ============ UI ============
 local V = Config.V
 
--- FFLAGS TOGGLE
 local sM = FFTab:AddSection("FFlags Toggle")
 sM:AddToggle("FF_MasterToggle", { Title = "FFlags Enabled", Default = Config.Enabled,
     Callback = function(v) Flags.setEnabled(v) end })
 
--- QUALITY
 local sQ = FFTab:AddSection("Quality")
 sQ:AddSlider("FF_Quality", { Title = "Graphics level (0 = game default)", Default = V.Quality,
     Min = 0, Max = 21, Rounding = 0,
@@ -5729,7 +6550,6 @@ sQ:AddDropdown("FF_MapTex", { Title = "Map & object textures (forced, live)", Va
     Default = V.MapTex, Multi = false,
     Callback = function(v) V.MapTex = v; Flags.changed() end })
 
--- LIGHTING & WORLD
 local sL = FFTab:AddSection("Lighting & World")
 sL:AddDropdown("FF_Lighting", { Title = "Lighting (forced)", Values = { "Auto", "Voxel", "Shadow", "Future" },
     Default = V.Lighting, Multi = false,
@@ -5745,7 +6565,6 @@ sL:AddToggle("FF_PauseVoxel", { Title = "Freeze voxel lighting", Default = V.Pau
 sL:AddToggle("FF_NoGrass", { Title = "No grass", Default = V.NoGrass,
     Callback = function(v) V.NoGrass = v; Flags.changed() end })
 
--- CUSTOM FLAGS
 local sC = FFTab:AddSection("Custom flags")
 local customListRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
     BackgroundTransparency = 1, LayoutOrder = 1 }, sC._wrap)
@@ -5761,7 +6580,7 @@ local function makeCustomToggleRow(name, value, initialOn, onChange)
     local nameBox = mk("TextBox", { Size = UDim2.new(1, -252, 1, 0), Position = UDim2.fromOffset(16, 0), BackgroundTransparency = 1,
         Font = FONT, TextSize = 12, TextColor3 = UITheme.Text, TextXAlignment = Enum.TextXAlignment.Left,
         Text = tostring(name) }, row)
-    nameBox.FocusLost:Connect(function()
+    Life.connect(nameBox.FocusLost, function()
         local nv = (nameBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub('"', "")
         if nv == "" then nameBox.Text = name; return end
         if nv ~= name then
@@ -5781,7 +6600,7 @@ local function makeCustomToggleRow(name, value, initialOn, onChange)
     local valBox = mk("TextBox", { Size = UDim2.new(0, 90, 1, 0), Position = UDim2.new(1, -230, 0, 0), BackgroundTransparency = 1,
         Font = FONTM, TextSize = 11, TextColor3 = UITheme.TextDim, TextXAlignment = Enum.TextXAlignment.Right,
         Text = tostring(value or "") }, row)
-    valBox.FocusLost:Connect(function()
+    Life.connect(valBox.FocusLost, function()
         local vv = (valBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
         if vv == "" then vv = "true" end
         if vv ~= (value or "") then
@@ -5812,12 +6631,12 @@ local function makeCustomToggleRow(name, value, initialOn, onChange)
         if anim then tween(knob, TI_MED, { Position = t }) else knob.Position = t end
     end
     paint(state, false)
-    click.MouseButton1Click:Connect(function() state = not state; paint(state, true); onChange(state) end)
+    Life.connect(click.MouseButton1Click, function() state = not state; paint(state, true); onChange(state) end)
     local rm = mk("TextButton", { Size = UDim2.new(0, 68, 0, 26), Position = UDim2.new(1, -132, 0.5, -13),
         BackgroundColor3 = UITheme.Off, BorderSizePixel = 0, Font = FONT, TextSize = 11,
         TextColor3 = UITheme.TextDim, Text = "Remove", AutoButtonColor = false }, row)
     addCorner(rm, 6); addStroke(rm, UITheme.Border, 1, 0.4)
-    rm.MouseButton1Click:Connect(function()
+    Life.connect(rm.MouseButton1Click, function()
         for i, e in ipairs(Config.Custom) do if e.name == name then table.remove(Config.Custom, i); break end end
         if Flags.rebuildCustom then Flags.rebuildCustom() end
         Flags.changed()
@@ -5825,7 +6644,7 @@ local function makeCustomToggleRow(name, value, initialOn, onChange)
     return row
 end
 
-do -- add-custom form
+do
     local row1 = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0, LayoutOrder = 1 }, addRow)
     local row2 = mk("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = UITheme.Row, BorderSizePixel = 0, LayoutOrder = 2 }, addRow)
     local f1 = mk("Frame", { Size = UDim2.new(1, -24, 0, 28), Position = UDim2.fromOffset(12, 5),
@@ -5846,7 +6665,7 @@ do -- add-custom form
         BackgroundColor3 = UITheme.White, BorderSizePixel = 0, Font = FONTB, TextSize = 12,
         TextColor3 = UITheme.Black, Text = "Add flag", AutoButtonColor = false }, row2)
     addCorner(addBtn, 6)
-    addBtn.MouseButton1Click:Connect(function()
+    Life.connect(addBtn.MouseButton1Click, function()
         local name = (nameBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub('"', "")
         local value = (valBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
         if name == "" then notify({ Title = "FFlags", Content = "Enter a flag name", Duration = 3 }); return end
@@ -5893,7 +6712,6 @@ function Flags.rebuildCustom()
 end
 Flags.rebuildCustom()
 
--- IMPORT / EXPORT JSON
 local sJ = FFTab:AddSection("Import / Export JSON")
 local jsonBox = addMultilineBox(sJ, 180, '{"FFlagDebugSkyGray":"True","FIntDebugForceMSAASamples":4}', "")
 local btnRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundTransparency = 1,
@@ -5912,7 +6730,7 @@ local clearBtn = mk("TextButton", { Size = UDim2.new(0.333, -6, 0, 34), Position
     TextColor3 = UITheme.Text, Text = "Remove all", AutoButtonColor = false }, btnRow)
 addCorner(clearBtn, 6); addStroke(clearBtn, UITheme.Border, 1, 0.3)
 
-importBtn.MouseButton1Click:Connect(function()
+Life.connect(importBtn.MouseButton1Click, function()
     local txt = jsonBox.Text or ""
     if txt == "" then notify({ Title = "Import", Content = "Paste JSON first", Duration = 3 }); return end
     local ok, data = pcall(function() return HttpService:JSONDecode(txt) end)
@@ -5938,7 +6756,7 @@ importBtn.MouseButton1Click:Connect(function()
     notify({ Title = "Import", Content = string.format("%d added, %d blocked, %d skipped", added, blocked, bad), Duration = 5 })
 end)
 
-exportBtn.MouseButton1Click:Connect(function()
+Life.connect(exportBtn.MouseButton1Click, function()
     local out = {}
     for n, v in pairs(Flags.wanted()) do out[n] = FF.norm(n, v) or tostring(v) end
     local ok, json = pcall(function() return HttpService:JSONEncode(out) end)
@@ -5952,14 +6770,13 @@ exportBtn.MouseButton1Click:Connect(function()
     end
 end)
 
-clearBtn.MouseButton1Click:Connect(function()
+Life.connect(clearBtn.MouseButton1Click, function()
     Config.Custom = {}
     if Flags.rebuildCustom then Flags.rebuildCustom() end
     Flags.changed()
     notify({ Title = "FFlags", Content = "All custom flags removed", Duration = 3 })
 end)
 
--- ============ KEEP-APPLIED LOOP ============
 spawnTracked(function()
     local tick2 = 0
     while true do
@@ -5980,7 +6797,6 @@ spawnTracked(function()
     end
 end)
 
--- ============ AUTO-APPLY ON LAUNCH ============
 task.delay(1.5, function()
     if Det.alive and Config.Enabled then
         local ok, fail, total = Flags.applyAll()
@@ -5991,11 +6807,8 @@ task.delay(1.5, function()
     end
 end)
 
--- ============ CLEANUP HOOK ============
 do
-    local old = getgenv().qzxp_Cleanup
-    getgenv().qzxp_Cleanup = function()
-        if old then pcall(old) end
+    Life.restoreFlags = function()
         for name in pairs(FF.applied) do pcall(FF.restore, name) end
         pcall(function()
             local keep = Config.V
@@ -6008,9 +6821,6 @@ do
 end
 end)()
 
--- ============================================================
--- THUNDER DASH 0 COOLDOWN
--- ============================================================
 local ThunderDash = {
     ability          = nil,
     originalCooldown = nil,
@@ -6063,9 +6873,6 @@ getgenv().qzxp_thunderDashStop = function()
     pcall(ThunderDash.stop)
 end
 
--- ============================================================
--- ESP
--- ============================================================
 local ESP_On = false
 local espC = {}
 local espHeads = setmetatable({}, {__mode = "k"})
@@ -6132,11 +6939,11 @@ local function updateESP()
 end
 local function attachESPRespawn(p)
     if p == LocalPlayer then return end
-    qzxpTrackUI(p.CharacterAdded:Connect(function() clearESPFor(p) end))
+    qzxpTrackUI(Life.connect(p.CharacterAdded, function() clearESPFor(p) end))
 end
 for _, p in ipairs(Players:GetPlayers()) do attachESPRespawn(p) end
-qzxpTrackUI(Players.PlayerAdded:Connect(attachESPRespawn))
-qzxpTrackUI(Players.PlayerRemoving:Connect(clearESPFor))
+qzxpTrackUI(Life.connect(Players.PlayerAdded, attachESPRespawn))
+qzxpTrackUI(Life.connect(Players.PlayerRemoving, clearESPFor))
 spawnTracked(function()
     while true do
         task.wait(0.25)
@@ -6144,7 +6951,6 @@ spawnTracked(function()
     end
 end)
 
--- Keybind list & ball stats
 local UIFlags = {
     KBShow        = false,
     BSOn          = false,
@@ -6155,16 +6961,16 @@ local kbF, bsF
 ;(function()
 local function MakeDrag(handle, frame)
     local drag, di, ds, sp = false, nil, nil, nil
-    handle.InputBegan:Connect(function(i)
+    Life.connect(handle.InputBegan, function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             drag = true; ds = i.Position; sp = frame.Position
-            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
+            Life.connect(i.Changed, function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
         end
     end)
-    handle.InputChanged:Connect(function(i)
+    Life.connect(handle.InputChanged, function(i)
         if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then di = i end
     end)
-    table.insert(qzxpUIConnections, UserInputService.InputChanged:Connect(function(i)
+    table.insert(qzxpUIConnections, Life.connect(UserInputService.InputChanged, function(i)
         if i == di and drag and ds then
             local d = i.Position - ds
             frame.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
@@ -6254,20 +7060,19 @@ addHeartbeatHandler(function()
 end, 5)
 end)()
 
--- Stats HUD
 ;(function()
 local function MakeDrag(handle, frame)
     local drag, di, ds, sp = false, nil, nil, nil
-    handle.InputBegan:Connect(function(i)
+    Life.connect(handle.InputBegan, function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             drag = true; ds = i.Position; sp = frame.Position
-            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
+            Life.connect(i.Changed, function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
         end
     end)
-    handle.InputChanged:Connect(function(i)
+    Life.connect(handle.InputChanged, function(i)
         if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then di = i end
     end)
-    table.insert(qzxpUIConnections, UserInputService.InputChanged:Connect(function(i)
+    table.insert(qzxpUIConnections, Life.connect(UserInputService.InputChanged, function(i)
         if i == di and drag and ds then
             local d = i.Position - ds
             frame.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
@@ -6362,9 +7167,6 @@ addHeartbeatHandler(function(dt)
 end, 8)
 end)()
 
--- ============================================================
--- UI LAYOUT
--- ============================================================
 ;(function()
 do
     local s1 = Tabs.Combat:AddSection("Autoparry")
@@ -6434,6 +7236,7 @@ do
     local SpamKeyMode = "Toggle"
     s3:AddToggle("SpamToggle", {Title = "Enabled", Default = false, Callback = function(v)
         Spam_On = v
+        if v and getgenv().qzxp_rearm then pcall(getgenv().qzxp_rearm) end
         if not v and getgenv().qzxp_resetAPState then pcall(getgenv().qzxp_resetAPState) end
         notify({Title = "Spam", Content = v and "On" or "Off", Duration = 2})
     end})
@@ -6477,6 +7280,7 @@ do
     end})
     s3:AddToggle("AutoSpamToggle", {Title = "Auto Spam", Default = false, Callback = function(v)
         AutoSpam_On = v
+        if v and getgenv().qzxp_rearm then pcall(getgenv().qzxp_rearm) end
         if not v then AutoClash.reset() end
     end})
     s3:AddDropdown("ClashingThreshold", {Title = "Threshold", Values = {"1", "2", "3"}, Default = "1", Callback = function(v)
@@ -6488,6 +7292,8 @@ do
     local TBKeyMode = "Toggle"
     s4:AddToggle("TBToggle", {Title = "Enabled", Default = false, Callback = function(v)
         TB_On = v
+        if v and getgenv().qzxp_rearm then pcall(getgenv().qzxp_rearm) end
+        if v and CombatLoops.checkTBNow then task.defer(CombatLoops.checkTBNow) end
         if not v and getgenv().qzxp_resetAPState then pcall(getgenv().qzxp_resetAPState) end
         notify({Title = "TB", Content = v and "On" or "Off", Duration = 2})
     end})
@@ -6529,24 +7335,45 @@ do
     end
 
     local skinRef = s5:AddToggle("SkinToggle", {Title = "Master Enabled", Default = false, Callback = function(v)
+        if v and getgenv().qzxp_captureRealSword then pcall(getgenv().qzxp_captureRealSword, true) end
         getgenv().skinChanger = v
         getgenv().skinChangerEnabled = v
         if v then
             syncAllManualSlots()
-            -- Manual master and Unlock All remain mutually exclusive.
+
             local uaOpt = Options.UnlockAllToggle
             if uaOpt and uaOpt.Value then
                 uaOpt:SetValue(false)
                 notify({Title = "Sword Changer", Content = "Unlock All switched off", Duration = 2})
             end
-            pcall(getgenv().updateSword)
+            local updated, result = pcall(getgenv().updateSword)
+            if getgenv().swordModelEnabled and (not updated or result == false) then
+                notify({Title = "Model Changer", Content = "Equip failed; previous model restored when possible", Duration = 3})
+            end
         else
-            pcall(getgenv().revertSword)
+            local ok, restored = pcall(getgenv().revertSword)
+            if not ok or restored == false then
+                notify({Title = "Sword Changer", Content = "Restore could not be verified; existing model preserved", Duration = 5})
+            end
         end
     end})
     getgenv().setSkinUI = function(v)
         if skinRef and skinRef.Value ~= v then skinRef:SetValue(v) end
     end
+    s5:AddButton({Title = "Refresh Sword", Callback = function()
+        local env = getgenv()
+        if env.qzxp_refreshSwordRunning then return end
+        env.qzxp_refreshSwordRunning = true
+        local token = (tonumber(env.qzxp_refreshSwordToken) or 0) + 1
+        env.qzxp_refreshSwordToken = token
+        local original = skinRef.Value == true
+        skinRef:SetValue(not original)
+        task.delay(0.5, function()
+            if env.qzxp_refreshSwordToken ~= token then return end
+            if Det.alive and skinRef then skinRef:SetValue(original) end
+            env.qzxp_refreshSwordRunning = false
+        end)
+    end})
 
     s5:AddToggle("ModelToggle", {Title = "Model Enabled", Default = true, Callback = function(v)
         getgenv().swordModelEnabled = v
@@ -6614,7 +7441,7 @@ do
     local s5b = Tabs.Swords:AddSection("Unlock All (Swords)")
     s5b:AddToggle("UnlockAllToggle", {Title = "Enabled", Default = false, Callback = function(v)
         if v and getgenv().skinChanger then
-            -- unlock all drives the equipped sword too: switch the manual changer off first
+
             if getgenv().setSkinUI then pcall(getgenv().setSkinUI, false) end
             if getgenv().skinChanger then
                 getgenv().skinChanger = false; getgenv().skinChangerEnabled = false
@@ -6684,13 +7511,8 @@ do
         end
     end})
 
--- ============================================================
--- AVATAR / PROFILE SPOOFER
--- ============================================================
 do
-    -- ---------------------------------------------------------
-    -- STATE
-    -- ---------------------------------------------------------
+
     local AvatarSlotNumber    = nil
     local AvatarDefaultDesc   = nil
     local AvatarKillFeedConn  = nil
@@ -6702,9 +7524,6 @@ do
     local watchedRoots        = setmetatable({}, {__mode = "k"})
     local spoofHeadshotImage
 
-    -- ---------------------------------------------------------
-    -- SHARED HELPERS
-    -- ---------------------------------------------------------
     local function findPlayerListFrame()
         local cg = game:GetService("CoreGui")
         local pl = cg:FindFirstChild("PlayerList"); if pl then return pl end
@@ -6724,9 +7543,6 @@ do
         return string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", id)
     end
 
-    -- ---------------------------------------------------------
-    -- AVATAR APPEARANCE
-    -- ---------------------------------------------------------
     local function GetDefaultAvatarDescription()
         if AvatarDefaultDesc then return AvatarDefaultDesc end
         local ok, result = pcall(function() return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId) end)
@@ -6902,7 +7718,7 @@ do
         if not killFeed then return end
         local frame = killFeed:FindFirstChild("Frame"); if not frame then return end
         local headshotUrl = "rbxthumb://type=AvatarHeadShot&id=" .. AvatarSlotNumber .. "&w=100&h=100"
-        AvatarKillFeedConn = frame.ChildAdded:Connect(function(child)
+        AvatarKillFeedConn = Life.connect(frame.ChildAdded, function(child)
             local holder = child:FindFirstChild("Holder"); if not holder then return end
             local left = holder:FindFirstChild("Left")
             local vector = left and left:FindFirstChild("Vector")
@@ -6913,7 +7729,7 @@ do
         if AvatarCloneConn then return end
         local alive = Workspace:FindFirstChild("Alive") or Workspace:WaitForChild("Alive", 30)
         if not alive then return end
-        AvatarCloneConn = alive.ChildAdded:Connect(function(child)
+        AvatarCloneConn = Life.connect(alive.ChildAdded, function(child)
             if child.Name:find("ENCRYPTED CLONE", 1, true) then
                 if Options.AvatarChanger and Options.AvatarChanger.Value then
                     task.defer(function() ApplyAvatar(child) end)
@@ -6931,7 +7747,7 @@ do
             if char then ApplyAvatar(char) end
             HookKillFeed(); HookEncryptedClone()
             if AvatarCharacterConn then pcall(function() AvatarCharacterConn:Disconnect() end) end
-            AvatarCharacterConn = LocalPlayer.CharacterAppearanceLoaded:Connect(function()
+            AvatarCharacterConn = Life.connect(LocalPlayer.CharacterAppearanceLoaded, function()
                 local newChar = LocalPlayer.Character
                 if newChar then ApplyAvatar(newChar); HookKillFeed() end
             end)
@@ -6943,9 +7759,6 @@ do
         end
     end
 
-    -- ---------------------------------------------------------
-    -- PROFILE SPOOFER
-    -- ---------------------------------------------------------
     function getSpoofedProfileInfo()
         local id = getgenv().qzxp_avatarUserId
         if not id then return nil end
@@ -6988,7 +7801,7 @@ do
     local function hookLabel(lbl)
         if hookedLabels[lbl] then return end
         hookedLabels[lbl] = true
-        qzxpTrackUI(lbl:GetPropertyChangedSignal("Text"):Connect(function()
+        qzxpTrackUI(Life.connect(lbl:GetPropertyChangedSignal("Text"), function()
             if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
             local info = ProfileSpoofer.info
             local state = spoofedLabels[lbl]
@@ -7056,7 +7869,7 @@ do
     local function watchRoot(root)
         if not root or watchedRoots[root] then return end
         watchedRoots[root] = true
-        qzxpTrackUI(root.DescendantAdded:Connect(function(d)
+        qzxpTrackUI(Life.connect(root.DescendantAdded, function(d)
             if Options.AvatarChanger and Options.AvatarChanger.Value and spoofHeadshotImage then
                 spoofHeadshotImage(d)
             end
@@ -7097,6 +7910,10 @@ do
             end
         end
     end
+    Life.onStop(function()
+        ProfileSpoofer.usernameEnabled, ProfileSpoofer.displayNameEnabled = false, false
+        restoreProfile(ProfileSpoofer.info)
+    end)
     local _profileRetryActive = false
     local function retryDisplayNameInBackground()
         if _profileRetryActive then return end
@@ -7118,9 +7935,6 @@ do
         end)
     end
 
-    -- ---------------------------------------------------------
-    -- PFP SPOOFING (automatic with Avatar Changer)
-    -- ---------------------------------------------------------
     spoofHeadshotImage = function(img)
         if not img or not img.Parent then return end
         if not (img:IsA("ImageLabel") or img:IsA("ImageButton")) then return end
@@ -7167,10 +7981,11 @@ do
         end
     end
 
-    -- ---------------------------------------------------------
-    -- UI SECTION: Avatar
-    -- Pattern: [Toggle] -> [Input]
-    -- ---------------------------------------------------------
+    Life.onStop(function()
+        revertAvatarHeadshots()
+        local char = LocalPlayer.Character
+        if char and char:GetAttribute("qzxp_AvatarApplied") then RevertAvatar() end
+    end)
     local s7a = Tabs.Avatar:AddSection("Avatar")
 
     s7a:AddToggle("AvatarChanger", {Title = "Avatar Changer", Default = false, Callback = function(v)
@@ -7264,9 +8079,6 @@ do
         end
     end})
 
-    -- ---------------------------------------------------------
-    -- PROFILE PREVIEW PANEL
-    -- ---------------------------------------------------------
     local function createPreviewPanel()
         local frame = Instance.new("Frame")
         frame.Name = "SpooferPreview"
@@ -7304,9 +8116,6 @@ do
         profilePrev.Visible = v
     end})
 
-    -- ---------------------------------------------------------
-    -- RENDER HANDLERS
-    -- ---------------------------------------------------------
     local profileScanAt, profileScanBusy = 0, false
     addHeartbeatHandler(function()
         if not (ProfileSpoofer.usernameEnabled or ProfileSpoofer.displayNameEnabled) then return end
@@ -7359,7 +8168,7 @@ do
         if profileDisp.Text ~= display then profileDisp.Text = display end
         if profileUser.Text ~= username then profileUser.Text = username end
     end, 11)
-end -- Avatar/Profile spoofer scope
+end
 
     local s7s = Tabs.Visuals:AddSection("Stats HUD")
     s7s:AddToggle("ShowFPSToggle", {Title = "Show FPS", Default = false, Callback = function(v)
@@ -7377,7 +8186,6 @@ do
 end
 end)()
 
--- FPS Cap
 ;(function()
 do
     local fpsSection = Tabs.Utility:AddSection("Performance")
@@ -7385,6 +8193,14 @@ do
     local FPSUncapped = false
     local FPSCap      = 240
     local _setFPS = type(setfpscap) == "function" and setfpscap or nil
+    local savedFPS
+    if type(getfpscap) == "function" then
+        local ok, value = pcall(getfpscap)
+        if ok and type(value) == "number" then savedFPS = value end
+    end
+    Life.onStop(function()
+        if _setFPS and savedFPS then pcall(_setFPS, savedFPS) end
+    end)
     local function applyFPS()
         if type(_setFPS) ~= "function" then return end
         if FPSEnabled then
@@ -7427,6 +8243,15 @@ end)()
 ;(function()
 do
     local interfaceSection = Tabs.Settings:AddSection("Interface")
+    interfaceSection:AddButton({Title = "Unload qzxp", Callback = function() Life.stop() end})
+    interfaceSection:AddButton({Title = "Runtime Diagnostics", Callback = function()
+        local conns, threads = 0, 0
+        for c in pairs(Life.connections) do if c.Connected then conns += 1 end end
+        for t in pairs(Life.threads) do if coroutine.status(t) ~= "dead" then threads += 1 end end
+        Fluent:Notify({Title = "qzxp runtime", Content = tostring(conns) .. " connections / " .. tostring(threads)
+            .. " tasks / " .. tostring(#Life.errors) .. " captured errors", Duration = 8})
+        for _, err in ipairs(Life.errors) do warn("[qzxp diagnostic] " .. err) end
+    end})
     interfaceSection:AddKeybind("GUIToggleKey", {Title = "GUI Toggle", Default = "LeftControl", Callback = function()
         local w = Fluent.Window
         if w then w:SetOpen(not w.Toggle) end
@@ -7438,14 +8263,18 @@ do
 end
 end)()
 
-Players.PlayerAdded:Connect(function() task.wait(1); syncLockDD() end)
-Players.PlayerRemoving:Connect(function(p)
+qzxpTrackUI(Life.connect(Players.PlayerAdded, function()
+    task.wait(1)
+    if Det.alive then syncLockDD() end
+end))
+qzxpTrackUI(Life.connect(Players.PlayerRemoving, function(p)
     if LockTarget == p.Name then
         LockTarget = "None"
         notify({Title = "Lock", Content = "Target left", Duration = 3})
     end
-    task.wait(0.1); syncLockDD()
-end)
+    task.wait(0.1)
+    if Det.alive then syncLockDD() end
+end))
 
 SaveManager:SetLibrary(Fluent)
 InterfaceManager:SetLibrary(Fluent)
@@ -7458,7 +8287,7 @@ Window:SelectTab(1)
 
 getgenv().qzxp_suppressNotify = true
 pcall(function() SaveManager:LoadAutoloadConfig() end)
--- exactly one sword driver: a config saved while both were on keeps Unlock All
+
 pcall(function()
     local uaOpt, skOpt = Options.UnlockAllToggle, Options.SkinToggle
     if uaOpt and skOpt and uaOpt.Value and skOpt.Value then
@@ -7466,48 +8295,62 @@ pcall(function()
         Fluent:Notify({Title = "Sword Changer", Content = "Off - this config has Unlock All enabled", Duration = 4})
     end
 end)
--- Apply saved UI options (combat, swords, avatar, visuals, utility, fflags)
+
 pcall(function()
     local _appCfg = getgenv().qzxp_Config
-    if type(_appCfg.Options) == "table" and next(_appCfg.Options) then
+    if type(_appCfg) == "table" and type(_appCfg.Options) == "table" then
+        local entries = {}
         for id, entry in pairs(_appCfg.Options) do
             local opt = Options[id]
-            if opt and opt.SetValue and entry.v ~= nil then
-                local v = entry.v
-                if entry.t == "EnumItem" and type(entry.c) == "string" and type(entry.v) == "string" then
-                    local ok3, e = pcall(function() return Enum[entry.c][entry.v] end)
-                    if ok3 and e then v = e end
-                end
-                if id == "SofDelay" and type(v) == "number" and v > 0.35 then
-                    v = v / 1000
-                end
-                pcall(function() opt:SetValue(v) end)
+            if opt and opt.SetValue then
+                table.insert(entries, {id = id, entry = entry, priority = LOAD_PRIORITY[id] or 50})
             end
+        end
+        table.sort(entries, function(a, b)
+            if a.priority ~= b.priority then return a.priority < b.priority end
+            return tostring(a.id) < tostring(b.id)
+        end)
+        for _, item in ipairs(entries) do
+            local opt = Options[item.id]
+            local value, valid = SaveManager:_decodeConfigOption(opt, item.id, item.entry)
+            if valid then pcall(function() opt:SetValue(value) end) end
         end
     end
 end)
--- The legacy second application pass is unordered; enforce Unlock All priority again.
+
 pcall(function()
     local uaOpt, skOpt = Options.UnlockAllToggle, Options.SkinToggle
     if uaOpt and skOpt and uaOpt.Value and skOpt.Value then skOpt:SetValue(false) end
 end)
 qzxp_autoSaveEnabled = true
 task.delay(1, function()
+    if not Det.alive or qzxp_autoSaveEnabled == nil then return end
     getgenv().qzxp_suppressNotify = false
     Fluent:Notify({Title = "qzxp", Content = "Loaded", Duration = 4})
 end)
 
--- Cleanup
-local _priorCleanupHook = getgenv().qzxp_Cleanup
-getgenv().qzxp_Cleanup = function()
-    pcall(function()
+Life.featureCleanup = function()
+    local ok, err = pcall(function()
+        qzxp_autoSaveEnabled = nil
+        getgenv().qzxp_refreshSwordToken = (tonumber(getgenv().qzxp_refreshSwordToken) or 0) + 1
+        getgenv().qzxp_refreshSwordRunning = false
         Det.alive = false
         Det.resetSF()
         AutoClash.reset()
+        Spam_On, TB_On, AP_On, AutoSpam_On = false, false, false, false
+        pcall(clearAPLockout)
+        for _, sender in pairs(Sender) do
+            if sender.conn then pcall(function() sender.conn:Disconnect() end) end
+        end
         for _, conn in pairs(Det.ballConnections) do pcall(function() conn:Disconnect() end) end
         for _, conn in pairs(Det.apBallConnections or {}) do pcall(function() conn:Disconnect() end) end
         for _, conn in pairs(Det.tbConnections or {}) do pcall(function() conn:Disconnect() end) end
         for child in pairs(_ballAttributeConns) do pcall(_unhookBallAttribute, child) end
+        for ball, originalCanCollide in pairs(_ballCanCollideSet) do
+            pcall(function()
+                if originalCanCollide and ball.Parent and not ball.CanCollide then ball.CanCollide = true end
+            end)
+        end
         for _, connection in ipairs(qzxpUIConnections) do pcall(function() connection:Disconnect() end) end
         for _, conn in ipairs(Det.connections) do pcall(function() conn:Disconnect() end) end
         if getgenv().qzxp_VFXConns then
@@ -7520,6 +8363,7 @@ getgenv().qzxp_Cleanup = function()
                 pcall(function() conn:Enable() end)
             end
         end
+
         getgenv().qzxp_VFXConns = nil
         getgenv().qzxp_VFXHooked = nil
         getgenv().qzxp_VFXDisabled = nil
@@ -7536,24 +8380,7 @@ getgenv().qzxp_Cleanup = function()
             pcall(getgenv().qzxp_StopRender)
             getgenv().qzxp_StopRender = nil
         end
-        if _priorCleanupHook then pcall(_priorCleanupHook); _priorCleanupHook = nil end
         pcall(function() if PRV and PRV.Destroy then PRV.Destroy() end end)
-        local cg = GetSafeUIParent()
-        for _, o in ipairs(cg:GetChildren()) do
-            if o:IsA("ScreenGui") and (o.Name:lower():find("qzxp") or o.Name:lower():find("q_")) then
-                o:Destroy()
-            end
-        end
-        pcall(function()
-            if UA and UA.ready then
-                UA.enabled = false
-                pcall(function() UA:set_category_unlock(false) end)
-                pcall(function() UA:set_modern_unlock(false) end)
-                if UA.shop_api and UA.original_set_equipped then
-                    pcall(function() UA.shop_api.SetEquipped = UA.original_set_equipped end)
-                end
-            end
-        end)
         getgenv().skinChanger = nil; getgenv().skinChangerEnabled = nil
         getgenv().swordModelEnabled = nil; getgenv().swordFXEnabled = nil; getgenv().swordAnimationsEnabled = nil
         getgenv().manualSword = nil; getgenv().manualSwordFX = nil; getgenv().manualSwordAnimations = nil
@@ -7562,12 +8389,14 @@ getgenv().qzxp_Cleanup = function()
         getgenv().slashName = nil; getgenv().updateSword = nil; getgenv().revertSword = nil
         getgenv().saveLastEquippedSword = nil; getgenv().setSkinUI = nil
         getgenv().qzxp_equipSword = nil; getgenv().qzxp_resolveSword = nil
-        getgenv().qzxp_forceEquipSword = nil
+        getgenv().qzxp_forceEquipSword = nil; getgenv().qzxp_removeStaleSwordModels = nil
+        getgenv().qzxp_captureRealSword = nil; getgenv().qzxp_swordBusy = nil
         getgenv().qzxp_avatarUserId = nil
         getgenv().qzxp_resetAPState = nil
-        getgenv().qzxp_Cleanup = nil
         getgenv().qzxp_realSword = nil
     end)
+    if not ok then Life.report("Feature restoration: " .. tostring(err)) end
 end
+Life.initializer = nil
 
 end)
