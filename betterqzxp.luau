@@ -2252,12 +2252,16 @@ local function trackBall(ball)
     end)
 end
 
+local LockEnabled, LockTarget = false, "None"
+
 local findPart, lockResolve = (function()
     local lastPart, lastStamp
 
     local function playerFor(name)
         if not name or name == "" then return nil end
         local clean = name:match("^(.-)%s*%(") or name
+        local exact = Players:FindFirstChild(clean)
+        if exact and exact:IsA("Player") and exact ~= LocalPlayer then return exact end
         for _, pl in ipairs(Players:GetPlayers()) do
             if pl ~= LocalPlayer and (pl.Name == name or pl.Name == clean
                 or pl.DisplayName == name or pl.DisplayName == clean) then
@@ -2314,7 +2318,11 @@ local findPart, lockResolve = (function()
 
     local function resolve(ball)
         local tp = nil
-        if LockTarget ~= "None" then tp = find(LockTarget) end
+        if LockTarget ~= "None" then
+            tp = find(LockTarget)
+            lastPart, lastStamp = tp, tp and os.clock() or nil
+            return tp
+        end
         if not tp and ball then
             local owner = ball:GetAttribute("target")
             if owner and owner ~= LocalPlayer.Name then tp = find(owner) end
@@ -2357,7 +2365,6 @@ local findPart, lockResolve = (function()
     return find, resolve
 end)()
 
-local LockEnabled, LockTarget = false, "None"
 local HLEnabled, HLColor = false, Color3.fromRGB(255, 60, 60)
 
 local LockIndicator = { gui = nil, lines = {} }
@@ -2750,11 +2757,17 @@ end
 
 local function applyParryLock(rcf, mouse, ball)
     if not LockEnabled then return rcf, mouse end
-    local lockedCF = getCurveCF(ball)
     local lockPart = lockResolve(ball)
-    local aimPosition = lockPart and lockPart.Position
-        or (lockedCF.Position + lockedCF.LookVector * 100)
-    local ok, screenPoint = pcall(Camera.WorldToScreenPoint, Camera, aimPosition)
+    if not lockPart or not lockPart.Parent then return rcf, mouse end
+    local cam = Workspace.CurrentCamera or Camera
+    if not cam then return rcf, mouse end
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local origin = root and root.Position or rcf.Position
+    local aimPosition = lockPart.Position
+    if (aimPosition - origin).Magnitude <= 0.001 then return rcf, mouse end
+    local lockedCF = CFrame.new(origin, aimPosition)
+    local ok, screenPoint = pcall(cam.WorldToScreenPoint, cam, aimPosition)
     if ok and screenPoint then
         mouse = {math.floor(screenPoint.X), math.floor(screenPoint.Y)}
     end
@@ -6659,6 +6672,7 @@ do
     local s6 = Tabs.Combat:AddSection("Parry Lock")
     s6:AddToggle("LockToggle", {Title = "Enabled", Default = false, Callback = function(v)
         LockEnabled = v
+        cachedCF, lastCFCalcFrame, _cachedCFBall = nil, -1, nil
         notify({Title = "Lock", Content = v and "On" or "Off", Duration = 2})
     end})
     s6:AddKeybind("LockKey", {Title = "Toggle Key", Default = "L", Callback = function()
@@ -6666,10 +6680,11 @@ do
     end, ChangedCallback = function() end})
     s6:AddDropdown("LockTarget", {Title = "Target", Values = playerList(), Default = "None", Multi = false, Callback = function(v)
         LockTarget = pLookup[v] or "None"
+        cachedCF, lastCFCalcFrame, _cachedCFBall = nil, -1, nil
     end})
     s6:AddKeybind("CursorKey", {Title = "Cursor Lock", Default = "T", Callback = function()
         local t = closestToCursor()
-        if t then LockTarget = t; syncLockDD(); notify({Title = "Lock", Content = t, Duration = 2}) end
+        if t then LockTarget = t; cachedCF, lastCFCalcFrame, _cachedCFBall = nil, -1, nil; syncLockDD(); notify({Title = "Lock", Content = t, Duration = 2}) end
     end, ChangedCallback = function() end})
     s6:AddButton({Title = "Refresh List", Callback = function() syncLockDD() end})
 end
